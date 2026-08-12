@@ -19,7 +19,16 @@ cargo test --features ui
 
 # ARM64 Linux binary for deployment, built in Docker, lands in dist/
 ./scripts/build-strategy.sh strat-micro-recorder-te-binance-spot-btcusdt
+
+# ...which is a name check plus this. Run it directly if you prefer:
+docker buildx build \
+    --platform linux/arm64 \
+    --build-arg BIN=strat-micro-recorder-te-binance-spot-btcusdt \
+    --output type=local,dest=dist \
+    .
 ```
+
+Run `./scripts/build-strategy.sh` with no arguments to list the buildable engine names.
 
 Each engine defaults to the `config.yaml` beside its own `main.rs`; `--config <path>`
 overrides it. Run either engine alone — they find each other over UDP if both are up, and
