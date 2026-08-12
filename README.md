@@ -2,7 +2,7 @@
 
 ## Run
 
-```sh
+```shell
 # Trading engines — headless, one process per data source
 cargo run --release --bin strat-micro-recorder-te-binance-spot-btcusdt
 cargo run --release --bin strat-micro-recorder-te-polymarket-btc-updown-5m
@@ -36,7 +36,7 @@ the Binance engine's `poly_*` columns simply stay empty if the Polymarket one is
 
 Live-network tests are `#[ignore]`d and never run in CI:
 
-```sh
+```shell
 cargo test --test integration -- --ignored --nocapture
 ```
 
