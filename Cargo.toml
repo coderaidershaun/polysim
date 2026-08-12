@@ -1,0 +1,71 @@
+[package]
+name = "polysim"
+version = "0.1.0"
+edition = "2024"
+authors = ["Shaun McDonogh"]
+license = "MIT"
+
+[[bin]]
+name = "strat-micro-recorder-te-binance-spot-btcusdt"
+path = "strategies/strat-micro-recorder/te-binance-spot-btcusdt/main.rs"
+
+[[bin]]
+name = "strat-micro-recorder-te-polymarket-btc-updown-5m"
+path = "strategies/strat-micro-recorder/te-polymarket-btc-updown-5m/main.rs"
+
+[[bin]]
+name = "polysim-ui"
+path = "src/bin/polysim-ui.rs"
+required-features = ["ui"]
+
+[[example]]
+name = "dom-fixture"
+path = "examples/dom-fixture/main.rs"
+required-features = ["ui"]
+
+[[example]]
+name = "poly-probe"
+path = "examples/poly-probe/main.rs"
+
+[[example]]
+name = "poly-recover"
+path = "examples/poly-recover/main.rs"
+
+[features]
+ui = ["dep:eframe"]
+
+[dependencies]
+anyhow = { version = "1.0.104", default-features = false, features = ["std"] }
+arrow-array = { version = "59.1.0", default-features = false }
+arrow-schema = { version = "59.1.0", default-features = false }
+core_affinity = { version = "0.8.3", default-features = false }
+eframe = { version = "=0.35.0", default-features = false, features = ["wgpu", "accesskit", "default_fonts"], optional = true }
+futures-util = { version = "0.3.33", default-features = false, features = ["sink", "std"] }
+k256 = { version = "0.14.0", default-features = false, features = ["ecdsa"] }
+parquet = { version = "59.1.0", default-features = false, features = ["arrow", "zstd"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
+ring = { version = "0.17.14", default-features = false }
+rtrb = { version = "0.3.4", default-features = false }
+serde = { version = "1.0.228", default-features = false, features = ["std", "derive"] }
+serde-saphyr = { version = "0.0.29", default-features = false, features = ["deserialize"] }
+serde_json = { version = "1.0.150", default-features = false, features = ["std"] }
+thiserror = { version = "2.0.18", default-features = false }
+tiny-keccak = { version = "2.0.2", default-features = false, features = ["keccak"] }
+tokio = { version = "1.53.0", default-features = false, features = ["macros", "net", "rt", "rt-multi-thread", "signal", "time"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+
+[dev-dependencies]
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }
+
+[[test]]
+name = "fitness"
+path = "tests/fitness/main.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+
+[profile.deploy]
+inherits = "release"
+lto = "fat"
+codegen-units = 1

@@ -1,0 +1,14 @@
+.claude
+.scratch
+.work
+/target
+/dist
+/logs
+/data
+# The engine's surviving position. Machine state, never source — and committing one engine's
+# position would restore it onto every checkout of this repo.
+/exposure
+.venv
+.firecrawl
+# Live exchange credentials. Never tracked — config names the env vars, never holds the secret.
+.env
