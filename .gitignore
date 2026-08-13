@@ -9,6 +9,7 @@
 # position would restore it onto every checkout of this repo.
 /exposure
 .venv
+__pycache__/
 .firecrawl
 # Live exchange credentials. Never tracked — config names the env vars, never holds the secret.
 .env
