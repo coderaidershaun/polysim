@@ -58,6 +58,8 @@ Here is a general high level view of how everything connects together.
 
 ![Deterministic single-thread trading architecture](static/architecture.jpeg)
 
+How it actually works: one thread — a single line of execution on one core — owns the entire picture of the market and our orders, and nothing else is ever allowed to touch that picture. Around it sit small helpers: one per exchange connection, translating whatever Binance or Polymarket send into simple fixed-size messages and dropping them onto queues; even the clock is just a helper posting a tick message a few times a second. The main thread loops forever: take the oldest waiting message, update the picture, let the strategy react, decide which orders it now wants. It never talks to an exchange itself — it queues "place this, cancel that" instructions for a helper to send, and the exchange's answers (accepted, filled, rejected) come back as ordinary messages like everything else. Writing files happens on separate threads, fed the same way, so the main loop never waits on a disk or the network. Because only one thread touches the state, there are no locks and no race conditions; and because the state changes only in response to messages, in order, recording those messages and replaying them later reproduces the run exactly — which is what makes the simulations and the collected data trustworthy.
+
 ### Adapter anatomy
 
 The two halves of a venue integration are deliberately different shapes. Execution is a hard seam: a chassis owns the session lifecycle, a trait carries the venue's physics, and the money machinery is composed — never re-implemented. Market data is a convention: each venue writes its own loop from shared helpers, and the only promise is `InboundMessage` on a ring.
