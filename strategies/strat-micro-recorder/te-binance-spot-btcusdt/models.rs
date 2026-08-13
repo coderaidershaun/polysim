@@ -304,6 +304,14 @@ pub(crate) fn effective_log_vol(egarch: Option<f64>, realised: Option<f64>) -> O
     }
 }
 
+pub(crate) const BPS: f64 = 1e4;
+
+pub(crate) const MIN_QUOTE_DISTANCE_BPS: f64 = 0.5;
+
+pub(crate) fn ticks_per_bp(mid: f64, tick: Price) -> f64 {
+    mid / (BPS * tick.to_f64())
+}
+
 /// The live market inputs a Guéant solve needs, each `None` until its source has an opinion.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GueantInputs {
@@ -316,7 +324,7 @@ pub(crate) struct GueantInputs {
 }
 
 /// One instrument's Guéant emission context for one spin: everything that does not vary by side,
-/// already rescaled into the tick space the closed form solves in. Not a quote —
+/// already rescaled into the bps space the closed form solves in. Not a quote —
 /// the depths and the snapped price are per side, and come out of [`GueantScale::emit_side`].
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GueantScale {
@@ -325,20 +333,21 @@ pub(crate) struct GueantScale {
     tick: Price,
     /// S̃ = S/τ, the fair price as a continuous tick index — S is the mid, not the microprice.
     fair_ticks: f64,
-    /// σ̃ in ticks per √second.
-    pub(crate) sigma_ticks: f64,
-    /// Mid-to-touch distance in ticks, the offset A has to be re-anchored across.
-    half_spread_ticks: f64,
+    ticks_per_bp: f64,
+    /// σ̃ in bps per √second.
+    pub(crate) sigma_bps: f64,
+    /// Mid-to-touch distance in bps, the offset A has to be re-anchored across.
+    half_spread_bps: f64,
     /// q, the signed inventory the quote leans against — the engine's ledger, from real fills.
     inventory: f64,
 }
 
 impl GueantScale {
-    /// `None` unless every shared input is live. The two rescales it performs are where the model's
-    /// classic scale errors live: σ arrives as a per-second LOG rate, so it becomes an
-    /// absolute price rate by multiplying by S exactly once and then a tick rate by dividing by the
-    /// grid — which is S̃ — and the intensity's A is fitted at the touch while δ is measured from S,
-    /// half a spread further in; [`SideEstimate::a_mid_per_sec`] carries that re-anchoring.
+    /// `None` unless every shared input is live. The rescale it performs is where the model's
+    /// classic scale errors live: σ arrives as a per-second LOG rate — already a relative rate, so
+    /// bps is one multiply, applied exactly once — and the intensity's A is fitted at the touch
+    /// while δ is measured from S, half a spread further in; [`SideEstimate::a_mid_per_sec`]
+    /// carries that re-anchoring, in the tick space the estimator fitted k in.
     pub(crate) fn from_inputs(
         params: GueantParams,
         features: Features,
@@ -346,15 +355,14 @@ impl GueantScale {
     ) -> Option<Self> {
         let (tick, mid, spread, log_vol) =
             (inputs.tick?, inputs.mid?, inputs.spread?, inputs.log_vol?);
-        let grid = tick.to_f64();
-        let fair_ticks = mid / grid;
         Some(Self {
             params,
             features,
             tick,
-            fair_ticks,
-            sigma_ticks: log_vol * fair_ticks,
-            half_spread_ticks: (spread / 2.0) / grid,
+            fair_ticks: mid / tick.to_f64(),
+            ticks_per_bp: ticks_per_bp(mid, tick),
+            sigma_bps: log_vol * BPS,
+            half_spread_bps: (spread / 2.0) / mid * BPS,
             inventory: inputs.inventory,
         })
     }
@@ -373,29 +381,31 @@ impl GueantScale {
         estimate: Option<SideEstimate>,
     ) -> Option<Price> {
         let estimate = estimate.filter(|estimate| !estimate.is_stale)?;
-        let a_mid_per_sec = estimate.a_mid_per_sec(self.half_spread_ticks);
-        let coefficients =
-            self.params
-                .coefficients(a_mid_per_sec, estimate.k_per_tick, self.sigma_ticks)?;
-        let continuous_ticks = match side {
-            QuoteSide::Bid => self.fair_ticks - coefficients.bid_depth(self.inventory),
-            QuoteSide::Ask => self.fair_ticks + coefficients.ask_depth(self.inventory),
-        };
-        // Nearest tick, not the calculator's outward floor/ceil: this is a RECORDED column, and the
-        // honest figure for research is the grid point the continuous price is closest to rather than
-        // one bent by an execution policy. It costs nothing at the venue — the engine snaps a bid
-        // down and an ask up onto the same grid this already sits on, from the same `tick_size`, so
-        // the snap is idempotent here and the price recorded is the price declared.
-        // Then clamped to fair: a large enough inventory drives δ(q) negative and would put the ask
-        // below the mid (or the bid above it) — a passive quote never crosses its own fair, so the
-        // skew saturates at the last grid tick on the quote's side of the mid.
+        let half_spread_ticks = self.half_spread_bps * self.ticks_per_bp;
+        let a_mid_per_sec = estimate.a_mid_per_sec(half_spread_ticks);
+        let k_per_bp = estimate.k_per_tick * self.ticks_per_bp;
+        let coefficients = self
+            .params
+            .coefficients(a_mid_per_sec, k_per_bp, self.sigma_bps)?;
+        let depth_ticks = match side {
+            QuoteSide::Bid => coefficients.bid_depth(self.inventory),
+            QuoteSide::Ask => coefficients.ask_depth(self.inventory),
+        } * self.ticks_per_bp;
+        // Nearest tick, then clamped to the far edge of the minimum-distance band: the strategy
+        // never quotes tighter than MIN_QUOTE_DISTANCE_BPS from fair, which also stops an
+        // inventory-skewed δ(q) from crossing its own mid — the old fair-side clamp is the band
+        // edge's special case. The engine snaps a bid down and an ask up onto the same grid this
+        // already sits on, so the snap is idempotent and the price recorded is the price declared.
+        let min_distance_ticks = MIN_QUOTE_DISTANCE_BPS * self.ticks_per_bp;
         let tick_index = match side {
-            QuoteSide::Bid => (continuous_ticks.round() as i64).min(self.fair_ticks.floor() as i64),
-            QuoteSide::Ask => (continuous_ticks.round() as i64).max(self.fair_ticks.ceil() as i64),
+            QuoteSide::Bid => ((self.fair_ticks - depth_ticks).round() as i64)
+                .min((self.fair_ticks - min_distance_ticks).floor() as i64),
+            QuoteSide::Ask => ((self.fair_ticks + depth_ticks).round() as i64)
+                .max((self.fair_ticks + min_distance_ticks).ceil() as i64),
         };
         let GueantSideColumns {
-            half_spread_ticks: half_spread,
-            skew_ticks: skew,
+            half_spread_bps: half_spread,
+            skew_bps: skew,
             price,
         } = self.features.gueant(side);
         ctx.emit(half_spread, instrument, coefficients.half_spread());
@@ -418,13 +428,16 @@ pub(crate) fn emit_side_intensity(
     columns: IntensityColumns,
     instrument: InstrumentId,
     side: Option<SideEstimate>,
+    ticks_per_bp: Option<f64>,
 ) {
     let IntensityColumns { a, k } = columns;
     let Some(estimate) = side.filter(|estimate| !estimate.is_stale) else {
         return;
     };
     ctx.emit(a, instrument, estimate.a_per_sec);
-    ctx.emit(k, instrument, estimate.k_per_tick);
+    if let Some(scale) = ticks_per_bp {
+        ctx.emit(k, instrument, estimate.k_per_tick * scale);
+    }
 }
 
 /// Hawkes trade-arrival kernel. Refit on arrival cadence, record λ + params. Resident O(1) live intensity.

@@ -83,6 +83,17 @@ polysim::features! {
         poly_next_up_intensity_k_ask,
         poly_next_up_buy_vol,
         poly_next_up_sell_vol,
+        obi_half_bp,
+        realised_vol_st_bps,
+        intensity_k_bid_per_bps,
+        intensity_k_ask_per_bps,
+        gueant_bid_half_spread_bps,
+        gueant_ask_half_spread_bps,
+        gueant_bid_skew_bps,
+        gueant_ask_skew_bps,
+        gueant_sigma_bps,
+        kyle_lambda_bps_per_notional,
+        kyle_one_bp_notional,
     }
     pub(crate) const FEATURE_NAMES;
 }
@@ -118,8 +129,8 @@ pub(crate) struct HawkesColumns {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GueantSideColumns {
-    pub(crate) half_spread_ticks: FeatureId,
-    pub(crate) skew_ticks: FeatureId,
+    pub(crate) half_spread_bps: FeatureId,
+    pub(crate) skew_bps: FeatureId,
     pub(crate) price: FeatureId,
 }
 
@@ -173,13 +184,13 @@ impl Features {
     pub(crate) fn gueant(&self, side: QuoteSide) -> GueantSideColumns {
         match side {
             QuoteSide::Bid => GueantSideColumns {
-                half_spread_ticks: self.gueant_bid_half_spread_ticks,
-                skew_ticks: self.gueant_bid_skew_ticks,
+                half_spread_bps: self.gueant_bid_half_spread_bps,
+                skew_bps: self.gueant_bid_skew_bps,
                 price: self.gueant_bid_price,
             },
             QuoteSide::Ask => GueantSideColumns {
-                half_spread_ticks: self.gueant_ask_half_spread_ticks,
-                skew_ticks: self.gueant_ask_skew_ticks,
+                half_spread_bps: self.gueant_ask_half_spread_bps,
+                skew_bps: self.gueant_ask_skew_bps,
                 price: self.gueant_ask_price,
             },
         }
@@ -189,11 +200,11 @@ impl Features {
         match side {
             QuoteSide::Bid => IntensityColumns {
                 a: self.intensity_a_bid_per_sec,
-                k: self.intensity_k_bid_per_tick,
+                k: self.intensity_k_bid_per_bps,
             },
             QuoteSide::Ask => IntensityColumns {
                 a: self.intensity_a_ask_per_sec,
-                k: self.intensity_k_ask_per_tick,
+                k: self.intensity_k_ask_per_bps,
             },
         }
     }

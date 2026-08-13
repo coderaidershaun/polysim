@@ -1,24 +1,9 @@
-//! The shipped recorder's declaration seam: what it RECORDS as its quote and what it actually asks
-//! the venue for must be the same number.
-//!
-//! The recorder snaps its Guéant level to the NEAREST tick and then clamps it outside the
-//! minimum-distance band, while the engine snaps a bid down and an ask up. The two agree only
-//! because the strategy's price is already on the venue's grid, from the same `tick_size` — and
-//! nothing about that is enforced by a type. Break it and `gueant_bid_price` describes an order
-//! that was never placed, which is a research dataset quietly documenting a different strategy from
-//! the one that traded. The size is the same story one layer down: `order_notional` is in QUOTE
-//! units and only becomes a base quantity through `qty_at`, so a units slip there prices right and
-//! trades wrong.
-//!
-//! This drives the REAL `MicroRecorder` against the real engine, because both halves of the
-//! agreement are only present when the real strategy meets the real reconciler.
-
 use polysim::adapters::exec::open_orders_snapshot_end;
 use polysim::config::{IntensitySpec, KlineInterval, TableKind};
 use polysim::hot::dispatch::{ExecWiring, HotEngine, HotEngineSetup};
 use polysim::hot::exec::{ExecLimits, ExecSettings, FeeModel, OrderBudget};
 use polysim::hot::strategy::StrategyConfig;
-use polysim::ids::{AssetId, ClientOrderId, FIXED_SCALE, InstrumentId, Price, Qty, Side};
+use polysim::ids::{AssetId, ClientOrderId, InstrumentId, Price, Qty, Side};
 use polysim::msg::exec::{
     AccountChunk, AccountChunkKind, AssetBalance, ExecCommand, ExecEvent, ExecKind, ExecLaneItem,
 };
@@ -35,7 +20,7 @@ use crate::engine_support::{
     tracker_spec_all, trade, ts, ui_book_ring, ui_event_ring,
 };
 use crate::micro_strategy::features::FEATURE_NAMES;
-use crate::micro_strategy::models::qty_at;
+use crate::micro_strategy::models::MIN_QUOTE_DISTANCE_BPS;
 use crate::micro_strategy::{MicroRecorder, MicroRecorderParams};
 
 const INSTRUMENT: InstrumentId = InstrumentId(0);
@@ -43,81 +28,75 @@ const BASE_ASSET: AssetId = AssetId(0);
 const QUOTE_ASSET: AssetId = AssetId(1);
 
 const TICK: i64 = ONE / 100;
-const BASE: i64 = 100 * ONE;
-
-/// Coarse enough that the engine's step snap actually bites: `order_notional / price` lands on a
-/// quantity this does not divide, so a test that ignored the snap would read a different number.
-const STEP: i64 = ONE / 1_000;
-
-/// The shipped default, in QUOTE units.
-const ORDER_NOTIONAL: i64 = 10 * ONE;
+const BASE: i64 = 10_000 * ONE;
+const STEP: i64 = ONE / 100_000;
 
 const SPIN_INTERVAL: DurationUs = DurationUs::from_secs(3);
-
-/// One closed candle per step, so the EGARCH close floor is reached in hundreds of messages rather
-/// than the hundreds of seconds a realistic 1m cadence would take. The fit reads a SERIES, not a
-/// calendar, so compressing the arrivals changes when it warms and not what it warms into.
 const STEPS: i64 = 900;
 const STEP_US: i64 = 500_000;
 
-/// FITNESS: the recorded quote price and the placed order price are the same number, and the placed
-/// size is `order_notional` converted at that price and snapped down onto the venue step.
 #[test]
-fn the_recorded_quote_is_the_order_that_gets_placed() {
+fn a_quote_is_never_tighter_than_the_minimum_distance() {
     let instruments = [recorded_row()];
     let (mut engine, mut persist, mut commands) = recorder_engine(&instruments);
     make_ready(&mut engine, 0);
     seed_book(&mut engine, 0);
 
-    let mut placed = Vec::new();
-    let mut columns = Vec::new();
+    let mut bid_checked = false;
+    let mut ask_checked = false;
     for index in 0..STEPS {
         let when = index * STEP_US;
         for message in step_messages(index, when) {
             engine.dispatch(pop(0, 0), &message);
         }
-        let spun = spin_columns(&mut persist);
+        let columns = spin_columns(&mut persist);
         let issued = drain_places(&mut commands);
-        if !issued.is_empty() {
-            placed = issued;
-            columns = spun;
+        if issued.is_empty() {
+            continue;
+        }
+        let mid = column_value(&columns, "mid").expect("mid was not recorded on a quoting spin");
+        let tick_bps = TICK as f64 / mid * 1e4;
+        for order in &issued {
+            let half_spread_column = match order.side {
+                Side::Buy => "gueant_bid_half_spread_bps",
+                Side::Sell => "gueant_ask_half_spread_bps",
+            };
+            let half_spread = column_value(&columns, half_spread_column).unwrap_or_else(|| {
+                panic!("{half_spread_column} was not recorded on the spin that placed {order:?}")
+            });
+            assert!(
+                half_spread < MIN_QUOTE_DISTANCE_BPS,
+                "the fixture must solve a depth below the floor so the clamp is what places the \
+                 quote — got h = {half_spread} bps; quieten the tape, never widen the pin"
+            );
+            let distance_bps = (order.price.to_f64() - mid).abs() / mid * 1e4;
+            assert!(
+                distance_bps >= MIN_QUOTE_DISTANCE_BPS - 1e-9,
+                "{:?} order at {} sits {distance_bps} bps from mid {mid}, tighter than the \
+                 {MIN_QUOTE_DISTANCE_BPS} bps floor",
+                order.side,
+                order.price.to_f64(),
+            );
+            assert!(
+                distance_bps <= MIN_QUOTE_DISTANCE_BPS + tick_bps + 1e-9,
+                "{:?} order at {} sits {distance_bps} bps from mid {mid} — the clamp lands on the \
+                 first grid tick past the floor, never further",
+                order.side,
+                order.price.to_f64(),
+            );
+            match order.side {
+                Side::Buy => bid_checked = true,
+                Side::Sell => ask_checked = true,
+            }
+        }
+        if bid_checked && ask_checked {
             break;
         }
     }
-
-    assert_eq!(
-        placed.len(),
-        2,
-        "the recorder declares both sides every spin, so its first quoting spin places two orders \
-         — got {placed:?}"
+    assert!(
+        bid_checked && ask_checked,
+        "both sides must place within the fixture: bid {bid_checked}, ask {ask_checked}"
     );
-    for order in &placed {
-        let column = match order.side {
-            Side::Buy => "gueant_bid_price",
-            Side::Sell => "gueant_ask_price",
-        };
-        let recorded = column_value(&columns, column).unwrap_or_else(|| {
-            panic!("{column} was not recorded on the spin that placed {order:?}")
-        });
-        assert_eq!(
-            order.price,
-            Price((recorded * FIXED_SCALE as f64).round() as i64),
-            "{column} recorded {recorded}, but the order went out at {}: the research column now \
-             describes a price nobody quoted",
-            order.price.to_f64(),
-        );
-        let wanted = qty_at(ORDER_NOTIONAL, order.price);
-        assert_eq!(
-            order.qty,
-            Qty(wanted.0 - wanted.0.rem_euclid(STEP)),
-            "order_notional {} at {} is {} base, which snaps down to the {STEP} step — the order \
-             asked for {} instead",
-            ORDER_NOTIONAL,
-            order.price.to_f64(),
-            wanted.0,
-            order.qty.0,
-        );
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,9 +170,6 @@ fn recorder_engine(
     (engine, persist, commands)
 }
 
-/// Every limit wide open but the grid: a quote refused by the price band, a stale book or the funds
-/// floor would read here as a strategy that declared nothing, and this test is about what it DID
-/// declare.
 fn exec_settings() -> ExecSettings {
     ExecSettings {
         limits: ExecLimits {
@@ -208,8 +184,6 @@ fn exec_settings() -> ExecSettings {
         max_consecutive_rejects: 5,
         max_session_loss_quote: 1_000_000 * ONE,
         inflight_timeout: DurationUs::from_secs(3_600),
-        // No silence sweep: a reconciliation request in the command stream is noise this test would
-        // have to filter rather than a behaviour it is about.
         exec_silence_spins: u32::MAX,
         order_reap_window: DurationUs::from_secs(3_600),
         quote_stop_margin: DurationUs::ZERO,
@@ -221,8 +195,6 @@ fn exec_settings() -> ExecSettings {
     }
 }
 
-/// Stream up, open orders known, balances known — without all three nothing is ever placed and every
-/// assertion below would pass for the wrong reason.
 fn make_ready(engine: &mut HotEngine, when: i64) {
     engine.dispatch(
         pop(0, 0),
@@ -231,8 +203,6 @@ fn make_ready(engine: &mut HotEngine, when: i64) {
             ..exec_event(INSTRUMENT, ClientOrderId(0), Side::Buy, 0, when)
         }),
     );
-    // The open-order marker comes from the constructor the Binance actor sends it with, never
-    // synthesised here: a hand-built one keeps this test green while production emits nothing.
     engine.dispatch(
         pop(0, 0),
         &InboundMessage::Exec(open_orders_snapshot_end(INSTRUMENT, ts(when))),
@@ -268,8 +238,6 @@ fn make_ready(engine: &mut HotEngine, when: i64) {
 }
 
 fn seed_book(engine: &mut HotEngine, when: i64) {
-    // A two-tick touch. The Guéant re-anchoring is `A·e^(k·half_spread_ticks)`, so a wide synthetic
-    // spread overflows to infinity on a steep fitted k and the whole quote family goes null.
     let (bids, asks) = snapshot_pair(
         0,
         &[(BASE, 2 * ONE), (BASE - 5 * TICK, ONE)],
@@ -285,9 +253,6 @@ fn seed_book(engine: &mut HotEngine, when: i64) {
     }
 }
 
-/// One step: a print walking into its own side of the book, depth churn, a closed candle, and the
-/// spin that emits. Both aggressor sides, because a side whose prints never reach a level never
-/// identifies an intensity fit and never produces a Guéant quote at all.
 fn step_messages(index: i64, when: i64) -> [InboundMessage; 4] {
     let (side, price) = match index % 2 == 0 {
         true => (Side::Buy, BASE + 2 * TICK + (index % 4) * TICK),

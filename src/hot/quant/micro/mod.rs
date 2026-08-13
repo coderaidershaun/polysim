@@ -4,6 +4,7 @@ mod orderbook_resilience;
 
 pub use orderbook_resilience::{OrderbookResilience, ResilienceSample};
 
+use crate::hot::quant::BPS;
 use crate::ids::Price;
 use crate::msg::inbound::Level;
 
@@ -35,6 +36,45 @@ pub fn spread(best_bid: Price, best_ask: Price) -> f64 {
 #[inline]
 pub fn mid(best_bid: Price, best_ask: Price) -> f64 {
     (best_bid.to_f64() + best_ask.to_f64()) / 2.0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PriceBand {
+    pub low: f64,
+    pub high: f64,
+}
+
+impl PriceBand {
+    #[inline]
+    pub fn around(mid: f64, half_width_bps: f64) -> Self {
+        let half_width = mid * half_width_bps / BPS;
+        Self {
+            low: mid - half_width,
+            high: mid + half_width,
+        }
+    }
+}
+
+#[inline]
+pub fn banded_imbalance(bids: &[Level], asks: &[Level], band: PriceBand) -> f64 {
+    let bid_qty = qty_to_edge(bids, |price| price <= band.low);
+    let ask_qty = qty_to_edge(asks, |price| price >= band.high);
+    let total_qty = bid_qty + ask_qty;
+    if total_qty <= 0.0 {
+        return 0.0;
+    }
+    (bid_qty - ask_qty) / total_qty
+}
+
+fn qty_to_edge(levels: &[Level], is_at_or_past_edge: impl Fn(f64) -> bool) -> f64 {
+    let mut total = 0.0;
+    for level in levels {
+        total += level.qty.to_f64();
+        if is_at_or_past_edge(level.price.to_f64()) {
+            break;
+        }
+    }
+    total
 }
 
 /// Imbalance = (bid_qty - ask_qty) / total, ∈ [-1, 1] (0.0 if empty).

@@ -3,7 +3,7 @@
 use polysim::config::{Instruments, StrategySpec, TableKind};
 use polysim::hot::quant::hawkes::HawkesChoice;
 use polysim::hot::quant::liquidity::KylesLambdaSpec;
-use polysim::hot::quant::micro::ResilienceSample;
+use polysim::hot::quant::micro::{PriceBand, ResilienceSample, banded_imbalance};
 use polysim::hot::quant::pricing::{GueantParams, Objective};
 use polysim::hot::quant::toxicity::vpin;
 use polysim::hot::quant::volatility::Returns;
@@ -26,13 +26,15 @@ mod params;
 
 use features::{FEATURE_NAMES, Features, QuoteSide};
 use models::{
-    GueantInputs, GueantScale, InstrumentSetup, InstrumentState, RiskBudget, effective_log_vol,
-    emit_side_hawkes, emit_side_intensity, emit_side_markouts, gated_realised_vol, level_qty_at,
-    qty_at,
+    BPS, GueantInputs, GueantScale, InstrumentSetup, InstrumentState, MIN_QUOTE_DISTANCE_BPS,
+    RiskBudget, effective_log_vol, emit_side_hawkes, emit_side_intensity, emit_side_markouts,
+    gated_realised_vol, level_qty_at, qty_at, ticks_per_bp,
 };
 pub use params::MicroRecorderParams;
 
-const GAMMA_TICK: f64 = 0.01;
+const GAMMA_BPS: f64 = 10.0;
+
+const OBI_BAND_HALF_WIDTH_BPS: f64 = MIN_QUOTE_DISTANCE_BPS;
 
 const OBJECTIVE: Objective = Objective::InventoryPenalty;
 
@@ -82,7 +84,7 @@ impl StrategyConfig for MicroRecorder {
             spin_interval: engine.spin_interval,
             features: None,
             filter: spec.instruments.clone(),
-            gueant: GueantParams::new(GAMMA_TICK, spec.params.order_notional, OBJECTIVE),
+            gueant: GueantParams::new(GAMMA_BPS, spec.params.order_notional, OBJECTIVE),
             order_notional: (spec.params.order_notional * FIXED_SCALE as f64).round() as i64,
             by_instrument: Vec::new(),
             link_target: None,
@@ -285,17 +287,20 @@ impl Strategy for MicroRecorder {
             instrument,
             estimate.lambda,
         );
-        ctx.emit(
-            features.kyle_lambda_ticks_per_notional,
-            instrument,
-            estimate.lambda_tick,
-        );
         ctx.emit(features.kyle_intercept, instrument, estimate.intercept);
-        ctx.emit_present(
-            features.kyle_one_tick_notional,
-            instrument,
-            estimate.one_tick_flow,
-        );
+        if let Some(mid) = mid_now {
+            let lambda_bps = estimate.lambda / mid * BPS;
+            ctx.emit(
+                features.kyle_lambda_bps_per_notional,
+                instrument,
+                lambda_bps,
+            );
+            ctx.emit_present(
+                features.kyle_one_bp_notional,
+                instrument,
+                Some(1.0 / lambda_bps).filter(|flow| flow.is_finite() && *flow > 0.0),
+            );
+        }
     }
 }
 
@@ -372,8 +377,25 @@ fn record_spin(
     ctx.emit_present(features.mid, instrument, mid);
     ctx.emit_present(features.microprice, instrument, microprice);
     ctx.emit_present(features.imbalance, instrument, imbalance);
+    let book = ctx.book(instrument);
+    let obi = (book.state() == BookState::Valid)
+        .then(|| book.mid())
+        .flatten()
+        .map(|book_mid| {
+            banded_imbalance(
+                book.bids(),
+                book.asks(),
+                PriceBand::around(book_mid, OBI_BAND_HALF_WIDTH_BPS),
+            )
+        });
+    ctx.emit_present(features.obi_half_bp, instrument, obi);
     ctx.emit_present(features.egarch_vol_lt, instrument, egarch_vol);
     ctx.emit_present(features.realised_vol_st, instrument, realised_st);
+    ctx.emit_present(
+        features.realised_vol_st_bps,
+        instrument,
+        realised_st.map(|vol| vol * BPS),
+    );
     if let Some(estimate) = model.estimate {
         ctx.emit(features.egarch_omega, instrument, estimate.omega);
         ctx.emit(features.egarch_gamma, instrument, estimate.gamma);
@@ -394,18 +416,23 @@ fn record_spin(
         instrument,
         model.resilience_window.mean(),
     );
+    let intensity_scale = mid
+        .zip(model.tick)
+        .map(|(mid, tick)| ticks_per_bp(mid, tick));
     if let Some(estimate) = intensity {
         emit_side_intensity(
             ctx,
             features.intensity(QuoteSide::Bid),
             instrument,
             estimate.bid,
+            intensity_scale,
         );
         emit_side_intensity(
             ctx,
             features.intensity(QuoteSide::Ask),
             instrument,
             estimate.ask,
+            intensity_scale,
         );
     }
     if mid.is_some() {
@@ -427,7 +454,7 @@ fn record_spin(
     let ask_fit = intensity.and_then(|fit| fit.ask);
     let (bid_model, ask_model) = match scale {
         Some(scale) => {
-            ctx.emit(features.gueant_sigma_ticks, instrument, scale.sigma_ticks);
+            ctx.emit(features.gueant_sigma_bps, instrument, scale.sigma_bps);
             (
                 scale.emit_side(ctx, instrument, QuoteSide::Bid, bid_fit),
                 scale.emit_side(ctx, instrument, QuoteSide::Ask, ask_fit),
@@ -444,10 +471,10 @@ fn record_spin(
     let ask_quote = ask_model.filter(|_| !budget.would_breach(exposure_quote, Side::Sell));
     polysim::strategy_info!(
         ctx,
-        "gueant i{} in: mid={mid:?} spread={spread:?} log_vol={log_vol:?} sigma_ticks={:?} \
+        "gueant i{} in: mid={mid:?} spread={spread:?} log_vol={log_vol:?} sigma_bps={:?} \
          a_bid={:?} k_bid={:?} a_ask={:?} k_ask={:?}",
         instrument.0,
-        scale.map(|scale| scale.sigma_ticks),
+        scale.map(|scale| scale.sigma_bps),
         bid_fit.map(|fit| fit.a_per_sec),
         bid_fit.map(|fit| fit.k_per_tick),
         ask_fit.map(|fit| fit.a_per_sec),

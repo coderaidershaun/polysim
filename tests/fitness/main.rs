@@ -110,6 +110,7 @@ mod position_projection;
 mod quant;
 mod raw_recorder;
 mod reconnect_backoff;
+mod recorder_min_distance;
 mod recorder_quotes;
 mod rest_quiet;
 mod risk_gate;

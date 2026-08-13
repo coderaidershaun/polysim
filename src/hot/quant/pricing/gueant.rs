@@ -1,4 +1,5 @@
-//! Guéant-Lehalle-Fernandez-Tapia optimal market-making quotes (tick-space depths -> executable prices).
+//! Guéant-Lehalle-Fernandez-Tapia optimal market-making quotes. Depths are in the caller's one
+//! shared depth unit (ticks, bps, ...); only `QuoteCoefficients::quote` is tick-specific.
 
 use crate::ids::Price;
 
@@ -11,52 +12,52 @@ pub enum Objective {
     InventoryPenalty,
 }
 
-/// Maker's strategy choices (tick units); risk-budget decisions.
+/// Maker's strategy choices (caller's depth unit); risk-budget decisions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GueantParams {
-    gamma_tick: f64,
+    gamma: f64,
     order_size: f64,
     objective: Objective,
 }
 
 impl GueantParams {
-    /// gamma_tick = γ̃ (inverse tick-wealth risk aversion); order_size = Δ (inventory shock per fill).
+    /// gamma = γ̃ (inverse depth-unit-wealth risk aversion); order_size = Δ (inventory shock per fill).
     /// # Panics
-    /// When gamma_tick or order_size non-finite or <=0 (config bug, not market condition).
-    pub fn new(gamma_tick: f64, order_size: f64, objective: Objective) -> Self {
+    /// When gamma or order_size non-finite or <=0 (config bug, not market condition).
+    pub fn new(gamma: f64, order_size: f64, objective: Objective) -> Self {
         assert!(
-            gamma_tick.is_finite() && gamma_tick > 0.0,
-            "gueant gamma_tick must be finite and positive, got {gamma_tick}"
+            gamma.is_finite() && gamma > 0.0,
+            "gueant gamma must be finite and positive, got {gamma}"
         );
         assert!(
             order_size.is_finite() && order_size > 0.0,
             "gueant order_size must be finite and positive, got {order_size}"
         );
         Self {
-            gamma_tick,
+            gamma,
             order_size,
             objective,
         }
     }
 
-    /// Coefficients from live estimates (A, sigma, k same time basis; sigma absolute).
-    /// Returns None if inputs invalid or closed form overflows.
+    /// Coefficients from live estimates (A, sigma, k same time basis and one shared depth unit;
+    /// sigma absolute). Returns None if inputs invalid or closed form overflows.
     pub fn coefficients(
         &self,
         a_per_sec: f64,
-        k_per_tick: f64,
-        sigma_ticks_per_sqrt_sec: f64,
+        k_per_depth: f64,
+        sigma_per_sqrt_sec: f64,
     ) -> Option<QuoteCoefficients> {
         let is_positive_finite = |value: f64| value.is_finite() && value > 0.0;
         if !(is_positive_finite(a_per_sec)
-            && is_positive_finite(k_per_tick)
-            && is_positive_finite(sigma_ticks_per_sqrt_sec))
+            && is_positive_finite(k_per_depth)
+            && is_positive_finite(sigma_per_sqrt_sec))
         {
             return None;
         }
-        let (c1, c2) = self.c1_c2(a_per_sec, k_per_tick);
-        let half_spread = c1 + 0.5 * self.order_size * sigma_ticks_per_sqrt_sec * c2;
-        let skew_per_inventory = sigma_ticks_per_sqrt_sec * c2;
+        let (c1, c2) = self.c1_c2(a_per_sec, k_per_depth);
+        let half_spread = c1 + 0.5 * self.order_size * sigma_per_sqrt_sec * c2;
+        let skew_per_inventory = sigma_per_sqrt_sec * c2;
         if !(half_spread.is_finite() && skew_per_inventory.is_finite()) {
             return None;
         }
@@ -68,29 +69,29 @@ impl GueantParams {
         })
     }
 
-    fn c1_c2(&self, a_per_sec: f64, k_per_tick: f64) -> (f64, f64) {
-        let denom = 2.0 * a_per_sec * self.order_size * k_per_tick;
+    fn c1_c2(&self, a_per_sec: f64, k_per_depth: f64) -> (f64, f64) {
+        let denom = 2.0 * a_per_sec * self.order_size * k_per_depth;
         match self.objective {
             Objective::InventoryPenalty => {
-                let c1 = 1.0 / k_per_tick;
-                let c2 = (self.gamma_tick * std::f64::consts::E / denom).sqrt();
+                let c1 = 1.0 / k_per_depth;
+                let c2 = (self.gamma * std::f64::consts::E / denom).sqrt();
                 (c1, c2)
             }
             Objective::CaraUtility => {
-                let xi_delta = self.gamma_tick * self.order_size;
-                let ratio = xi_delta / k_per_tick;
+                let xi_delta = self.gamma * self.order_size;
+                let ratio = xi_delta / k_per_depth;
                 // log1p preserves limit ξΔ/k->0: c1->1/k, c2 exponent->1 (Model B's e factor).
                 let log1p_ratio = ratio.ln_1p();
                 let c1 = log1p_ratio / xi_delta;
-                let exponent = (k_per_tick / xi_delta + 1.0) * log1p_ratio;
-                let c2 = (self.gamma_tick / denom * exponent.exp()).sqrt();
+                let exponent = (k_per_depth / xi_delta + 1.0) * log1p_ratio;
+                let c2 = (self.gamma / denom * exponent.exp()).sqrt();
                 (c1, c2)
             }
         }
     }
 }
 
-/// Solved depth coefficients (ticks): h (half-spread), j (per-inventory skew), c1, c2 (intermediate).
+/// Solved depth coefficients (caller's depth unit): h (half-spread), j (per-inventory skew), c1, c2 (intermediate).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QuoteCoefficients {
     c1: f64,

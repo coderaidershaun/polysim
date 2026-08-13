@@ -2,8 +2,8 @@
 //!
 //! `FeatureId` is a position in `FEATURE_NAMES`, so the list IS the Parquet footer dictionary: a
 //! reordering renames every column of every file already on disk while the engine, the pins and the
-//! UI catalog all stay green, because they read the same list they wrote. The same list's tail is
-//! the link schema, whose digest gates every frame — a drift there is drop + count SILENT: the
+//! UI catalog all stay green, because they read the same list they wrote. The list's 57..77 block
+//! is the link schema, whose digest gates every frame — a drift there is drop + count SILENT: the
 //! receiver rejects the lot as `SchemaMismatch` and the engine keeps running.
 //!
 //! So the expectations here are hand-copied literals, never derived from the source of truth. That
@@ -18,7 +18,7 @@ use crate::poly_strategy::common::LINK_FIELDS;
 
 /// Copied by hand from the `features![…]` list, in order. Append-only: a new column is added at the
 /// END here and nowhere else, and no line ever moves or changes.
-const FROZEN_FEATURE_NAMES: [&str; 77] = [
+const FROZEN_FEATURE_NAMES: [&str; 88] = [
     "mid",
     "microprice",
     "imbalance",
@@ -96,6 +96,17 @@ const FROZEN_FEATURE_NAMES: [&str; 77] = [
     "poly_next_up_intensity_k_ask",
     "poly_next_up_buy_vol",
     "poly_next_up_sell_vol",
+    "obi_half_bp",
+    "realised_vol_st_bps",
+    "intensity_k_bid_per_bps",
+    "intensity_k_ask_per_bps",
+    "gueant_bid_half_spread_bps",
+    "gueant_ask_half_spread_bps",
+    "gueant_bid_skew_bps",
+    "gueant_ask_skew_bps",
+    "gueant_sigma_bps",
+    "kyle_lambda_bps_per_notional",
+    "kyle_one_bp_notional",
 ];
 
 /// The digest every `poly_up` frame carries, captured from the running code the day the pin landed.
@@ -134,17 +145,19 @@ fn the_link_fields_digest_to_the_recorded_schema_hash() {
     );
 }
 
+const POLY_COLUMNS_START: usize = 57;
+
 #[test]
-fn the_link_fields_mirror_the_trailing_feature_columns() {
-    let first_mirrored = FEATURE_NAMES.len() - LINK_FIELDS.len();
+fn the_link_fields_mirror_the_poly_feature_block() {
+    let block = &FEATURE_NAMES[POLY_COLUMNS_START..POLY_COLUMNS_START + LINK_FIELDS.len()];
     assert_eq!(
-        &FEATURE_NAMES[first_mirrored..],
+        block,
         LINK_FIELDS,
-        "the last {} feature columns must be the link fields in wire order — the receiver resolves \
-         wire names at boot, so this pins LAYOUT, not decoding: a new link field is appended to \
-         both lists, and a non-link column appended past the tail lands here so the mirrored block \
-         moves by decision rather than drift",
-        LINK_FIELDS.len()
+        "feature columns {POLY_COLUMNS_START}..{} must be the link fields in wire order — the \
+         receiver resolves wire names at boot, so this pins LAYOUT, not decoding: the block is \
+         frozen in place, columns exist past it, so a new link field can no longer ride the list's \
+         tail and is appended to both lists by decision",
+        POLY_COLUMNS_START + LINK_FIELDS.len()
     );
 }
 
@@ -177,11 +190,11 @@ fn accessor_claims(features: &Features, side: QuoteSide) -> [(FeatureId, &'stati
             (hawkes.alpha, "hawkes_alpha_bid_per_sec"),
             (hawkes.beta, "hawkes_beta_bid_per_sec"),
             (hawkes.branching, "hawkes_branching_bid"),
-            (gueant.half_spread_ticks, "gueant_bid_half_spread_ticks"),
-            (gueant.skew_ticks, "gueant_bid_skew_ticks"),
+            (gueant.half_spread_bps, "gueant_bid_half_spread_bps"),
+            (gueant.skew_bps, "gueant_bid_skew_bps"),
             (gueant.price, "gueant_bid_price"),
             (intensity.a, "intensity_a_bid_per_sec"),
-            (intensity.k, "intensity_k_bid_per_tick"),
+            (intensity.k, "intensity_k_bid_per_bps"),
         ],
         QuoteSide::Ask => [
             (markout.forward_1s, "markout_ask_1s_bps"),
@@ -195,11 +208,11 @@ fn accessor_claims(features: &Features, side: QuoteSide) -> [(FeatureId, &'stati
             (hawkes.alpha, "hawkes_alpha_ask_per_sec"),
             (hawkes.beta, "hawkes_beta_ask_per_sec"),
             (hawkes.branching, "hawkes_branching_ask"),
-            (gueant.half_spread_ticks, "gueant_ask_half_spread_ticks"),
-            (gueant.skew_ticks, "gueant_ask_skew_ticks"),
+            (gueant.half_spread_bps, "gueant_ask_half_spread_bps"),
+            (gueant.skew_bps, "gueant_ask_skew_bps"),
             (gueant.price, "gueant_ask_price"),
             (intensity.a, "intensity_a_ask_per_sec"),
-            (intensity.k, "intensity_k_ask_per_tick"),
+            (intensity.k, "intensity_k_ask_per_bps"),
         ],
     }
 }

@@ -17,6 +17,7 @@ mod kyle_feed;
 mod kyles_lambda;
 mod markouts;
 mod microprice;
+mod obi;
 mod optimise;
 mod orderbook_resilience;
 mod vpin;

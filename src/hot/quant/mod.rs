@@ -13,6 +13,8 @@
 /// Floors a rate before its `ln` so an underflowed one can't feed `-inf` into an objective.
 pub(crate) const MIN_RATE: f64 = 1e-300;
 
+pub(crate) const BPS: f64 = 1e4;
+
 pub mod hawkes;
 pub mod intensity;
 pub mod liquidity;

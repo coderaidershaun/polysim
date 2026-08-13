@@ -328,6 +328,8 @@ const SECOND_US: i64 = 1_000_000;
 struct RecorderColumns {
     egarch: FeatureId,
     realised_st: FeatureId,
+    realised_st_bps: FeatureId,
+    obi: FeatureId,
     resilience_median: FeatureId,
     resilience_mean: FeatureId,
     /// The ask side alone: `micro_step` sends buy aggressors, so no sell print ever reaches the bid
@@ -370,11 +372,13 @@ impl RecorderColumns {
         Self {
             egarch: recorder_feature_id("egarch_vol_lt"),
             realised_st: recorder_feature_id("realised_vol_st"),
+            realised_st_bps: recorder_feature_id("realised_vol_st_bps"),
+            obi: recorder_feature_id("obi_half_bp"),
             resilience_median: recorder_feature_id("resilience_median_1m"),
             resilience_mean: recorder_feature_id("resilience_mean_1m"),
             intensity_ask: recorder_feature_id("intensity_a_ask_per_sec"),
             gueant_ask_price: recorder_feature_id("gueant_ask_price"),
-            gueant_sigma: recorder_feature_id("gueant_sigma_ticks"),
+            gueant_sigma: recorder_feature_id("gueant_sigma_bps"),
             volume_imbalance: recorder_feature_id("volume_bar_imbalance"),
             volume_duration: recorder_feature_id("volume_bar_duration_secs"),
             kyle_lambda: recorder_feature_id("kyle_lambda_per_notional"),
@@ -415,6 +419,8 @@ const MICRO_TICK: i64 = ONE / 100;
 struct FeatureEmissions {
     egarch: u64,
     realised_st: u64,
+    realised_st_bps: u64,
+    obi: u64,
     resilience_median: u64,
     resilience_mean: u64,
     intensity_ask: u64,
@@ -508,6 +514,15 @@ fn micro_step(
                 emissions.egarch += 1;
             } else if row.feature == columns.realised_st {
                 emissions.realised_st += 1;
+            } else if row.feature == columns.realised_st_bps {
+                emissions.realised_st_bps += 1;
+            } else if row.feature == columns.obi {
+                assert!(
+                    (-1.0..=1.0).contains(&row.value),
+                    "obi_half_bp out of [-1,1]: {}",
+                    row.value
+                );
+                emissions.obi += 1;
             } else if row.feature == columns.resilience_median {
                 emissions.resilience_median += 1;
             } else if row.feature == columns.resilience_mean {
@@ -664,6 +679,14 @@ fn micro_recorder_dispatch_does_not_allocate() {
         "the binance spin-mid realised path must have run"
     );
     assert!(
+        emissions.realised_st_bps > 0,
+        "the binance realised-vol bps companion must have run"
+    );
+    assert!(
+        emissions.obi > 0,
+        "the banded order-book imbalance path must have run"
+    );
+    assert!(
         emissions.resilience_median > 0,
         "the binance resilience median path must have run"
     );
@@ -681,7 +704,7 @@ fn micro_recorder_dispatch_does_not_allocate() {
     );
     assert!(
         emissions.gueant_sigma > 0,
-        "the binance Guéant σ log→tick rescale must have run"
+        "the binance Guéant σ log→bps rescale must have run"
     );
     assert!(
         emissions.volume_imbalance > 0,
