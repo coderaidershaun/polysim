@@ -6,21 +6,8 @@ CONSTITUTION.md
 Cargo.lock
 Cargo.toml
 Dockerfile
+LICENSE
 README.md
-examples/
-  dom-fixture/
-    chart_scenes.rs
-    hud.rs
-    main.rs
-    monitor_feed.rs
-    monitor_scenes.rs
-    position_dump.rs
-    position_scenes.rs
-    scenes.rs
-  poly-probe/
-    main.rs
-  poly-recover/
-    main.rs
 fixtures/
   binance/
     exec/
@@ -108,8 +95,6 @@ fixtures/
     sign_vectors.json
 rust-toolchain.toml
 rustfmt.toml
-scripts/
-  build-strategy.sh
 src/
   adapters/
     backoff.rs
@@ -485,6 +470,9 @@ src/
     mod.rs
     replacing.rs
   time.rs
+static/
+  architecture.jpeg
+  exchanges.jpeg
 strategies/
   post-trade.ipynb
   pyproject.toml
@@ -619,6 +607,21 @@ tests/
     exec_reconcile.txt
     fastqueue.txt
     position_ledger.txt
+tools/
+  README.md
+  dom-fixture/
+    chart_scenes.rs
+    hud.rs
+    main.rs
+    monitor_feed.rs
+    monitor_scenes.rs
+    position_dump.rs
+    position_scenes.rs
+    scenes.rs
+  poly-probe/
+    main.rs
+  poly-recover/
+    main.rs
 wiki/
   avellaneda_stoikov.html
   gueant.html

@@ -2,9 +2,9 @@
 //! aggTrade replays, the venue-stamp clamp over the whole i64 space, the perp depth pu/T
 //! normalisation, and the REST-kline structural tail rule.
 //!
-//! The `examples/record_fixtures` recorder that captured `fixtures/` is gone, so these
-//! committed goldens are the sole source of truth: to change them, re-record by hand from the
-//! live venue rather than from that tool.
+//! The recorder that captured `fixtures/` is gone, so these committed goldens are the sole
+//! source of truth: to change them, re-record by hand from the live venue rather than from
+//! that tool.
 
 use polysim::adapters::binance::parse::{
     DepthDiff, ParseContext, RestKlineTail, parse_agg_trade, parse_combined_frame,

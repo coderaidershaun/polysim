@@ -112,7 +112,7 @@ pub enum PolymarketPreflightError {
         derived: Box<str>,
     },
     #[error(
-        "{WALLET_ADDRESS_VARIABLE} = {value:?} is not an ethereum address — run examples/poly-probe to discover this account's"
+        "{WALLET_ADDRESS_VARIABLE} = {value:?} is not an ethereum address — run tools/poly-probe to discover this account's"
     )]
     WalletAddress {
         value: Box<str>,
@@ -120,7 +120,7 @@ pub enum PolymarketPreflightError {
         source: AddressError,
     },
     #[error(
-        "{SIGNATURE_TYPE_VARIABLE} = {value:?}, expected 0 (eoa), 1 (proxy), 2 (gnosis safe) or 3 (deposit wallet) — run examples/poly-probe to discover this account's"
+        "{SIGNATURE_TYPE_VARIABLE} = {value:?}, expected 0 (eoa), 1 (proxy), 2 (gnosis safe) or 3 (deposit wallet) — run tools/poly-probe to discover this account's"
     )]
     WalletSignatureType { value: Box<str> },
     #[error(
@@ -155,7 +155,7 @@ pub enum PolymarketPreflightError {
 }
 
 /// The wallet type and account address are discovered, not configured, so the engine reads back what
-/// `examples/poly-probe` wrote rather than guessing at them.
+/// `tools/poly-probe` wrote rather than guessing at them.
 fn wallet_identity(
     secrets: &EnvFile,
     key: &SigningKey,

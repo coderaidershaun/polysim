@@ -20,16 +20,16 @@ required-features = ["ui"]
 
 [[example]]
 name = "dom-fixture"
-path = "examples/dom-fixture/main.rs"
+path = "tools/dom-fixture/main.rs"
 required-features = ["ui"]
 
 [[example]]
 name = "poly-probe"
-path = "examples/poly-probe/main.rs"
+path = "tools/poly-probe/main.rs"
 
 [[example]]
 name = "poly-recover"
-path = "examples/poly-recover/main.rs"
+path = "tools/poly-recover/main.rs"
 
 [features]
 ui = ["dep:eframe"]

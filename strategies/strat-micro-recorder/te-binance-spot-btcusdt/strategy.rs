@@ -38,7 +38,7 @@ const OBJECTIVE: Objective = Objective::InventoryPenalty;
 
 const KYLES_LAMBDA: KylesLambdaSpec = KylesLambdaSpec {
     window: 100,
-    min_observations: 30,
+    min_observations: 10,
     min_flow_variance: 1.0e-12,
     min_sign_fraction: 0.2,
 };
@@ -54,8 +54,8 @@ const HAWKES_MAX_EVENTS: usize = 1024;
 /// Refit cadence: every 1/8 window, 7/8 old data overlap → scales by market pace.
 const HAWKES_REFIT_ARRIVALS: usize = HAWKES_MAX_EVENTS / 8;
 
-const VPIN_BUCKETS_ST: usize = 50;
-const VPIN_BUCKETS_LT: usize = 250;
+const VPIN_BUCKETS_ST: usize = 5;
+const VPIN_BUCKETS_LT: usize = 60;
 
 pub struct MicroRecorder {
     has_features_table: bool,

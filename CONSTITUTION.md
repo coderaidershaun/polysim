@@ -297,7 +297,7 @@ comply or conflict surfaced explicitly. Amendments = §15.
   over a real socket — stays OUT: contract-seam/integration territory.
 - Amended 2026-07-28 (user directive: `src/` carries production code only, and a reader looking for
   a test looks in ONE place): the 2026-07-20 carve-out is WITHDRAWN. No `#[cfg(test)]` block lives
-  anywhere outside `tests/` — not in `src/`, not in `strategies/`, not in `examples/`. The quant
+  anywhere outside `tests/` — not in `src/`, not in `strategies/`, not in `tools/`. The quant
   leaf-math pins live in the fitness target under `tests/fitness/quant/`, one module per calculator,
   named for the concept rather than the source path. The cost is deliberate and binding: a test
   under `tests/` sees only the crate's PUBLIC API, so a pin on a private item is re-expressed

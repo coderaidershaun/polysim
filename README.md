@@ -44,6 +44,22 @@ docker buildx build \
     .
 ```
 
+## Post Trade Analysis
+
+Post-trade analysis lives in [`strategies/post-trade.ipynb`](strategies/post-trade.ipynb), reading the parquet a run records. The Python environment is managed by [uv](https://docs.astral.sh/uv/) and lives in `strategies/` beside its `pyproject.toml`:
+
+```shell
+cd strategies
+
+# One-off: create .venv (Python >= 3.12), then install from uv.lock
+uv venv
+uv sync
+```
+
+Open the notebook with `strategies/.venv` selected as the kernel — `ipykernel` is already in the environment.
+
+Go ahead and select you jupyter notebook and start analysing data.
+
 ## Live Tests
 
 Live-network tests are `#[ignore]`d and never run in CI:
