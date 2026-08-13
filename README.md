@@ -13,10 +13,8 @@ cargo run --release --bin strat-micro-recorder-te-polymarket-btc-updown-5m
 # Desktop workstation — attaches to running engines over UDP, needs the `ui` feature.
 # --link is repeatable and is a picker: name both engines, render one at a time from the
 # link bar. 9310 is the binance engine, 9311 the polymarket one.
-cargo run --release --features ui --bin polysim-ui -- \
-    --strategy strat-micro-recorder \
-    --link 127.0.0.1:9310 \
-    --link 127.0.0.1:9311
+cargo run --release --features ui --bin polysim-ui -- --strategy strat-micro-recorder --link 127.0.0.1:9310
+cargo run --release --features ui --bin polysim-ui -- --strategy strat-micro-recorder --link 127.0.0.1:9311
 
 # Gate — all five must pass before anything merges
 cargo fmt --check

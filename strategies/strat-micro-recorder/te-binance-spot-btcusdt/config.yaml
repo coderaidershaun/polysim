@@ -38,16 +38,16 @@ persistence:
   dir: ./data
 execution:
   # Ships disarmed.
-  mode: off # live, sim, off
+  mode: sim # live, sim, off
   # To paper trade against the built-in simulator: set mode: sim and uncomment.
-  # sim:
-  #   order_entry_latency_ms: 15
-  #   ack_latency_ms: 15
-  #   max_market_data_delay_ms: 74
-  #   heartbeat_ms: 100
-  #   opening_base_balance: 0.01
-  #   opening_quote_balance: 1000.0
-  #   maker_fee_bps: 10.0
+  sim:
+    order_entry_latency_ms: 15
+    ack_latency_ms: 15
+    max_market_data_delay_ms: 74
+    heartbeat_ms: 100
+    opening_base_balance: 0.01
+    opening_quote_balance: 1000.0
+    maker_fee_bps: 10.0
   max_orders_per_side: 1
   # Don't move an order for less than this. Moving it loses our place in the queue.
   requote_threshold_ticks: 1

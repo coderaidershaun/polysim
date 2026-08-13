@@ -44,7 +44,9 @@ const TICK_GROUPINGS: [(DomGrouping, &str); 7] = [
     (DomGrouping::Ticks { per_bucket: 100 }, "x100"),
 ];
 
-const BPS_GROUPINGS: [(DomGrouping, &str); 6] = [
+const BPS_GROUPINGS: [(DomGrouping, &str); 8] = [
+    (bps(1, 100), "0.01 bp"),
+    (bps(1, 20), "0.05 bp"),
     (bps(1, 10), "0.1 bp"),
     (bps(1, 4), "0.25 bp"),
     (bps(1, 2), "0.5 bp"),

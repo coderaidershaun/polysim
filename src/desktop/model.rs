@@ -83,7 +83,7 @@ impl UiModel {
             risk_series: RiskSeries::default(),
             dom_unit: DomUnit::Bps,
             dom_ticks_per_bucket: 1,
-            dom_bps: (1, 10),
+            dom_bps: (1, 20),
             dom_levels: DEFAULT_ROWS_PER_SIDE,
             spin_interval,
             freshest_feed_ts: None,

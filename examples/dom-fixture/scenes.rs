@@ -83,6 +83,20 @@ pub fn scenes() -> Vec<Scene> {
                         denominator: 4,
                     },
                 ),
+                grouped(
+                    "bps 0.05 (0.59/row)",
+                    DomGrouping::Bps {
+                        numerator: 1,
+                        denominator: 20,
+                    },
+                ),
+                grouped(
+                    "bps 0.01 (0.11/row)",
+                    DomGrouping::Bps {
+                        numerator: 1,
+                        denominator: 100,
+                    },
+                ),
             ],
         ),
     ]

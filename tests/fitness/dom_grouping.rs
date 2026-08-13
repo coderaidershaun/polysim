@@ -8,8 +8,8 @@
 //! grid. The label half pins the venue-price convention on both surfaces that render a mid — the DOM
 //! separator and the monitor's quote summary — including the half-tick mid that must widen its
 //! decimals rather than round. The model half pins the state the controls write: the workstation
-//! opens on a tenth of a basis point, which is deliberately NOT the projection's identity default,
-//! and each unit remembers its own grouping across a flip.
+//! opens on a twentieth of a basis point, which is deliberately NOT the projection's identity
+//! default, and each unit remembers its own grouping across a flip.
 
 use std::collections::HashMap;
 
@@ -255,6 +255,23 @@ fn bps_resolves_to_a_whole_tick_count_against_the_mid() {
         }
         .ticks_per_bucket(mid),
         118
+    );
+    assert_eq!(
+        DomGrouping::Bps {
+            numerator: 1,
+            denominator: 20
+        }
+        .ticks_per_bucket(mid),
+        59
+    );
+    assert_eq!(
+        DomGrouping::Bps {
+            numerator: 1,
+            denominator: 100
+        }
+        .ticks_per_bucket(mid),
+        11,
+        "a hundredth of a basis point is 11.8 ticks here, and the width floors rather than rounds"
     );
 
     // Width never collapses below one tick: a fraction finer than the grid groups by one rather than
@@ -505,22 +522,22 @@ fn the_monitor_summary_mid_renders_as_a_venue_price() {
     );
 }
 
-/// The workstation opens on the finest bps grouping offered: a row is a tenth of a basis point of
-/// the mid, and the tick slot the operator has never visited starts ungrouped.
+/// The workstation opens on a row a twentieth of a basis point wide, and the tick slot the operator
+/// has never visited starts ungrouped.
 ///
 /// This is deliberately NOT `DomGrouping::default()`. That default is the projection's IDENTITY —
 /// one bucket per tick, the venue's own grid — and two dozen projection pins read it that way. The
 /// opening state is a product choice the model names itself, and the inequality below is what fails
 /// loudly if a later tidy-up folds the two into one.
 #[test]
-fn the_model_opens_on_a_tenth_of_a_basis_point() {
+fn the_model_opens_on_a_twentieth_of_a_basis_point() {
     let mut model = UiModel::with_capacity(1, DurationUs::from_micros(100_000));
     assert_eq!(model.dom_unit(), DomUnit::Bps);
     assert_eq!(
         model.dom_grouping(),
         DomGrouping::Bps {
             numerator: 1,
-            denominator: 10
+            denominator: 20
         }
     );
     assert_ne!(
