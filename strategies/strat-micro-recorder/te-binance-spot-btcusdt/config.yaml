@@ -47,7 +47,10 @@ execution:
   #   heartbeat_ms: 100
   #   opening_base_balance: 0.01
   #   opening_quote_balance: 1000.0
-  #   maker_fee_bps: 10.0
+  #   # Binance spot VIP0 with the BNB 25% discount on BTCUSDT (base tier is 10, no-BNB).
+  #   # Zero maker exists but not on this pair for this account: the spot market-maker
+  #   # programme needs ~$25M weekly maker volume, and the zero-fee promos are FDUSD/USDC pairs.
+  #   maker_fee_bps: 7.5
   max_orders_per_side: 1
   # Don't move an order for less than this. Moving it loses our place in the queue.
   requote_threshold_ticks: 1
