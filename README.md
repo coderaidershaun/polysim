@@ -54,4 +54,14 @@ cargo test --test integration -- --ignored --nocapture --skip poly_exec
 
 ## Architecture
 
+Here is a general high level view of how everything connects together.
+
 ![Deterministic single-thread trading architecture](static/architecture.jpeg)
+
+### Adapter anatomy
+
+The two halves of a venue integration are deliberately different shapes. Execution is a hard seam: a chassis owns the session lifecycle, a trait carries the venue's physics, and the money machinery is composed — never re-implemented. Market data is a convention: each venue writes its own loop from shared helpers, and the only promise is `InboundMessage` on a ring.
+
+![Exchange venue integration architecture](static/exchanges.jpeg)
+
+The execution half of this contract is written law, not convention — what a venue must promise and what venue N+1 has to write lives in [`src/adapters/exec/README.md`](src/adapters/exec/README.md).
