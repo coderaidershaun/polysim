@@ -3,18 +3,17 @@
 //! bounds or trading grid are absent, non-positive, or unparseable, so a venue schema rename can
 //! never make the fixed-point guard vacuously pass. The Polymarket arm pins the same taxonomy:
 //! both venue ticks (0.01 and the 0.001 endgame tick) pass, a drifted tick or absent min size
-//! refuses, and a Gamma resolve failure maps to either unreachable or series-not-found.
-//! `check_symbol_scale`, `check_poly_market`, `classify_poly_resolve` are pure.
+//! refuses. `check_symbol_scale` and `check_poly_market` are pure.
 
 use polysim::adapters::binance::rest::{ExchangeInfo, SymbolFilter, SymbolInfo};
-use polysim::adapters::polymarket::rest::{GammaError, GammaMarket};
-use polysim::config::{BinanceEnv, BinanceMarket, PolySeries, VenueMarket};
+use polysim::adapters::polymarket::rest::GammaMarket;
+use polysim::config::{BinanceEnv, BinanceMarket, VenueMarket};
 use polysim::hot::exec::{MAX_ORDER_BUDGET_WINDOWS, OrderBudgetWindow};
 use polysim::ids::{AssetId, Price, Qty};
 use polysim::registry::{InstrumentRow, OrderRateLimit, RateInterval, Registry};
 use polysim::runtime::{
     EngineError, check_order_rate_limits, check_poly_market, check_symbol_order_capacity,
-    check_symbol_scale, classify_poly_resolve, order_budget, stamp_poly_scales,
+    check_symbol_scale, order_budget, stamp_poly_scales,
 };
 use polysim::time::{DurationUs, TsUs};
 
@@ -46,80 +45,63 @@ fn btc_spot() -> InstrumentRow {
     }
 }
 
-#[test]
-fn passes_real_bounds_and_refuses_when_any_bound_is_absent() {
-    // The perp fixture quotes tickSize "0.10" and stepSize "0.001" — exact at the 1e-8 scale.
-    let scales = check_symbol_scale(&btc_perp(), &perp_info()).expect("real BTCUSDT bounds fit");
-    assert_eq!(scales.tick_size, Price(10_000_000));
-    assert_eq!(scales.step_size, Qty(100_000));
-
-    let no_price = strip_filter(perp_info(), "PRICE_FILTER");
-    match check_symbol_scale(&btc_perp(), &no_price).expect_err("absent maxPrice must refuse") {
-        EngineError::ScaleFieldMissing { field, .. } => assert_eq!(field, "PRICE_FILTER.maxPrice"),
-        other => panic!("expected ScaleFieldMissing, got {other:?}"),
-    }
-
-    let no_lot = strip_filter(perp_info(), "LOT_SIZE");
-    match check_symbol_scale(&btc_perp(), &no_lot).expect_err("absent maxQty must refuse") {
-        EngineError::ScaleFieldMissing { field, .. } => assert_eq!(field, "LOT_SIZE.maxQty"),
-        other => panic!("expected ScaleFieldMissing, got {other:?}"),
-    }
-
-    let empty = ExchangeInfo {
-        rate_limits: Vec::new(),
-        symbols: Vec::new(),
-    };
-    let error = check_symbol_scale(&btc_perp(), &empty).expect_err("symbol not listed must refuse");
-    assert!(matches!(error, EngineError::ScaleSymbolUnknown { .. }));
-}
-
-/// The venue's grid, order floors and counts, read from the real spot payload. Without them the
-/// engine builds orders it believes are legal and the venue rejects — a failure that surfaces as an
+/// The venue's grid, order floors and counts, read from the real payloads. Without them the engine
+/// builds orders it believes are legal and the venue rejects — a failure that surfaces as an
 /// unexplained rejection at runtime rather than a refusal to start, so the exact mantissas are
-/// pinned here.
+/// pinned here. Futures publishes the same limits under `MIN_NOTIONAL.notional` and
+/// `MAX_NUM_ORDERS.limit` and publishes no amend-count filter at all, so each market is pinned
+/// against the payload it actually serves.
 #[test]
-fn spot_order_limits_parse_from_the_real_fixture() {
-    let scales = check_symbol_scale(&btc_spot(), &spot_info())
-        .expect("real spot BTCUSDT grid and limits parse");
-
-    // The spot fixture writes the grid in trailing-zero form ("0.01000000" / "0.00001000"); its
-    // symbol is BTCUSDT, which `btc_spot`'s venue symbol matches case-insensitively.
-    assert_eq!(scales.tick_size, Price(1_000_000));
-    assert_eq!(scales.step_size, Qty(1_000));
-
-    let limits = scales.limits;
-    // LOT_SIZE.minQty "0.00001000" — NOT MARKET_LOT_SIZE.minQty, which the same fixture quotes as
-    // "0.00000000"; reading the wrong filter yields a floor of zero, i.e. no floor at all.
-    assert_eq!(limits.min_qty, Qty(1_000));
-    // NOTIONAL.minNotional "5.00000000" as an exact 1e-8 quote mantissa.
-    assert_eq!(limits.min_notional, 500_000_000);
-    assert_eq!(limits.max_num_orders, 200);
-    assert_eq!(limits.max_num_order_amends, Some(10));
-}
-
-/// Futures publishes the same limits under `MIN_NOTIONAL.notional` and `MAX_NUM_ORDERS.limit`, and
-/// publishes no amend-count filter at all. Reading spot's names here would refuse a valid symbol
-/// and refuse the whole run with it.
-#[test]
-fn perp_order_limits_read_the_futures_filter_schema() {
-    let limits = check_symbol_scale(&btc_perp(), &perp_info())
-        .expect("real perp BTCUSDT limits parse")
-        .limits;
-
-    assert_eq!(limits.min_qty, Qty(100_000), "LOT_SIZE.minQty 0.001");
-    assert_eq!(limits.min_notional, 50 * ONE, "MIN_NOTIONAL.notional 50");
-    assert_eq!(limits.max_num_orders, 200, "MAX_NUM_ORDERS.limit 200");
-    assert_eq!(
-        limits.max_num_order_amends, None,
-        "futures publishes no MAX_NUM_ORDER_AMENDS filter — None is its schema, not an unread field"
-    );
-
-    // The mirror of the same claim: spot's names must not resolve against a futures payload.
-    match check_symbol_scale(&btc_spot(), &perp_info())
-        .expect_err("a spot row must not half-validate against futures filters")
+fn each_market_parses_to_its_own_exact_grid_and_limits() {
+    // The perp fixture quotes tickSize "0.10" and stepSize "0.001"; spot writes the same kind of
+    // grid in trailing-zero form ("0.01000000" / "0.00001000"). Both are exact at the 1e-8 scale,
+    // and both fixtures name BTCUSDT, which the rows' venue symbol matches case-insensitively.
+    let cases = [
+        (
+            "perp",
+            btc_perp(),
+            perp_info(),
+            Price(10_000_000),
+            Qty(100_000),
+            Qty(100_000),
+            50 * ONE,
+            200,
+            None,
+        ),
+        (
+            "spot",
+            btc_spot(),
+            spot_info(),
+            Price(1_000_000),
+            Qty(1_000),
+            Qty(1_000),
+            500_000_000,
+            200,
+            Some(10),
+        ),
+    ];
+    for (case, row, info, tick_size, step_size, min_qty, min_notional, max_orders, max_amends) in
+        cases
     {
-        EngineError::ScaleFieldMissing { field, .. } => assert_eq!(field, "NOTIONAL.minNotional"),
-        other => panic!("expected ScaleFieldMissing, got {other:?}"),
+        let scales = check_symbol_scale(&row, &info)
+            .unwrap_or_else(|error| panic!("{case}: real BTCUSDT bounds must fit, got {error:?}"));
+        assert_eq!(scales.tick_size, tick_size, "{case}: tickSize");
+        assert_eq!(scales.step_size, step_size, "{case}: stepSize");
+
+        let limits = scales.limits;
+        // LOT_SIZE.minQty — NOT MARKET_LOT_SIZE.minQty, which the spot fixture quotes as
+        // "0.00000000"; reading the wrong filter yields a floor of zero, i.e. no floor at all.
+        assert_eq!(limits.min_qty, min_qty, "{case}: LOT_SIZE.minQty");
+        assert_eq!(limits.min_notional, min_notional, "{case}: minNotional");
+        assert_eq!(
+            limits.max_num_orders, max_orders,
+            "{case}: max resting orders"
+        );
+        assert_eq!(
+            limits.max_num_order_amends, max_amends,
+            "{case}: futures publishes no MAX_NUM_ORDER_AMENDS filter — None is its schema, not an \
+             unread field"
+        );
     }
 }
 
@@ -147,120 +129,177 @@ fn configured_two_sided_ladder_must_fit_the_symbol_order_limit() {
     }
 }
 
-/// Every limit is refused when absent or non-positive. A zero here is the dangerous case: it reads
-/// as "the venue has no floor", so the engine would size orders below what can ever fill.
-#[test]
-fn refuses_absent_or_non_positive_order_limits() {
-    let no_notional = strip_filter(spot_info(), "NOTIONAL");
-    match check_symbol_scale(&btc_spot(), &no_notional)
-        .expect_err("an absent NOTIONAL filter must refuse, not default to zero")
-    {
-        EngineError::ScaleFieldMissing { field, .. } => assert_eq!(field, "NOTIONAL.minNotional"),
-        other => panic!("expected ScaleFieldMissing, got {other:?}"),
-    }
+/// Every distinct cause `check_symbol_scale` refuses for: a bound/limit/grid field absent, a limit
+/// at zero (the dangerous case — it reads as "the venue has no floor"), a grid value unparseable, a
+/// row's market reading the wrong venue's filter names, the symbol missing entirely, and the
+/// `MARKET_LOT_SIZE` mirror never standing in for a stripped `LOT_SIZE`.
+enum ScaleRejection<'a> {
+    FieldMissing(&'a str),
+    LimitNotPositive(&'a str, Option<&'a str>),
+    NotPositive(&'a str),
+    OutOfRange(&'a str),
+    SymbolUnknown,
+}
 
-    let zero_notional = set_field(spot_info(), "NOTIONAL", |filter| {
-        filter.min_notional = Some("0.00000000".into())
-    });
-    match check_symbol_scale(&btc_spot(), &zero_notional)
-        .expect_err("a zero minNotional must refuse")
-    {
-        EngineError::ScaleLimitNotPositive { field, value, .. } => {
-            assert_eq!(field, "minNotional");
-            assert_eq!(value.as_ref(), "0");
+fn assert_scale_rejection(case: &str, error: &EngineError, expected: &ScaleRejection) {
+    match (expected, error) {
+        (
+            ScaleRejection::FieldMissing(field),
+            EngineError::ScaleFieldMissing { field: got, .. },
+        ) => {
+            assert_eq!(got, field, "{case}: wrong missing field, got {error:?}");
         }
-        other => panic!("expected ScaleLimitNotPositive, got {other:?}"),
-    }
-
-    let zero_min_qty = set_field(spot_info(), "LOT_SIZE", |filter| {
-        filter.min_qty = Some("0.00000000".into())
-    });
-    match check_symbol_scale(&btc_spot(), &zero_min_qty).expect_err("a zero minQty must refuse") {
-        EngineError::ScaleLimitNotPositive { field, .. } => assert_eq!(field, "minQty"),
-        other => panic!("expected ScaleLimitNotPositive, got {other:?}"),
-    }
-
-    let no_amends = strip_filter(spot_info(), "MAX_NUM_ORDER_AMENDS");
-    match check_symbol_scale(&btc_spot(), &no_amends)
-        .expect_err("spot losing its amend filter must refuse")
-    {
-        EngineError::ScaleFieldMissing { field, .. } => {
-            assert_eq!(field, "MAX_NUM_ORDER_AMENDS.maxNumOrderAmends")
+        (
+            ScaleRejection::LimitNotPositive(field, value),
+            EngineError::ScaleLimitNotPositive {
+                field: got_field,
+                value: got_value,
+                ..
+            },
+        ) => {
+            assert_eq!(got_field, field, "{case}: wrong field, got {error:?}");
+            if let Some(value) = value {
+                assert_eq!(
+                    got_value.as_ref(),
+                    *value,
+                    "{case}: wrong value, got {error:?}"
+                );
+            }
         }
-        other => panic!("expected ScaleFieldMissing, got {other:?}"),
-    }
-
-    let zero_orders = set_field(spot_info(), "MAX_NUM_ORDERS", |filter| {
-        filter.max_num_orders = Some(0)
-    });
-    match check_symbol_scale(&btc_spot(), &zero_orders)
-        .expect_err("a zero order cap must refuse — no order could ever rest")
-    {
-        EngineError::ScaleLimitNotPositive { field, .. } => assert_eq!(field, "maxNumOrders"),
-        other => panic!("expected ScaleLimitNotPositive, got {other:?}"),
+        (ScaleRejection::NotPositive(field), EngineError::ScaleNotPositive { field: got, .. }) => {
+            assert_eq!(got, field, "{case}: wrong field, got {error:?}");
+        }
+        (ScaleRejection::OutOfRange(field), EngineError::ScaleOutOfRange { field: got, .. }) => {
+            assert_eq!(got, field, "{case}: wrong field, got {error:?}");
+        }
+        (ScaleRejection::SymbolUnknown, EngineError::ScaleSymbolUnknown { .. }) => {}
+        _ => panic!("{case}: wrong error variant, got {error:?}"),
     }
 }
 
-/// `MARKET_LOT_SIZE` mirrors every `LOT_SIZE` field under a different filter type, and spot quotes
-/// its `stepSize`/`minQty` as `0.00000000`. Falling back to it would hand the engine a zero grid and
-/// a zero floor — silently, since both parse fine. So with `LOT_SIZE` gone the check must refuse
-/// even though the mirror is still there.
 #[test]
-fn market_lot_size_is_never_mistaken_for_lot_size() {
+fn check_symbol_scale_refuses_bad_missing_or_mismatched_inputs() {
     let mirror_only = strip_filter(spot_info(), "LOT_SIZE");
     assert!(
         mirror_only.symbols[0]
             .filters
             .iter()
             .any(|filter| filter.filter_type.as_ref() == "MARKET_LOT_SIZE"),
-        "the mirror filter must survive, or this test proves nothing"
+        "the mirror filter must survive, or the case below proves nothing"
     );
-    match check_symbol_scale(&btc_spot(), &mirror_only)
-        .expect_err("MARKET_LOT_SIZE must not stand in for LOT_SIZE")
-    {
-        EngineError::ScaleFieldMissing { field, .. } => assert_eq!(field, "LOT_SIZE.maxQty"),
-        other => panic!("expected ScaleFieldMissing, got {other:?}"),
-    }
-}
 
-#[test]
-fn refuses_absent_zero_or_unparseable_grid() {
-    let no_tick = set_field(perp_info(), "PRICE_FILTER", |filter| {
-        filter.tick_size = None
-    });
-    match check_symbol_scale(&btc_perp(), &no_tick).expect_err("absent tickSize must refuse") {
-        EngineError::ScaleFieldMissing { field, .. } => assert_eq!(field, "PRICE_FILTER.tickSize"),
-        other => panic!("expected ScaleFieldMissing, got {other:?}"),
-    }
-
-    let no_step = set_field(perp_info(), "LOT_SIZE", |filter| filter.step_size = None);
-    match check_symbol_scale(&btc_perp(), &no_step).expect_err("absent stepSize must refuse") {
-        EngineError::ScaleFieldMissing { field, .. } => assert_eq!(field, "LOT_SIZE.stepSize"),
-        other => panic!("expected ScaleFieldMissing, got {other:?}"),
-    }
-
-    let zero_tick = set_field(perp_info(), "PRICE_FILTER", |filter| {
-        filter.tick_size = Some("0.00".into())
-    });
-    match check_symbol_scale(&btc_perp(), &zero_tick).expect_err("a zero tick must refuse") {
-        EngineError::ScaleNotPositive { field, .. } => assert_eq!(field, "tickSize"),
-        other => panic!("expected ScaleNotPositive, got {other:?}"),
-    }
-
-    let zero_step = set_field(perp_info(), "LOT_SIZE", |filter| {
-        filter.step_size = Some("0.00".into())
-    });
-    match check_symbol_scale(&btc_perp(), &zero_step).expect_err("a zero step must refuse") {
-        EngineError::ScaleNotPositive { field, .. } => assert_eq!(field, "stepSize"),
-        other => panic!("expected ScaleNotPositive, got {other:?}"),
-    }
-
-    let bad_tick = set_field(perp_info(), "PRICE_FILTER", |filter| {
-        filter.tick_size = Some("abc".into())
-    });
-    match check_symbol_scale(&btc_perp(), &bad_tick).expect_err("an unparseable tick must refuse") {
-        EngineError::ScaleOutOfRange { field, .. } => assert_eq!(field, "tickSize"),
-        other => panic!("expected ScaleOutOfRange, got {other:?}"),
+    let cases: Vec<(&str, InstrumentRow, ExchangeInfo, ScaleRejection)> = vec![
+        (
+            "perp: absent PRICE_FILTER",
+            btc_perp(),
+            strip_filter(perp_info(), "PRICE_FILTER"),
+            ScaleRejection::FieldMissing("PRICE_FILTER.maxPrice"),
+        ),
+        (
+            "perp: absent LOT_SIZE",
+            btc_perp(),
+            strip_filter(perp_info(), "LOT_SIZE"),
+            ScaleRejection::FieldMissing("LOT_SIZE.maxQty"),
+        ),
+        (
+            "perp: symbol not listed",
+            btc_perp(),
+            ExchangeInfo {
+                rate_limits: Vec::new(),
+                symbols: Vec::new(),
+            },
+            ScaleRejection::SymbolUnknown,
+        ),
+        (
+            "spot row against perp fixture reads futures filter names",
+            btc_spot(),
+            perp_info(),
+            ScaleRejection::FieldMissing("NOTIONAL.minNotional"),
+        ),
+        (
+            "spot: absent NOTIONAL",
+            btc_spot(),
+            strip_filter(spot_info(), "NOTIONAL"),
+            ScaleRejection::FieldMissing("NOTIONAL.minNotional"),
+        ),
+        (
+            "spot: zero minNotional",
+            btc_spot(),
+            set_field(spot_info(), "NOTIONAL", |filter| {
+                filter.min_notional = Some("0.00000000".into())
+            }),
+            ScaleRejection::LimitNotPositive("minNotional", Some("0")),
+        ),
+        (
+            "spot: zero minQty",
+            btc_spot(),
+            set_field(spot_info(), "LOT_SIZE", |filter| {
+                filter.min_qty = Some("0.00000000".into())
+            }),
+            ScaleRejection::LimitNotPositive("minQty", None),
+        ),
+        (
+            "spot: absent MAX_NUM_ORDER_AMENDS",
+            btc_spot(),
+            strip_filter(spot_info(), "MAX_NUM_ORDER_AMENDS"),
+            ScaleRejection::FieldMissing("MAX_NUM_ORDER_AMENDS.maxNumOrderAmends"),
+        ),
+        (
+            "spot: zero maxNumOrders",
+            btc_spot(),
+            set_field(spot_info(), "MAX_NUM_ORDERS", |filter| {
+                filter.max_num_orders = Some(0)
+            }),
+            ScaleRejection::LimitNotPositive("maxNumOrders", None),
+        ),
+        (
+            "spot: LOT_SIZE gone, MARKET_LOT_SIZE mirror must not substitute",
+            btc_spot(),
+            mirror_only,
+            ScaleRejection::FieldMissing("LOT_SIZE.maxQty"),
+        ),
+        (
+            "perp: absent tickSize",
+            btc_perp(),
+            set_field(perp_info(), "PRICE_FILTER", |filter| {
+                filter.tick_size = None
+            }),
+            ScaleRejection::FieldMissing("PRICE_FILTER.tickSize"),
+        ),
+        (
+            "perp: absent stepSize",
+            btc_perp(),
+            set_field(perp_info(), "LOT_SIZE", |filter| filter.step_size = None),
+            ScaleRejection::FieldMissing("LOT_SIZE.stepSize"),
+        ),
+        (
+            "perp: zero tickSize",
+            btc_perp(),
+            set_field(perp_info(), "PRICE_FILTER", |filter| {
+                filter.tick_size = Some("0.00".into())
+            }),
+            ScaleRejection::NotPositive("tickSize"),
+        ),
+        (
+            "perp: zero stepSize",
+            btc_perp(),
+            set_field(perp_info(), "LOT_SIZE", |filter| {
+                filter.step_size = Some("0.00".into())
+            }),
+            ScaleRejection::NotPositive("stepSize"),
+        ),
+        (
+            "perp: unparseable tickSize",
+            btc_perp(),
+            set_field(perp_info(), "PRICE_FILTER", |filter| {
+                filter.tick_size = Some("abc".into())
+            }),
+            ScaleRejection::OutOfRange("tickSize"),
+        ),
+    ];
+    for (case, row, info, expected) in cases {
+        let error = check_symbol_scale(&row, &info).expect_err(&format!("{case}: must refuse"));
+        assert_scale_rejection(case, &error, &expected);
     }
 }
 
@@ -317,8 +356,36 @@ pub(crate) fn poly_market(tick_size: Price, min_order_size: Qty) -> GammaMarket 
     }
 }
 
+/// A registry carrying one polymarket source, its four slots unstamped as they leave `build`.
+pub(crate) fn build_poly_registry() -> Registry {
+    let yaml = "engine:
+  hot_core_id: 0
+  spin_interval_us: 100000
+queues:
+  input_capacity: 65536
+  persistence_capacity: 65536
+source:
+  exchange: polymarket
+  max_exposure_quote: 500
+  series: btc-updown-5m
+  tracker: {}
+strategy:
+  instruments: all
+persistence:
+  dir: ./data
+logging:
+  dir: ./logs
+";
+    let config: polysim::config::Config =
+        polysim::config::Config::from_yaml(yaml).expect("poly config parses and validates");
+    Registry::build(&config).expect("registry builds")
+}
+
+/// Both venue ticks pass and a drifted one refuses, then the accepted window's grid is stamped onto
+/// every slot — the same [`polysim::registry::Registry::set_scales`] mechanism binance uses — so
+/// downstream code quantises poly prices against a real tick and lot.
 #[test]
-fn poly_preflight_accepts_both_venue_ticks_and_refuses_drift() {
+fn poly_preflight_accepts_the_venue_ticks_and_stamps_the_accepted_grid() {
     // 0.01 at the 1e-8 scale = 1_000_000 — the tick book_capacity 128 and the 0..1 scale assume.
     check_poly_market(&poly_market(Price(1_000_000), Qty(500_000_000)))
         .expect("the 0.01 design tick with a positive min size passes");
@@ -356,38 +423,7 @@ fn poly_preflight_accepts_both_venue_ticks_and_refuses_drift() {
         ),
         "a non-positive min order size refuses",
     );
-}
 
-/// A registry carrying one polymarket source, its four slots unstamped as they leave `build`.
-pub(crate) fn build_poly_registry() -> Registry {
-    let yaml = "engine:
-  hot_core_id: 0
-  spin_interval_us: 100000
-queues:
-  input_capacity: 65536
-  persistence_capacity: 65536
-source:
-  exchange: polymarket
-  max_exposure_quote: 500
-  series: btc-updown-5m
-  tracker: {}
-strategy:
-  instruments: all
-persistence:
-  dir: ./data
-logging:
-  dir: ./logs
-";
-    let config: polysim::config::Config =
-        polysim::config::Config::from_yaml(yaml).expect("poly config parses and validates");
-    Registry::build(&config).expect("registry builds")
-}
-
-/// After an accepted poly preflight the current window's grid is stamped onto every slot — the same
-/// [`polysim::registry::Registry::set_scales`] mechanism binance uses — so downstream code
-/// quantises poly prices against a real tick and lot.
-#[test]
-fn poly_preflight_stamps_current_grid_onto_all_slots() {
     let mut registry = build_poly_registry();
     assert!(
         registry
@@ -454,13 +490,28 @@ logging:
 ///
 /// Both markets publish the budget under the same `rateLimitType` but over different windows, and it
 /// is ACCOUNT-scoped, so it lands on the registry rather than being copied onto every instrument row
-/// — a two-symbol engine reading it per row would believe it had twice the budget.
+/// — a two-symbol engine reading it per row would believe it had twice the budget. The
+/// REQUEST_WEIGHT and RAW_REQUESTS buckets ride the same array and are not an order budget:
+/// counting one would let the engine believe it may send 6000 orders a minute.
 #[test]
 fn every_parsed_bucket_reaches_the_budget_the_engine_paces_against() {
-    let spot = order_budget(
-        &check_order_rate_limits(BinanceMarket::Spot, &spot_info()).expect("spot buckets parse"),
-    )
-    .expect("two buckets are inside the model");
+    let spot_info = spot_info();
+    assert!(
+        spot_info
+            .rate_limits
+            .iter()
+            .any(|entry| entry.rate_limit_type.as_ref() != "ORDERS"),
+        "the fixture must carry non-ORDERS buckets, or the count below proves nothing"
+    );
+    let spot_buckets =
+        check_order_rate_limits(BinanceMarket::Spot, &spot_info).expect("spot buckets parse");
+    assert_eq!(
+        spot_buckets.len(),
+        2,
+        "only the two ORDERS buckets are read"
+    );
+
+    let spot = order_budget(&spot_buckets).expect("two buckets are inside the model");
     assert_eq!(
         spot.windows(),
         [
@@ -498,11 +549,12 @@ fn every_parsed_bucket_reaches_the_budget_the_engine_paces_against() {
     );
 }
 
-/// FITNESS: a venue declaring more buckets than the engine models refuses the run. Keeping a subset
-/// would pace against a budget larger than the granted one, which is the same silent over-admission
-/// the gate exists to prevent — only harder to see, because every remaining window would look right.
+/// FITNESS: every way the budget could be read wrong refuses the start instead. Each of these fails
+/// SILENTLY if tolerated: a dropped bucket leaves the engine pacing against a larger budget than it
+/// has, and a venue declaring more buckets than the engine models is the same silent over-admission
+/// — only harder to see, because every remaining window would look right.
 #[test]
-fn more_buckets_than_the_engine_models_refuses_the_run() {
+fn every_unreadable_absent_or_unmodellable_order_budget_refuses_the_start() {
     let bucket = OrderRateLimit {
         interval: RateInterval::Second,
         interval_num: 10,
@@ -525,29 +577,7 @@ fn more_buckets_than_the_engine_models_refuses_the_run() {
         }
         other => panic!("wrong refusal: {other:?}"),
     }
-}
 
-/// The REQUEST_WEIGHT and RAW_REQUESTS buckets ride the same array and are not an order budget.
-/// Counting one would let the engine believe it may send 6000 orders a minute.
-#[test]
-fn only_orders_buckets_are_read_as_an_order_budget() {
-    let spot_info = spot_info();
-    assert!(
-        spot_info
-            .rate_limits
-            .iter()
-            .any(|entry| entry.rate_limit_type.as_ref() != "ORDERS"),
-        "the fixture must carry non-ORDERS buckets, or this test proves nothing"
-    );
-    let read =
-        check_order_rate_limits(BinanceMarket::Spot, &spot_info).expect("spot buckets parse");
-    assert_eq!(read.len(), 2, "only the two ORDERS buckets are read");
-}
-
-/// Every way the budget could be read wrong refuses the start instead. Each of these fails SILENTLY
-/// if tolerated: a dropped bucket leaves the engine pacing against a larger budget than it has.
-#[test]
-fn refuses_an_unreadable_or_absent_order_budget() {
     let mut none = spot_info();
     none.rate_limits
         .retain(|entry| entry.rate_limit_type.as_ref() != "ORDERS");
@@ -678,33 +708,4 @@ fn asset_dictionary_interns_every_leg_and_is_stable_across_builds() {
             "a leg's asset is named for the leg, so a balance can be routed back to it"
         );
     }
-}
-
-#[test]
-fn poly_resolve_errors_map_to_the_preflight_taxonomy() {
-    // A missing market or a short fallback both mean the series did not resolve.
-    for not_found in [
-        GammaError::MarketNotFound {
-            slug: "btc-updown-5m-1784439600".to_owned(),
-        },
-        GammaError::FallbackTooFew { found: 1 },
-    ] {
-        assert!(matches!(
-            classify_poly_resolve(PolySeries::BtcUpDown5m, not_found),
-            EngineError::ScalePolySeriesUnknown { .. }
-        ));
-    }
-
-    // Anything else (here a 5xx) means the venue could not be reached to validate.
-    let unreachable = classify_poly_resolve(
-        PolySeries::BtcUpDown5m,
-        GammaError::Status {
-            url: "https://gamma-api.polymarket.com/events".to_owned(),
-            status: 503,
-        },
-    );
-    assert!(matches!(
-        unreachable,
-        EngineError::ScalePolyUnreachable { .. }
-    ));
 }

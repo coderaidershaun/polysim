@@ -226,7 +226,7 @@ fn subscribe_tags(open_secs: i64, up: u16, down: u16) -> Vec<Tag> {
 }
 
 #[test]
-fn startup_assigns_the_current_window_and_prefetches_neighbours() {
+fn startup_prefetches_neighbours_then_hands_over_before_the_old_window_tears_down() {
     let mut core = core();
 
     // Boot mid-window A: the resolved current window subscribes at once (past its T-60s instant).
@@ -247,17 +247,6 @@ fn startup_assigns_the_current_window_and_prefetches_neighbours() {
         &book_frame(&format!("{OPEN_A}-up"), OPEN_A + 11),
     );
     assert!(tags(&effects).contains(&Tag::Snapshot(0)));
-}
-
-#[test]
-fn next_window_subscribes_and_snapshots_before_the_old_one_tears_down() {
-    let mut core = core();
-    on_resolved(&mut core, OPEN_A + 10, OPEN_A);
-    on_frame(
-        &mut core,
-        OPEN_A + 11,
-        &book_frame(&format!("{OPEN_A}-up"), OPEN_A + 11),
-    );
 
     // Slot B's window resolves early but must NOT subscribe before its own T-60s instant.
     let held = on_resolved(&mut core, OPEN_A + 15, OPEN_B);

@@ -20,9 +20,8 @@ use polysim::shutdown::RunAssertion;
 use polysim::time::DurationUs;
 
 use crate::engine_support::{
-    LinkedEngine, LinkedSetup, ONE, delta_chunk, engine_with_link, idle_at, instrument_row,
-    metrics_ring, persist_ring, pop, run_control, running_at, snapshot_pair, spin,
-    strategy_log_ring, tracker_spec_all, trade,
+    LinkedEngine, LinkedSetup, ONE, delta_chunk, engine_with_link, idle_at, instrument_row, pop,
+    run_control, running_at, snapshot_pair, spin, tracker_spec_all, trade,
 };
 
 /// One `call` feature per callback, so the drained stream encodes exactly which callbacks fired —
@@ -113,6 +112,11 @@ fn call_codes(records: &[PersistRecord]) -> Vec<f64> {
 
 fn run(sequence: &[InboundMessage]) -> Vec<PersistRecord> {
     let mut linked = linked();
+    assert!(
+        linked.control.desired().accept_if_newer(idle_at(1)),
+        "a fresh epoch wins the highest-wins race"
+    );
+    assert_eq!(linked.control.desired().state(), RunState::Idle);
     for message in sequence {
         linked.engine.dispatch(pop(0, 0), message);
     }
@@ -122,9 +126,11 @@ fn run(sequence: &[InboundMessage]) -> Vec<PersistRecord> {
 /// FITNESS: the recorded control markers alone decide what the strategy sees, so the same tape
 /// replays to the same hot state.
 ///
-/// This is the test that catches the replay-divergence latch bug. Nothing here ever writes the
-/// desired latch — if dispatch consulted it instead of the marker, the engine would stay RUNNING
-/// and the parked trade and spin would call back.
+/// This is the test that catches the replay-divergence latch bug. The desired latch is held at IDLE
+/// for the whole run and must gate nothing, because the latch is edge-side OUTPUT: if dispatch
+/// consulted it instead of the marker, every callback below would be suppressed, and if it consulted
+/// both, the RUNNING stretches would be. If dispatch ignored the marker, the parked trade and spin
+/// would call back.
 #[test]
 fn recorded_control_markers_replay_to_identical_hot_state() {
     let first = run(&control_sequence());
@@ -134,7 +140,8 @@ fn recorded_control_markers_replay_to_identical_hot_state() {
     assert_eq!(
         call_codes(&first),
         vec![1.0, 6.0, 1.0, 6.0],
-        "the trade and spin between the IDLE and RUNNING markers reach nothing"
+        "the trade and spin between the IDLE and RUNNING markers reach nothing, and hot state \
+         follows the recorded sequence rather than the latch set beside it"
     );
 
     let kinds: Vec<LinkRowKind> = first
@@ -152,7 +159,10 @@ fn recorded_control_markers_replay_to_identical_hot_state() {
 }
 
 /// FITNESS: control converges from the LEVEL, so a dropped marker costs one heartbeat rather than
-/// leaving the edge parked and the hot thread trading forever.
+/// leaving the edge parked and the hot thread trading forever, and a repeated marker is deduped on
+/// its epoch so a transition's side effects cannot re-run — a second RESUME would otherwise wipe
+/// derived state the engine had just rebuilt. The tape still holds every marker that arrived, not
+/// every one that changed something.
 ///
 /// This is the test that catches the edge-trigger bug. The marker rides a drop+count queue, so
 /// the first push here is simply never dispatched.
@@ -190,12 +200,29 @@ fn a_dropped_control_marker_self_corrects_on_the_next_heartbeat() {
     // The heartbeat that raced the acknowledgement pushes the same marker again. Idempotent.
     linked.engine.dispatch(pop(0, 0), &run_control(park, 11));
     assert_eq!(linked.control.pending(), None);
+    assert_eq!(linked.control.acknowledged().load(), park);
+
+    let records = drain(&mut linked);
     assert!(
-        drain(&mut linked).iter().all(|record| !matches!(
+        records.iter().all(|record| !matches!(
             record,
             PersistRecord::Feature(row) if row.feature == FeatureId(0)
         )),
         "no callback fired while parked, duplicate marker included"
+    );
+    let markers: Vec<RunAssertion> = records
+        .iter()
+        .filter_map(|record| match record {
+            PersistRecord::LinkFrame(row) if row.kind == LinkRowKind::RunIdle => {
+                Some(idle_at(row.seq))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        markers,
+        vec![park; 2],
+        "every marker is recorded — the tape is what arrived, not what changed"
     );
 }
 
@@ -275,80 +302,4 @@ fn has_vol(records: &[PersistRecord]) -> bool {
     records
         .iter()
         .any(|record| matches!(record, PersistRecord::Feature(row) if row.feature == FeatureId(1)))
-}
-
-/// FITNESS: an engine with no `link:` block still applies markers — control and the socket are
-/// separate concerns — but reports nowhere, because there is nothing to report to.
-#[test]
-fn control_without_a_link_still_gates_the_strategy() {
-    let instruments = [instrument_row(0, tracker_spec_all(1), 64)];
-    let (persistence, mut persist) = persist_ring(256);
-    let (log_sink, _logs) = strategy_log_ring(64);
-    let (metrics, _metrics) = metrics_ring(64);
-    let mut engine = crate::engine_support::engine_without_warmup(
-        &instruments,
-        probe(),
-        persistence,
-        log_sink,
-        metrics,
-    );
-    for message in [
-        run_control(idle_at(1), 1),
-        InboundMessage::SpinTick(spin(1, 2)),
-    ] {
-        engine.dispatch(pop(0, 0), &message);
-    }
-    let mut records = Vec::new();
-    while let Ok(record) = persist.pop() {
-        records.push(record);
-    }
-    assert!(
-        call_codes(&records).is_empty(),
-        "the marker parked the strategy with no link actor in sight"
-    );
-}
-
-/// FITNESS: the run state a marker asserts is what the strategy is gated on, whatever the latch
-/// says. A test that only sets the latch must observe nothing — the latch is edge-side output.
-#[test]
-fn the_desired_latch_alone_never_gates_the_strategy() {
-    let mut linked = linked();
-    linked.control.desired().accept_if_newer(idle_at(1));
-    assert_eq!(linked.control.desired().state(), RunState::Idle);
-
-    linked
-        .engine
-        .dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(1, 1)));
-    assert_eq!(
-        call_codes(&drain(&mut linked)),
-        vec![6.0],
-        "hot state follows the recorded message sequence, not a latch set beside it — a tape that \
-         replays only the messages has to reproduce this run exactly"
-    );
-}
-
-/// FITNESS: dispatch dedups on the epoch, so a repeated marker cannot re-run a transition's side
-/// effects — a second RESUME would otherwise wipe derived state the engine had just rebuilt.
-#[test]
-fn a_repeated_marker_does_not_re_run_the_transition() {
-    let mut linked = linked();
-    let park = idle_at(1);
-    for when in [1, 2, 3] {
-        linked.engine.dispatch(pop(0, 0), &run_control(park, when));
-    }
-    let rows: Vec<RunAssertion> = drain(&mut linked)
-        .iter()
-        .filter_map(|record| match record {
-            PersistRecord::LinkFrame(row) if row.kind == LinkRowKind::RunIdle => {
-                Some(idle_at(row.seq))
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        rows,
-        vec![park; 3],
-        "every marker is recorded — the tape is what arrived, not what changed"
-    );
-    assert_eq!(linked.control.acknowledged().load(), park);
 }

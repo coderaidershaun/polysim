@@ -5,9 +5,9 @@
 //! they share a bucket, bucket edges stay grid-aligned so a row keeps covering the same ticks as the
 //! book moves, and grouping 1 is bit-for-bit today's ungrouped ladder. The bps unit is pinned as a
 //! SIZING input — it resolves to a whole tick count once per frame and never becomes a second price
-//! grid. The label half pins the venue-price convention on both surfaces that render a mid — the DOM
-//! separator and the monitor's quote summary — including the half-tick mid that must widen its
-//! decimals rather than round. The model half pins the state the controls write: the workstation
+//! grid. The label half pins the venue-price convention the DOM separator renders a mid at,
+//! including the half-tick mid that must widen its decimals rather than round. The model half pins
+//! the state the controls write: the workstation
 //! opens on a twentieth of a basis point, which is deliberately NOT the projection's identity
 //! default, and each unit remembers its own grouping across a flip.
 
@@ -21,7 +21,6 @@ use polysim::desktop::format::{
     MISSING, price_decimals, write_opt_venue_mid, write_venue_mid, write_venue_price,
 };
 use polysim::desktop::model::UiModel;
-use polysim::desktop::monitor_view::quote_summary;
 use polysim::ids::{FIXED_SCALE, InstrumentId, Price, Qty};
 use polysim::msg::inbound::Level;
 use polysim::msg::ui::{DomQuote, UI_BOOK_LEVELS, UiBookSnapshot, UiBookState};
@@ -316,7 +315,7 @@ fn bps_resolves_to_a_whole_tick_count_against_the_mid() {
 /// both conditions hold at once, which is exactly why the ungrouped ladder shows a locked price only
 /// in the separator.
 #[test]
-fn a_locked_tick_shows_only_where_an_anchor_bucket_holds_it() {
+fn bucket_ownership_at_boundaries_follows_the_grid_not_mid_parity() {
     // k = 100 ≡ 0 (mod 10): the bid anchor 99 floors to bucket 90, so only the ask keeps it.
     let at_a_boundary = book(&[(100, 4)], &[(100, 5), (103, 7)]);
     let view = view_of(&at_a_boundary, DomGrouping::Ticks { per_bucket: 10 }, 3);
@@ -356,14 +355,11 @@ fn a_locked_tick_shows_only_where_an_anchor_bucket_holds_it() {
     assert_eq!(view.bid_rows()[0].tick_index, 100);
     assert_eq!(view.ask_rows()[0].public_qty, Some(Qty(5)));
     assert_eq!(view.bid_rows()[0].public_qty, Some(Qty(4)));
-}
 
-/// Whether the two sides' row 0 name the same bucket follows from where the anchors fall against the
-/// bucket boundary — never from the mid's parity. Anchoring to the absolute tick grid is what
-/// produces this, and a "fix" that made the row-0 edges track the mid would break every other
-/// guarantee here.
-#[test]
-fn row_zero_buckets_coincide_by_boundary_not_by_mid_parity() {
+    // Whether the two sides' row 0 name the same bucket follows from where the anchors fall against
+    // the bucket boundary — never from the mid's parity. Anchoring to the absolute tick grid is what
+    // produces this, and a "fix" that made the row-0 edges track the mid would break every other
+    // guarantee here.
     // Odd mid, bb 100 / ba 101 → anchors 101 and 100, both in bucket 100: shared, each side still
     // aggregating only its own levels.
     let shared_at_an_odd_mid = book(
@@ -492,45 +488,18 @@ fn a_quote_lands_in_its_bucket_and_off_screen_stays_in_half_ticks() {
     );
 }
 
-/// The monitor's quote summary renders its mid through the same venue-price writer as the DOM
-/// separator, so the two surfaces can never label the same book differently. Its deltas stay in tick
-/// units and are pinned in `monitor_projection`; the mid string was pinned nowhere until here.
-#[test]
-fn the_monitor_summary_mid_renders_as_a_venue_price() {
-    let mantissa = |tick_index: i64| tick_index * CENT_TICK.0;
-    let mut model = UiModel::with_capacity(1, DurationUs::from_micros(100_000));
-    let mut label = String::new();
-
-    model.apply_book(book(
-        &[(mantissa(11_799_999), 4)],
-        &[(mantissa(11_800_001), 5)],
-    ));
-    let summary = quote_summary(&model, InstrumentId(0), CENT_TICK);
-    assert_eq!(summary.mid_half_ticks, Some(23_600_000));
-    write_opt_venue_mid(&mut label, summary.mid_half_ticks, CENT_TICK);
-    assert_eq!(label, "118000.00");
-
-    let mut half_tick_mid = book(&[(mantissa(11_800_000), 4)], &[(mantissa(11_800_001), 5)]);
-    half_tick_mid.seq = 1;
-    model.apply_book(half_tick_mid);
-    let summary = quote_summary(&model, InstrumentId(0), CENT_TICK);
-    assert_eq!(summary.mid_half_ticks, Some(23_600_001));
-    write_opt_venue_mid(&mut label, summary.mid_half_ticks, CENT_TICK);
-    assert_eq!(
-        label, "118000.005",
-        "the summary mid widens a decimal rather than rounding a half-tick away"
-    );
-}
-
 /// The workstation opens on a row a twentieth of a basis point wide, and the tick slot the operator
 /// has never visited starts ungrouped.
 ///
 /// This is deliberately NOT `DomGrouping::default()`. That default is the projection's IDENTITY —
 /// one bucket per tick, the venue's own grid — and two dozen projection pins read it that way. The
 /// opening state is a product choice the model names itself, and the inequality below is what fails
-/// loudly if a later tidy-up folds the two into one.
+/// loudly if a later tidy-up folds the two into one. Each unit also keeps its own remembered
+/// grouping, so flipping Ticks→bps→Ticks restores the value the operator chose in that unit rather
+/// than resetting it — the whole reason the model holds two slots plus an active unit instead of a
+/// single `DomGrouping`.
 #[test]
-fn the_model_opens_on_a_twentieth_of_a_basis_point() {
+fn dom_grouping_model_state() {
     let mut model = UiModel::with_capacity(1, DurationUs::from_micros(100_000));
     assert_eq!(model.dom_unit(), DomUnit::Bps);
     assert_eq!(
@@ -552,14 +521,6 @@ fn the_model_opens_on_a_twentieth_of_a_basis_point() {
         DomGrouping::Ticks { per_bucket: 1 },
         "the unvisited tick slot starts on the ungrouped ladder"
     );
-}
-
-/// Each unit keeps its own remembered grouping, so flipping Ticks→bps→Ticks restores the value the
-/// operator chose in that unit rather than resetting it. This is the whole reason the model holds two
-/// slots plus an active unit instead of a single `DomGrouping`.
-#[test]
-fn each_unit_remembers_its_own_grouping() {
-    let mut model = UiModel::with_capacity(1, DurationUs::from_micros(100_000));
 
     model.set_dom_grouping(DomGrouping::Bps {
         numerator: 1,

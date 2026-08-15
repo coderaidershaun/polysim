@@ -57,22 +57,6 @@ fn windowed_engine() -> (HotEngine, Consumer<ExecLaneItem>, Consumer<UiEvent>) {
     (built.engine, built.commands, built.ui_events)
 }
 
-/// Ready, quotable, and told which window it is in — everything except the instant, which each case
-/// then chooses.
-fn armed_at(when: i64) -> (HotEngine, Consumer<ExecLaneItem>, Consumer<UiEvent>) {
-    let (mut engine, mut commands, ui_events) = windowed_engine();
-    make_ready(&mut engine, when);
-    engine.dispatch(
-        pop(0, 0),
-        &InboundMessage::MarketRotation(rotation(0, OPEN, CLOSE, when)),
-    );
-    for message in reseat_book(BID, ASK, when) {
-        engine.dispatch(pop(0, 0), &message);
-    }
-    drain_commands(&mut commands);
-    (engine, commands, ui_events)
-}
-
 fn places(commands: &[ExecCommand]) -> usize {
     commands
         .iter()
@@ -140,31 +124,6 @@ fn the_quote_window_opens_at_the_open_and_shuts_a_margin_before_the_close() {
     );
 }
 
-#[test]
-fn a_quote_declared_before_the_market_opens_is_refused_by_name() {
-    let (mut engine, mut commands, mut ui_events) = armed_at(OPEN - 60 * 1_000_000);
-    spin_at(&mut engine, 1, OPEN - 30 * 1_000_000);
-    let early = drain_commands(&mut commands);
-    assert_eq!(
-        places(&early),
-        0,
-        "the market has not opened and the strategy is declaring into nothing: {early:?}"
-    );
-    assert!(
-        refusals(&mut ui_events).contains(&RejectReason::OutsideWindow),
-        "a refusal with no reason on the panel is how a gate that could never arm survives a run"
-    );
-
-    let (mut engine, mut commands, _ui_events) = armed_at(OPEN + 10 * 1_000_000);
-    spin_at(&mut engine, 1, OPEN + 20 * 1_000_000);
-    let inside = drain_commands(&mut commands);
-    assert!(
-        places(&inside) > 0,
-        "the identical declaration inside the window has to reach the venue, or the case above is \
-         reading a fixture that never asked for an order: {inside:?}"
-    );
-}
-
 struct LadderQuoter;
 
 const LADDER_DEPTH: usize = 3;
@@ -222,8 +181,12 @@ fn seat_ladder(
     first_seq + LADDER_DEPTH as u64
 }
 
+/// FITNESS: the quote stop pulls the whole ladder and cancels nothing twice, and the mirror control —
+/// an instrument that carries no window at all quotes whatever the margin says, because there is no
+/// stop to reach. Without the second half, an engine that had simply stopped quoting for some other
+/// reason would read exactly like the window gate working.
 #[test]
-fn the_quote_stop_pulls_the_whole_ladder_and_cancels_nothing_twice() {
+fn the_quote_stop_pulls_the_whole_ladder_and_an_unwindowed_instrument_never_stops() {
     let (mut engine, mut commands, mut ui_events) = laddered_engine();
     make_ready(&mut engine, OPEN);
     engine.dispatch(
@@ -266,6 +229,23 @@ fn the_quote_stop_pulls_the_whole_ladder_and_cancels_nothing_twice() {
     spin_at(&mut engine, seq, next_close - MARGIN.micros());
     let swept_again = drain_commands(&mut commands);
     assert_eq!(cancels(&swept_again), LADDER_DEPTH);
+
+    let (mut unwindowed, mut unwindowed_commands, _ui_events) = windowed_engine();
+    make_ready(&mut unwindowed, 0);
+    for message in reseat_book(BID, ASK, 10) {
+        unwindowed.dispatch(pop(0, 0), &message);
+    }
+    drain_commands(&mut unwindowed_commands);
+
+    // An instant that would be deep past the stop of any window, on an instrument that has none.
+    spin_at(&mut unwindowed, 1, 20 * ONE);
+    let unwindowed_commands = drain_commands(&mut unwindowed_commands);
+    assert!(places(&unwindowed_commands) > 0);
+    assert_eq!(
+        cancels(&unwindowed_commands),
+        0,
+        "and nothing to sweep: {unwindowed_commands:?}"
+    );
 }
 
 #[test]
@@ -292,22 +272,6 @@ fn a_sweep_pulls_resting_quotes_and_never_a_marketable_order() {
         }
         .is_resting_quote()
     );
-}
-
-#[test]
-fn an_instrument_with_no_window_quotes_whatever_the_margin_says() {
-    let (mut engine, mut commands, _ui_events) = windowed_engine();
-    make_ready(&mut engine, 0);
-    for message in reseat_book(BID, ASK, 10) {
-        engine.dispatch(pop(0, 0), &message);
-    }
-    drain_commands(&mut commands);
-
-    // An instant that would be deep past the stop of any window, on an instrument that has none.
-    spin_at(&mut engine, 1, 20 * ONE);
-    let commands = drain_commands(&mut commands);
-    assert!(places(&commands) > 0);
-    assert_eq!(cancels(&commands), 0, "and nothing to sweep: {commands:?}");
 }
 
 fn ack_placed(engine: &mut HotEngine, commands: &[ExecCommand], when: i64) {

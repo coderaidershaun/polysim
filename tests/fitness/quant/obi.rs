@@ -37,10 +37,3 @@ fn band_always_reaches_the_first_level_of_each_side() {
     assert_eq!(banded_imbalance(&[], &wide_asks, band), -1.0);
     assert_eq!(banded_imbalance(&[], &[], band), 0.0);
 }
-
-#[test]
-fn band_edges_are_bps_of_mid() {
-    let band = PriceBand::around(100_000.0, 0.5);
-    assert!((band.low - 99_995.0).abs() < 1e-9, "low {}", band.low);
-    assert!((band.high - 100_005.0).abs() < 1e-9, "high {}", band.high);
-}

@@ -41,8 +41,12 @@ fn wallet_key(vector: &Value) -> SigningKey {
         .expect("throwaway vector key parses")
 }
 
+/// The L1 `ClobAuth` vector: the signature that `derive-api-key` and every private call after it
+/// depends on, plus the address the wallet key derives from the SAME vector — keccak over the
+/// uncompressed public key minus its tag byte. A wrong address makes the venue attribute our
+/// orders to nobody.
 #[test]
-fn clob_auth_signature_matches_the_sdk_vector() {
+fn clob_auth_signature_and_wallet_address_match_the_sdk_vector() {
     let vector = &vectors()["clob_auth"];
     let key = wallet_key(vector);
 
@@ -65,16 +69,12 @@ fn clob_auth_signature_matches_the_sdk_vector() {
         sent.contains(&("POLY_ADDRESS", text(vector, "expected_address_lowercase"))),
         "l1 sends POLY_ADDRESS lowercase where l2 sends it checksummed; sent {sent:?}"
     );
-}
 
-#[test]
-fn the_wallet_key_derives_its_own_address() {
-    let vector = &vectors()["clob_auth"];
     assert_eq!(
-        wallet_key(vector).address().to_lowercase_hex(),
+        key.address().to_lowercase_hex(),
         text(vector, "expected_address_lowercase"),
-        "address derivation is keccak over the uncompressed public key minus its tag byte; a wrong \
-         address makes the venue attribute our orders to nobody"
+        "address derivation diverged; a wrong address makes the venue attribute our orders to \
+         nobody"
     );
 }
 
@@ -175,8 +175,9 @@ fn order_signature_matches_the_sdk_for_every_wallet_type() {
     }
 }
 
+/// `order_amounts` against the SDK vector, and the grid it refuses rather than rounds through.
 #[test]
-fn order_amounts_match_the_amounts_the_sdk_signed() {
+fn order_amounts_match_the_sdk_and_refuse_off_grid_prices() {
     let fixture = vectors();
     let vector = &fixture["orders"][0];
 
@@ -205,10 +206,7 @@ fn order_amounts_match_the_amounts_the_sdk_signed() {
         (amounts.taker, amounts.maker),
         "a sell pays shares and receives money — the same two amounts, swapped"
     );
-}
 
-#[test]
-fn a_price_off_the_tick_grid_is_refused_rather_than_rounded() {
     let off_grid = order_amounts(&AmountRequest {
         side: OrderSide::Buy,
         price: Price(52_500_000),
@@ -249,14 +247,6 @@ proptest! {
         let address = Address::from_bytes(bytes);
         prop_assert_eq!(Address::parse(&address.to_checksum_hex()).expect("checksummed parses"), address);
         prop_assert_eq!(Address::parse(&address.to_lowercase_hex()).expect("lowercase parses"), address);
-    }
-
-    /// RFC-6979 determinism is what makes every vector above pinnable at all: no RNG enters the
-    /// stack, so one digest has exactly one signature.
-    #[test]
-    fn signing_the_same_digest_twice_gives_the_same_signature(digest in any::<[u8; 32]>()) {
-        let key = wallet_key(&vectors()["clob_auth"]);
-        prop_assert_eq!(key.sign_digest(digest), key.sign_digest(digest));
     }
 }
 

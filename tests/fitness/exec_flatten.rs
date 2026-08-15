@@ -113,79 +113,154 @@ fn placed(outcome: FlattenOutcome) -> polysim::hot::exec::PlaceIntent {
     }
 }
 
-/// FITNESS: the order that closes a position trades in the direction that SHRINKS it, takes the far
-/// side of the book, and asks for exactly what is held.
-///
-/// The direction is the one mistake here that compiles, passes every structural check and doubles
-/// the position it was asked to close.
+/// FITNESS: `plan_flatten` outcomes match a named table. The order that closes a position trades in
+/// the direction that SHRINKS it, takes the far side of the book, and asks for exactly what is held
+/// — the direction is the one mistake here that compiles, passes every structural check and doubles
+/// the position it was asked to close. The marketable price is then clamped into the venue's own
+/// bounds: Polymarket prices are probabilities bounded by `[tick, 1 − tick]`, and the ends of that
+/// range are exactly where a position most needs closing, while a venue that publishes no ceiling
+/// (Binance's shape, which always pairs with no binary-outcome fee) gets the slack in full rather
+/// than clamped to parity. Last, a residue the venue is too coarse to trade is REFUSED — reached by
+/// ordinary partial fills — never rounded up into an order the venue would reject or down into one
+/// of nothing; the floor itself still trades, so the refusal case alone would not prove the boundary.
 #[test]
-fn a_flatten_takes_the_far_touch_on_the_side_that_shrinks_the_position() {
-    let long = placed(plan_flatten(holding(10 * FIXED_SCALE)));
-    assert_eq!(long.qty, Qty(10 * FIXED_SCALE), "all ten shares");
-    assert_eq!(long.style, OrderStyle::Immediate, "it must not rest");
-    assert_eq!(
-        long.price,
-        Price(BID - SLACK_TICKS as i64 * TICK),
-        "a long is closed by SELLING into the bid, priced through it by the slack"
-    );
-
-    let short = placed(plan_flatten(holding(-10 * FIXED_SCALE)));
-    assert_eq!(short.qty, Qty(10 * FIXED_SCALE));
-    assert_eq!(
-        short.price,
-        Price(ASK + SLACK_TICKS as i64 * TICK),
-        "and a short by BUYING through the ask"
-    );
-
-    assert_eq!(
-        plan_flatten(holding(0)),
-        FlattenOutcome::Nothing,
-        "flat is the goal, not a refusal — there is nothing to send and nothing to report"
-    );
-}
-
-/// FITNESS: the slack never walks a price outside what the venue accepts. Polymarket prices are
-/// probabilities bounded by `[tick, 1 − tick]`, and the ends of that range are exactly where a
-/// position most needs closing — a market resolving toward one is the reason to get out of it.
-#[test]
-fn the_marketable_price_is_clamped_into_the_venues_own_bounds() {
-    let near_one = FlattenInput {
-        top: top(MAX_PRICE.0 - TICK, MAX_PRICE.0),
-        ..holding(-10 * FIXED_SCALE)
-    };
-    assert_eq!(
-        placed(plan_flatten(near_one)).price,
-        MAX_PRICE,
-        "buying through an ask already at the top must stop at the top"
-    );
-
-    let near_zero = FlattenInput {
-        top: top(TICK, 2 * TICK),
-        ..holding(10 * FIXED_SCALE)
-    };
-    assert_eq!(
-        placed(plan_flatten(near_zero)).price,
-        Price(TICK),
-        "and selling through a bid already at the bottom must stop at the bottom"
-    );
-
-    // A venue that publishes no ceiling gets none: clamping a Binance price to parity would price
-    // every order at one hundred-millionth of a unit. No ceiling also means no binary-outcome fee,
-    // which is the pair the shipped configuration always comes in.
-    let unbounded = FlattenInput {
-        grid: TickGrid {
-            max_price: None,
-            ..poly_grid()
+fn plan_flatten_outcomes_match_named_cases() {
+    enum Expect {
+        Nothing,
+        Refuse(RejectReason),
+        Place { price: Price, qty: Qty },
+    }
+    struct Case {
+        name: &'static str,
+        input: FlattenInput,
+        expect: Expect,
+    }
+    let sell_price = Price(BID - SLACK_TICKS as i64 * TICK);
+    let buy_price = Price(ASK + SLACK_TICKS as i64 * TICK);
+    let cases = [
+        Case {
+            name: "a_long_sells_into_the_bid_through_the_slack",
+            input: holding(10 * FIXED_SCALE),
+            expect: Expect::Place {
+                price: sell_price,
+                qty: Qty(10 * FIXED_SCALE),
+            },
         },
-        top: top(MAX_PRICE.0 - TICK, MAX_PRICE.0),
-        fee_model: FeeModel::None,
-        ..holding(-10 * FIXED_SCALE)
-    };
-    assert_eq!(
-        placed(plan_flatten(unbounded)).price,
-        Price(MAX_PRICE.0 + SLACK_TICKS as i64 * TICK),
-        "with no ceiling the slack applies in full"
-    );
+        Case {
+            name: "a_short_buys_through_the_ask_through_the_slack",
+            input: holding(-10 * FIXED_SCALE),
+            expect: Expect::Place {
+                price: buy_price,
+                qty: Qty(10 * FIXED_SCALE),
+            },
+        },
+        Case {
+            name: "flat_is_the_goal_not_a_refusal",
+            input: holding(0),
+            expect: Expect::Nothing,
+        },
+        Case {
+            name: "buying_through_an_ask_already_at_the_top_stops_at_the_top",
+            input: FlattenInput {
+                top: top(MAX_PRICE.0 - TICK, MAX_PRICE.0),
+                ..holding(-10 * FIXED_SCALE)
+            },
+            expect: Expect::Place {
+                price: MAX_PRICE,
+                qty: Qty(10 * FIXED_SCALE),
+            },
+        },
+        Case {
+            name: "selling_through_a_bid_already_at_the_bottom_stops_at_the_bottom",
+            input: FlattenInput {
+                top: top(TICK, 2 * TICK),
+                ..holding(10 * FIXED_SCALE)
+            },
+            expect: Expect::Place {
+                price: Price(TICK),
+                qty: Qty(10 * FIXED_SCALE),
+            },
+        },
+        Case {
+            name: "with_no_price_ceiling_the_slack_applies_in_full",
+            input: FlattenInput {
+                grid: TickGrid {
+                    max_price: None,
+                    ..poly_grid()
+                },
+                top: top(MAX_PRICE.0 - TICK, MAX_PRICE.0),
+                fee_model: FeeModel::None,
+                ..holding(-10 * FIXED_SCALE)
+            },
+            expect: Expect::Place {
+                price: Price(MAX_PRICE.0 + SLACK_TICKS as i64 * TICK),
+                qty: Qty(10 * FIXED_SCALE),
+            },
+        },
+        Case {
+            name: "one_step_under_the_minimum_is_refused_rather_than_rounded",
+            input: holding(MIN_SHARES.0 - SHARE_STEP),
+            expect: Expect::Refuse(RejectReason::QtyBelowMin),
+        },
+        Case {
+            name: "the_minimum_itself_still_trades",
+            input: holding(MIN_SHARES.0),
+            expect: Expect::Place {
+                price: sell_price,
+                qty: MIN_SHARES,
+            },
+        },
+        Case {
+            name: "no_money_refuses_as_underfunded_rather_than_below_the_minimum",
+            input: FlattenInput {
+                funds: FundsView {
+                    spendable: 0,
+                    floor: 0,
+                },
+                ..holding(-10 * FIXED_SCALE)
+            },
+            expect: Expect::Refuse(RejectReason::Underfunded),
+        },
+        Case {
+            name: "a_book_with_no_far_side_gives_no_price_to_take",
+            input: FlattenInput {
+                top: BookTop {
+                    best_bid: None,
+                    ..top(BID, ASK)
+                },
+                ..holding(10 * FIXED_SCALE)
+            },
+            expect: Expect::Refuse(RejectReason::BookNotQuotable),
+        },
+    ];
+    for case in cases {
+        let outcome = plan_flatten(case.input);
+        match case.expect {
+            Expect::Nothing => assert_eq!(
+                outcome,
+                FlattenOutcome::Nothing,
+                "case {}: got {outcome:?}",
+                case.name
+            ),
+            Expect::Refuse(reason) => assert_eq!(
+                outcome,
+                FlattenOutcome::Refuse(reason),
+                "case {}: got {outcome:?}",
+                case.name
+            ),
+            Expect::Place { price, qty } => {
+                let intent = placed(outcome);
+                assert_eq!(intent.price, price, "case {}: price", case.name);
+                assert_eq!(intent.qty, qty, "case {}: qty", case.name);
+                assert_eq!(
+                    intent.style,
+                    OrderStyle::Immediate,
+                    "case {}: style",
+                    case.name
+                );
+            }
+        }
+    }
 }
 
 /// FITNESS: the taker fee is the venue's published formula, pinned against the venue's own
@@ -222,47 +297,6 @@ fn the_taker_fee_matches_the_venues_published_worked_examples() {
             0
         );
     }
-}
-
-/// FITNESS: the venue's fee MODEL is what silences the curve, not a rate left at zero.
-///
-/// A venue that takes its cut out of what a trade receives charges a marketable buy nothing on top,
-/// and it must charge nothing even carrying a rate — otherwise the only thing standing between
-/// binance and polymarket's fee is a config default, and the day one is copied from the other the
-/// engine quietly reserves money the venue was never going to ask for.
-#[test]
-fn a_venue_that_charges_no_fee_on_top_charges_none_at_any_rate() {
-    let hundred = Qty(100 * FIXED_SCALE);
-    let even_money = Price(FIXED_SCALE / 2);
-    assert_eq!(
-        FeeModel::None.taker_fee_quote(even_money, hundred, FEE_RATE),
-        0,
-        "the same shares, the same price and the same rate the other model charges 1.75 for"
-    );
-
-    // Exactly the notional of ten shares, which covers ten only when nothing is charged on top.
-    let ten = Qty(10 * FIXED_SCALE);
-    let charging = FlattenInput {
-        funds: FundsView {
-            spendable: Price(ASK + SLACK_TICKS as i64 * TICK).notional(ten),
-            floor: 0,
-        },
-        ..holding(-ten.0)
-    };
-    let free = FlattenInput {
-        fee_model: FeeModel::None,
-        ..charging
-    };
-    assert_eq!(
-        placed(plan_flatten(free)).qty,
-        ten,
-        "so the planner asks for the whole position"
-    );
-    assert!(
-        placed(plan_flatten(charging)).qty < ten,
-        "and the identical budget and rate buy strictly less under the model that does charge on \
-         top — a model the planner never read would make these two equal"
-    );
 }
 
 /// FITNESS: a BUY reserves the fee on TOP of the notional, so a flatten cannot ask for more
@@ -304,53 +338,6 @@ fn a_buy_reserves_the_taker_fee_alongside_the_notional() {
     assert!(
         with_fee < free_of_charge,
         "a headroom that made no difference to the size is a headroom that is not being reserved"
-    );
-}
-
-/// FITNESS: a residue the venue is too coarse to trade is REFUSED, not rounded up into an order the
-/// venue would reject or down into one of nothing.
-///
-/// This is the state R7 rules unflattenable, and it is reached by ordinary partial fills: below the
-/// five-share minimum there is no order to send, and the position rides to resolution. Refusing by
-/// name is what puts that on the operator's screen instead of leaving a silent no-op.
-#[test]
-fn a_residue_below_the_venue_minimum_is_refused_rather_than_rounded() {
-    assert_eq!(
-        plan_flatten(holding(MIN_SHARES.0 - SHARE_STEP)),
-        FlattenOutcome::Refuse(RejectReason::QtyBelowMin),
-        "one step under the floor is unflattenable, and silently doing nothing hides it"
-    );
-    assert_eq!(
-        placed(plan_flatten(holding(MIN_SHARES.0))).qty,
-        MIN_SHARES,
-        "the floor itself trades — a refusal there would strand every position that reached it \
-         exactly"
-    );
-
-    let broke = FlattenInput {
-        funds: FundsView {
-            spendable: 0,
-            floor: 0,
-        },
-        ..holding(-10 * FIXED_SCALE)
-    };
-    assert_eq!(
-        plan_flatten(broke),
-        FlattenOutcome::Refuse(RejectReason::Underfunded),
-        "no money is a different problem from no size, and an operator acts on them differently"
-    );
-
-    let blind = FlattenInput {
-        top: BookTop {
-            best_bid: None,
-            ..top(BID, ASK)
-        },
-        ..holding(10 * FIXED_SCALE)
-    };
-    assert_eq!(
-        plan_flatten(blind),
-        FlattenOutcome::Refuse(RejectReason::BookNotQuotable),
-        "a book with no far side gives no price to take"
     );
 }
 

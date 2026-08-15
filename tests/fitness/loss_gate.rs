@@ -66,70 +66,121 @@ fn a_realised_breach_halts_whatever_residue_the_position_holds() {
     }
 }
 
-/// FITNESS: a loss that is only marked to market withdraws a side and never halts, because the
-/// position moving is exactly what could still recover it — and the side it keeps is the one that
-/// shrinks the position.
+/// FITNESS: `assess_loss` verdicts match a named table spanning all three outcomes — an unrealised
+/// loss only withdraws the side that would add to it, a realised number is honest even before any
+/// mark exists, and no breach is ever invented from profit, from a zero budget, or from a budget with
+/// nothing yet lost against it. Each case's assertion message carries its name.
 #[test]
-fn an_unrealised_breach_only_withdraws_the_adding_side() {
-    assert_eq!(
-        assess_loss(session(Some(-6 * ONE), 0, Qty(ONE)), BUDGET),
-        LossVerdict::MarkToMarket {
-            reducing: Side::Sell
+fn assess_loss_verdicts_match_named_cases() {
+    struct Case {
+        name: &'static str,
+        mark_to_market_quote: Option<i64>,
+        realised_quote: i64,
+        position_base: i64,
+        budget: i64,
+        expected: LossVerdict,
+    }
+    let cases = [
+        Case {
+            name: "unrealised_long_recovers_by_selling",
+            mark_to_market_quote: Some(-6 * ONE),
+            realised_quote: 0,
+            position_base: ONE,
+            budget: BUDGET,
+            expected: LossVerdict::MarkToMarket {
+                reducing: Side::Sell,
+            },
         },
-        "a long whose mark fell is recoverable, and selling is the way back"
-    );
-    assert_eq!(
-        assess_loss(session(Some(-6 * ONE), 0, Qty(-ONE)), BUDGET),
-        LossVerdict::MarkToMarket {
-            reducing: Side::Buy
-        }
-    );
-    assert_eq!(
-        assess_loss(session(Some(-4 * ONE), -4 * ONE, DUST), BUDGET),
-        LossVerdict::Within,
-        "inside the budget on both legs, so nothing is withdrawn at all"
-    );
-}
-
-/// FITNESS: an instrument that has never had an honest valuation still has an honest REALISED
-/// number. There is no mark-to-market verdict to give before the first two-sided book, but a round
-/// trip closed in that window really did lose the money it lost.
-#[test]
-fn realised_is_judged_before_any_mark_exists() {
-    assert_eq!(
-        assess_loss(session(None, -6 * ONE, DUST), BUDGET),
-        LossVerdict::Realised
-    );
-    assert_eq!(
-        assess_loss(session(None, -4 * ONE, Qty(ONE)), BUDGET),
-        LossVerdict::Within,
-        "no mark means no mark-to-market verdict — it must not be invented as a breach"
-    );
-}
-
-/// FITNESS: losing nothing is not losing. The breach has to be a LOSS at least as large as the
-/// budget, not merely `pnl <= -budget` — that reads break-even as a breach the moment the budget is
-/// ZERO, which is the value every budget takes in the execution-off shape, so the kill switch would
-/// fire on an engine that has not made one decision.
-#[test]
-fn a_ledger_that_has_lost_nothing_never_breaches() {
-    for budget in [0, BUDGET] {
-        assert_eq!(
-            assess_loss(session(Some(0), 0, Qty(0)), budget),
-            LossVerdict::Within,
-            "nothing traded, nothing lost"
+        Case {
+            name: "unrealised_short_recovers_by_buying",
+            mark_to_market_quote: Some(-6 * ONE),
+            realised_quote: 0,
+            position_base: -ONE,
+            budget: BUDGET,
+            expected: LossVerdict::MarkToMarket {
+                reducing: Side::Buy,
+            },
+        },
+        Case {
+            name: "within_budget_on_both_legs",
+            mark_to_market_quote: Some(-4 * ONE),
+            realised_quote: -4 * ONE,
+            position_base: DUST.0,
+            budget: BUDGET,
+            expected: LossVerdict::Within,
+        },
+        Case {
+            name: "realised_breach_judged_before_any_mark_exists",
+            mark_to_market_quote: None,
+            realised_quote: -6 * ONE,
+            position_base: DUST.0,
+            budget: BUDGET,
+            expected: LossVerdict::Realised,
+        },
+        Case {
+            name: "no_mark_means_no_invented_mark_to_market_breach",
+            mark_to_market_quote: None,
+            realised_quote: -4 * ONE,
+            position_base: ONE,
+            budget: BUDGET,
+            expected: LossVerdict::Within,
+        },
+        Case {
+            name: "flat_and_untraded_at_zero_budget",
+            mark_to_market_quote: Some(0),
+            realised_quote: 0,
+            position_base: 0,
+            budget: 0,
+            expected: LossVerdict::Within,
+        },
+        Case {
+            name: "flat_and_untraded_at_a_real_budget",
+            mark_to_market_quote: Some(0),
+            realised_quote: 0,
+            position_base: 0,
+            budget: BUDGET,
+            expected: LossVerdict::Within,
+        },
+        Case {
+            name: "profit_not_a_breach_at_zero_budget",
+            mark_to_market_quote: Some(ONE),
+            realised_quote: ONE,
+            position_base: ONE,
+            budget: 0,
+            expected: LossVerdict::Within,
+        },
+        Case {
+            name: "profit_not_a_breach_at_real_budget",
+            mark_to_market_quote: Some(ONE),
+            realised_quote: ONE,
+            position_base: ONE,
+            budget: BUDGET,
+            expected: LossVerdict::Within,
+        },
+        Case {
+            name: "one_mantissa_lost_still_breaches_a_zero_budget",
+            mark_to_market_quote: Some(-1),
+            realised_quote: -1,
+            position_base: 0,
+            budget: 0,
+            expected: LossVerdict::Realised,
+        },
+    ];
+    for case in cases {
+        let got = assess_loss(
+            session(
+                case.mark_to_market_quote,
+                case.realised_quote,
+                Qty(case.position_base),
+            ),
+            case.budget,
         );
         assert_eq!(
-            assess_loss(session(Some(ONE), ONE, Qty(ONE)), budget),
-            LossVerdict::Within,
-            "a profit is not a breach at any budget"
+            got, case.expected,
+            "case {}: got {:?}, want {:?}",
+            case.name, got, case.expected
         );
     }
-    assert_eq!(
-        assess_loss(session(Some(-1), -1, Qty(0)), 0),
-        LossVerdict::Realised,
-        "a budget of zero admits no loss, so one mantissa of one is still a breach"
-    );
 }
 
 /// Reads nothing and declares nothing: every command the tests below assert on is the ENGINE's.
@@ -370,78 +421,73 @@ fn restored(position_base: i64, cash_quote: i64, basis_quote: i64) -> [Instrumen
     }]
 }
 
-/// FITNESS: a profit banked by PREVIOUS runs does not extend this run's budget. The gate has to fire
-/// at five quote units lost THIS session, not at fifty-five.
-///
-/// The failure it forbids is fail-open and unbounded, which is what makes it a kill-switch defect
-/// rather than an accounting one: a ledger seeded with `basis = -cash` releases the inherited
-/// fifty back into realised PnL as the position closes, so the engine reads a profit while it is
-/// losing money, and every further run that ends ahead raises the ceiling again.
+/// FITNESS: a restored ledger's cash and basis are independent facts, and the budget answers only to
+/// what THIS session realises against them — never to a previous run's profit (fail-open: a ledger
+/// seeded with `basis = -cash` would release the inherited fifty back into realised PnL and raise the
+/// ceiling every run that ends ahead), a previous run's loss (fail-closed: an absolute reading would
+/// trip on the first round trip of every run that follows), or the true cost basis of a position this
+/// run inherited rather than opened. Named cases below span all three; each pins both the halt and
+/// the adjacent within-budget non-halt so the boundary, not just the direction, is under test.
 #[test]
-fn an_inherited_profit_never_extends_this_sessions_budget() {
-    let banked_profit = restored(0, 50 * ONE, 0);
-
-    // Bought at 100 and sold at 94: six lost this session against a budget of five.
-    assert!(
-        halts_after_restoring(
-            &banked_profit,
-            &[(100 * ONE, ONE)],
-            &[(94 * ONE, ONE)],
-            BUDGET
-        ),
-        "six quote units are gone this session and the engine is still quoting — it is spending an \
-         earlier run's profit as if it were budget"
-    );
-    // Four lost, which is inside the budget — so the test above is reading the LIMIT and not merely
-    // a gate that halts on any closed trade at all.
-    assert!(
-        !halts_after_restoring(
-            &banked_profit,
-            &[(100 * ONE, ONE)],
-            &[(96 * ONE, ONE)],
-            BUDGET
-        ),
-        "four quote units lost is inside a budget of five"
-    );
-}
-
-/// FITNESS: a loss banked by PREVIOUS runs does not halt a fresh one. The mirror of the test above
-/// and the fail-CLOSED direction: read absolutely, an inherited fifty-unit loss trips the switch on
-/// the first completed round trip of every run that follows, however well that run is doing.
-#[test]
-fn an_inherited_loss_never_halts_a_fresh_run_on_its_first_round_trip() {
-    let banked_loss = restored(0, -50 * ONE, 0);
-
-    assert!(
-        !halts_after_restoring(
-            &banked_loss,
-            &[(100 * ONE, ONE)],
-            &[(100 * ONE, ONE)],
-            BUDGET
-        ),
-        "this session bought and sold at the same price and has lost nothing — the halt came from a \
-         previous run's result"
-    );
-}
-
-/// FITNESS: closing a position this run INHERITED books only what this run made or lost on it. The
-/// restored basis is what the position really cost, and it is carried in the file rather than
-/// inferred from cash precisely so a run that both banked a result and kept inventory — the ordinary
-/// state of any engine that has been running a while — restores both facts separately.
-#[test]
-fn closing_a_restored_position_books_only_this_runs_result() {
-    // Thirty banked and one unit still held, bought at 100: cash is the two together, basis is the
-    // position alone. Inferring `basis = -cash` would call the position's cost seventy.
-    let held = restored(ONE, -70 * ONE, 100 * ONE);
-
-    assert!(
-        halts_after_restoring(&held, &[], &[(95 * ONE, ONE)], BUDGET),
-        "selling a unit that cost 100 for 95 loses five, which is the budget exactly"
-    );
-    assert!(
-        !halts_after_restoring(&held, &[], &[(95 * ONE, ONE)], 6 * ONE),
-        "and five is inside a budget of six — the loss booked is this run's, not the whole cash leg"
-    );
+fn restored_ledger_boundaries_match_named_cases() {
+    struct Case {
+        name: &'static str,
+        restored: [InstrumentExposure; 1],
+        opened: &'static [(i64, i64)],
+        closed: &'static [(i64, i64)],
+        budget: i64,
+        expect_halt: bool,
+    }
+    let cases = [
+        Case {
+            name: "inherited_profit_does_not_cover_a_six_unit_session_loss",
+            restored: restored(0, 50 * ONE, 0),
+            opened: &[(100 * ONE, ONE)],
+            closed: &[(94 * ONE, ONE)],
+            budget: BUDGET,
+            expect_halt: true,
+        },
+        Case {
+            name: "inherited_profit_is_moot_once_the_session_loss_is_within_budget",
+            restored: restored(0, 50 * ONE, 0),
+            opened: &[(100 * ONE, ONE)],
+            closed: &[(96 * ONE, ONE)],
+            budget: BUDGET,
+            expect_halt: false,
+        },
+        Case {
+            name: "inherited_loss_does_not_halt_a_flat_first_round_trip",
+            restored: restored(0, -50 * ONE, 0),
+            opened: &[(100 * ONE, ONE)],
+            closed: &[(100 * ONE, ONE)],
+            budget: BUDGET,
+            expect_halt: false,
+        },
+        Case {
+            name: "closing_a_restored_position_at_its_real_basis_hits_the_budget",
+            restored: restored(ONE, -70 * ONE, 100 * ONE),
+            opened: &[],
+            closed: &[(95 * ONE, ONE)],
+            budget: BUDGET,
+            expect_halt: true,
+        },
+        Case {
+            name: "the_same_close_is_within_a_slightly_wider_budget",
+            restored: restored(ONE, -70 * ONE, 100 * ONE),
+            opened: &[],
+            closed: &[(95 * ONE, ONE)],
+            budget: 6 * ONE,
+            expect_halt: false,
+        },
+    ];
+    for case in cases {
+        let halted = halts_after_restoring(&case.restored, case.opened, case.closed, case.budget);
+        assert_eq!(
+            halted, case.expect_halt,
+            "case {}: halted={halted}",
+            case.name
+        );
+    }
 }
 
 /// A rotation, far enough from its close that nothing in the quote-stop path fires — the only thing

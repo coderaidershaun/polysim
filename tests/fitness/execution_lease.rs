@@ -119,8 +119,20 @@ fn one_account_and_te_has_one_owner_and_a_durable_nonce() {
     assert_eq!(restarted.run_nonce(), 2);
 }
 
+/// FITNESS: the host lock is scoped to the TE identity alone, and the nonce history to whatever axis
+/// actually distinguishes one credential's traffic from another's — never to the state directory,
+/// which is a deployment detail with no bearing on which venue account is armed.
+///
+/// The three go together deliberately: each names a different thing the lock must NOT be keyed by.
+/// Two credentials on the same venue under one TE identity still contend for the one host lock, and
+/// each starts its own nonce history rather than inheriting the other's. Two different venues under
+/// one TE identity contend the same way — the lock is keyed by TE identity alone, so it is the same
+/// lock whichever venue a run trades, while the nonce namespace is keyed by venue and account, so
+/// sharing it would mint client order ids under a nonce the other venue already used. And a different
+/// state directory must not be a way to evade the host lock entirely — the lease is about which
+/// PROCESS is armed, not where it happens to keep its files.
 #[test]
-fn different_accounts_share_the_host_lock_but_not_the_nonce() {
+fn the_host_lock_and_nonce_history_are_scoped_by_credential_and_venue_never_by_directory() {
     let directory = fresh_directory();
     let te_tag = fresh_te_tag();
     let account_a = ExecutionLease::acquire(
@@ -155,16 +167,9 @@ fn different_accounts_share_the_host_lock_but_not_the_nonce() {
         1,
         "a credential that has never run starts its own nonce history, not the other account's"
     );
-}
+    drop(account_b);
 
-/// The host lock is keyed by TE identity alone, so it is the same lock whichever venue a run trades;
-/// the nonce namespace is keyed by venue and account, so it is a different history.
-#[test]
-fn two_venues_under_one_te_share_the_host_lock_but_not_the_nonce() {
-    let directory = fresh_directory();
-    let te_tag = fresh_te_tag();
     let signer = "0x0d09aEC2D10F396fB59482644708CBd353798b87";
-
     let binance = ExecutionLease::acquire(
         &directory,
         te_tag,
@@ -206,18 +211,16 @@ fn two_venues_under_one_te_share_the_host_lock_but_not_the_nonce() {
     )
     .expect("the next polymarket process acquires");
     assert_eq!(restarted.run_nonce(), 2);
-}
+    drop(restarted);
 
-#[test]
-fn exposure_directory_cannot_be_used_to_evade_the_host_lease() {
     let first_directory = fresh_directory();
     let second_directory = fresh_directory();
-    let te_tag = fresh_te_tag();
+    let evasion_tag = fresh_te_tag();
     let api_key = account("directory-evasion");
     let namespace = binance_exec::lease_namespace(BinanceEnv::Testnet, &api_key);
-    let first = ExecutionLease::acquire(&first_directory, te_tag, &namespace)
+    let first = ExecutionLease::acquire(&first_directory, evasion_tag, &namespace)
         .expect("first configuration acquires");
-    let second = ExecutionLease::acquire(&second_directory, te_tag, &namespace)
+    let second = ExecutionLease::acquire(&second_directory, evasion_tag, &namespace)
         .err()
         .expect("a different state directory cannot evade the host lock");
     assert!(matches!(second, EngineError::ExecutionIdentityInUse { .. }));

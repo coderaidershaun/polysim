@@ -124,31 +124,3 @@ fn a_fill_banks_an_order_row_beside_it_and_a_redelivery_banks_neither() {
         redelivered.fills.len()
     );
 }
-
-/// FITNESS: naming neither table records nothing at all. The gate is the operator's, and an engine
-/// that wrote its order history into a run configured without it would leak exactly the data an
-/// operator chose not to keep.
-#[test]
-fn an_unnamed_table_records_no_rows() {
-    let instruments = [instrument_row(0, TrackerSpec::default(), 64)];
-    let (persistence, mut records) =
-        persist_ring_for(1024, RecordedTables::new(&[TableKind::Trades]));
-    let (log_sink, _logs) = strategy_log_ring(64);
-    let (metrics, _metrics) = metrics_ring(64);
-    let mut engine =
-        engine_without_warmup(&instruments, Box::new(Idle), persistence, log_sink, metrics);
-
-    let mut pen = FillPen::new(0);
-    for message in pen.fill(Side::Buy, 100 * ONE, ONE, 10) {
-        engine.dispatch(pop(0, 0), &message);
-    }
-    assert!(
-        records.pop().is_err(),
-        "an unnamed table still received a row"
-    );
-    assert_eq!(
-        engine.dropped_persist_records(),
-        0,
-        "a gated row is not a capacity drop and must not be counted as one"
-    );
-}

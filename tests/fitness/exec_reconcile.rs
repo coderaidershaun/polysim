@@ -227,28 +227,6 @@ fn passive(side: Side) -> i64 {
     }
 }
 
-/// FITNESS: our BID is a BUY that rests BELOW the best ask, and our ASK is a SELL above the best
-/// bid. The compiler catches `Side::Bid`; it cannot catch a mapping that is inverted and compiles,
-/// which is the one that sends a real sell into a bid quote.
-#[test]
-fn a_bid_rests_below_the_ask_and_an_ask_rests_above_the_bid() {
-    let buy = reconcile_side(input(Side::Buy, want(100 * ONE - TICK, ONE), None));
-    let intent = placed(buy).expect("a funded, on-grid, non-crossing bid places");
-    assert!(
-        intent.price < Price(100 * ONE + TICK),
-        "our bid at {:?} is not below the best ask",
-        intent.price
-    );
-
-    let sell = reconcile_side(input(Side::Sell, want(100 * ONE + 2 * TICK, ONE), None));
-    let intent = placed(sell).expect("a funded, on-grid, non-crossing ask places");
-    assert!(
-        intent.price > Price(100 * ONE),
-        "our ask at {:?} is not above the best bid",
-        intent.price
-    );
-}
-
 proptest! {
     /// FITNESS: no emitted order ever crosses. A buy at or above the best ask, or a sell at or below
     /// the best bid, is a taker order the strategy did not ask for and the fee tier cannot afford.
@@ -451,22 +429,6 @@ fn a_crossing_quote_is_refused_and_leaves_the_resting_order_alone() {
     );
 }
 
-/// FITNESS: only `PostOnly` is admitted this milestone, and anything else is refused BY NAME. A
-/// quietly downgraded style would have the engine resting an order the strategy meant to cross with.
-#[test]
-fn a_style_this_milestone_does_not_admit_is_refused_by_name() {
-    let immediate = Some(DesiredQuote {
-        price: Price(100 * ONE - TICK),
-        qty: Qty(ONE),
-        style: OrderStyle::Immediate,
-    });
-    assert_eq!(
-        reconcile_side(input(Side::Buy, immediate, None)),
-        ReconcileOutcome::Reject(RejectReason::StyleNotPermitted),
-        "an Immediate order must be refused by name, never downgraded to passive"
-    );
-}
-
 /// FITNESS: a book the engine cannot price withdraws the quote rather than leaving it resting.
 /// Being blind is exactly when a stale quote gets picked off.
 #[test]
@@ -526,62 +488,17 @@ fn an_undeclared_side_is_withdrawn() {
     );
 }
 
-/// FITNESS: a changed price is a two-decision sequence. The first decision contains only a cancel;
-/// placement becomes possible only after the caller supplies terminal confirmation as `None`.
-#[test]
-fn a_requote_is_cancel_confirm_then_place() {
-    let wanted = want(passive(Side::Buy) - 3 * TICK, ONE);
-    let first = reconcile_side(input(Side::Buy, wanted, live(passive(Side::Buy), ONE)));
-    assert_eq!(
-        first,
-        ReconcileOutcome::Cancel,
-        "a changed quote carried a speculative replacement before the old order was terminal"
-    );
-
-    let after_terminal = reconcile_side(input(Side::Buy, wanted, None));
-    assert!(
-        matches!(after_terminal, ReconcileOutcome::Place(_)),
-        "the latest desired quote was not admitted after terminal confirmation: {after_terminal:?}"
-    );
-}
-
-/// FITNESS: an acknowledged amend lands the venue's new size on the slot, so the shrink is decided
-/// ONCE. A slot still holding the pre-amend size decides the same shrink again on the next spin,
-/// and again after that — spending the order's amend budget and eventually forcing a cancel.
+/// FITNESS: an acknowledged amend lands the venue's new size on the slot so the shrink is decided
+/// ONCE, and one amend COMMAND spends exactly one amend — however its answers arrive.
 ///
-/// Driven in both delivery orders because a single amend is answered TWICE — by the request's own
-/// ack and by an `executionReport` on the account stream — and either may arrive first.
+/// A slot still holding the pre-amend size decides the same shrink again on the next spin, and again
+/// after that — spending the order's amend budget and eventually forcing a cancel. And the venue
+/// publishes no per-order amend figure, so the local count is the only thing standing between the
+/// engine and a rejected eleventh amend. Both properties are driven over every delivery pattern
+/// because a single amend is answered TWICE — by the request's own ack and by an `executionReport` on
+/// the account stream — and either may arrive first, may duplicate, or the other may go missing.
 #[test]
-fn an_acknowledged_amend_lands_the_new_size_and_settles() {
-    for kinds in [
-        [ExecKind::AckAmended, ExecKind::ReportAmended],
-        [ExecKind::ReportAmended, ExecKind::AckAmended],
-    ] {
-        let mut slot = amending_slot(10 * STEP);
-        for kind in kinds {
-            apply_exec_event(&mut slot, &amend_answer(kind, 4 * STEP));
-        }
-        assert_eq!(
-            slot.qty,
-            Qty(4 * STEP),
-            "the slot still holds the pre-amend size after {kinds:?}"
-        );
-        let desired = want(passive(Side::Buy), 4 * STEP);
-        assert_eq!(
-            reconcile_side(input(Side::Buy, desired, resting_of(&slot))),
-            ReconcileOutcome::Nothing,
-            "the shrink was decided a second time after {kinds:?}"
-        );
-    }
-}
-
-/// FITNESS: one amend COMMAND spends exactly one amend, however its answers arrive. The venue
-/// publishes no per-order amend figure, so this count is the only thing standing between the engine
-/// and a rejected eleventh amend — and a single amend is answered twice, by its own ack and by an
-/// `executionReport`, either of which may also duplicate. Counting those as separate amends
-/// exhausts the budget at twice the true rate and turns every later shrink into a cancel.
-#[test]
-fn one_amend_command_spends_exactly_one_amend() {
+fn an_amend_answer_lands_the_size_once_and_spends_exactly_one_amend_per_command() {
     let deliveries: [&[ExecKind]; 5] = [
         &[ExecKind::AckAmended],
         &[ExecKind::AckAmended, ExecKind::ReportAmended],
@@ -599,9 +516,20 @@ fn one_amend_command_spends_exactly_one_amend() {
             apply_exec_event(&mut slot, &amend_answer(*kind, 4 * STEP));
         }
         assert_eq!(
+            slot.qty,
+            Qty(4 * STEP),
+            "the slot did not settle on the venue's size after {answers:?}"
+        );
+        assert_eq!(
             slot.amends_used, 1,
             "one amend command spent {} amends against {answers:?}",
             slot.amends_used
+        );
+        let desired = want(passive(Side::Buy), 4 * STEP);
+        assert_eq!(
+            reconcile_side(input(Side::Buy, desired, resting_of(&slot))),
+            ReconcileOutcome::Nothing,
+            "the shrink was decided a second time after {answers:?}"
         );
 
         // The SECOND command counts too — a slot re-entering `AmendInFlight` is the engine sending

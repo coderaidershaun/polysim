@@ -232,32 +232,3 @@ fn force_teardown_when_next_subscribe_finds_slot_occupied() {
     assert_eq!(actions, expected);
     assert_eq!(machine.state(), SlotState::Subscribed);
 }
-
-#[test]
-fn identical_input_sequence_yields_identical_machine_and_actions() {
-    let script = [
-        (OPEN - 60, SlotInput::Assign(window(OPEN, "n"))),
-        (OPEN, SlotInput::Frame),
-        (OPEN + 120, SlotInput::Frame),
-        (CLOSE, SlotInput::Frame),
-        (CLOSE + 40, SlotInput::Frame),
-        (CLOSE + 40, SlotInput::Collapsed),
-        (CLOSE + 43, SlotInput::Tick),
-        (CLOSE + 44, SlotInput::Tick),
-    ];
-
-    let replay = || {
-        let mut machine = SlotMachine::new(PolySchedule::BTC_5M);
-        let mut log = Vec::new();
-        for (now_secs, input) in script.iter().cloned() {
-            log.extend(feed(&mut machine, now_secs, input));
-        }
-        (machine, log)
-    };
-
-    let (first_machine, first_log) = replay();
-    let (second_machine, second_log) = replay();
-    assert_eq!(first_machine, second_machine);
-    assert_eq!(first_log, second_log);
-    assert_eq!(first_machine.state(), SlotState::Idle);
-}

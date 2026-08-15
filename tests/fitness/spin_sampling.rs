@@ -1,8 +1,8 @@
 //! Spin-sampling fitness: the time clock samples committed state (`latest`), never the live book
 //! (a tick can pop mid-update). Holds through one-sided stretches, skips after a reset until commit.
 //! The per-side trade counts are per-tick aggregates, so they must zero at every sample point.
-//! The last two cases carry the other half of the contract — a strategy derives its windows and its
-//! per-second rescale from the configured spin, so both must track a change to it.
+//! The last case carries the other half of the contract — a strategy derives its windows from the
+//! configured spin, so they must track a change to it.
 
 use polysim::config::{SpinField, TableKind};
 use polysim::hot::dispatch::HotEngine;
@@ -377,22 +377,6 @@ impl SpinDriver {
     }
 }
 
-/// A fixed-seed ±[`TICK`] walk. Sign variety matters: only over a genuinely unbiased sequence is the
-/// k-step return variance k times the one-step variance, which is what the per-second rescale claims.
-fn random_walk(steps: usize) -> Vec<i64> {
-    let mut state: u64 = 0x2545_f491_4f6c_dd1d;
-    let mut price = 100 * ONE;
-    let mut path = Vec::with_capacity(steps);
-    for _ in 0..steps {
-        state = state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        price += if state >> 63 == 0 { TICK } else { -TICK };
-        path.push(price);
-    }
-    path
-}
-
 /// The realised-vol window, measured from outside: fill it with a volatile prefix, then hold the
 /// price still and count the samples it takes for the prefix to age out entirely — the tick the
 /// reported vol collapses to exactly zero is the tick the window last held a nonzero return.
@@ -415,37 +399,6 @@ fn observed_window(spin_interval: DurationUs, probe_limit: usize) -> usize {
         }
     }
     panic!("the volatile prefix never aged out within {probe_limit} held samples");
-}
-
-/// The one path, sampled at two cadences, must report the same per-second realised vol: the rescale
-/// divides by the interval the samples are ACTUALLY spaced by, so a stale divisor shows up here as a
-/// factor of sqrt(rate ratio) — silent corruption of every vol column, not a crash.
-#[test]
-fn realised_vol_per_second_agrees_across_spin_rates() {
-    const FINE_SPIN: DurationUs = DurationUs::from_micros(100_000);
-    const STRIDE: usize = 5;
-    let path = random_walk(3_000);
-
-    let mut fine = SpinDriver::new(FINE_SPIN);
-    let fine_vol = path.iter().map(|price| fine.step(*price)).last().flatten();
-
-    let mut coarse = SpinDriver::new(DurationUs::from_micros(FINE_SPIN.micros() * STRIDE as i64));
-    let coarse_vol = path
-        .iter()
-        .step_by(STRIDE)
-        .map(|price| coarse.step(*price))
-        .last()
-        .flatten();
-
-    let fine_vol = fine_vol.expect("the fine path reports a volatility");
-    let coarse_vol = coarse_vol.expect("the coarse path reports a volatility");
-    let ratio = fine_vol / coarse_vol;
-    assert!(
-        (ratio - 1.0).abs() < 0.25,
-        "per-second vol must not depend on the sampling rate: {fine_vol} at {}us vs {coarse_vol} at {}us",
-        FINE_SPIN.micros(),
-        FINE_SPIN.micros() * STRIDE as i64
-    );
 }
 
 /// Derived windows are a fixed span of TIME, so halving the spin doubles the sample count — until

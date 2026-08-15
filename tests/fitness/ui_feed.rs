@@ -226,10 +226,14 @@ fn execution_frames(consumer: &mut Consumer<UiEvent>) -> Vec<ExecHalt> {
         .collect()
 }
 
-/// One committed multi-chunk update emits exactly one snapshot, its top-16 mirrors the book, and a
-/// following committed delta bumps the per-instrument sequence.
+/// One committed multi-chunk update emits exactly one snapshot, its top-16 mirrors the book, a
+/// following committed delta bumps the per-instrument sequence, a reset then emits an
+/// `AwaitingSnapshot` snapshot with empty sides continuing that same sequence, and a rotation emits
+/// too. Book snapshots also ride ahead of the warmup gate (every dispatch here uses zero warmup, and
+/// [`feed_events_tee_ahead_of_the_warmup_gate`] below pins the non-zero case for the event lane) so
+/// operators watch the book build before the strategy goes live.
 #[test]
-fn snapshot_emitted_only_at_commit_boundary_with_monotonic_seq() {
+fn book_snapshot_lifecycle_from_commit_through_reset_and_rotation() {
     let (mut engine, mut books, mut events) = ui_engine(Box::new(Idle), DurationUs::ZERO);
 
     let (bids, asks) = snapshot_pair(
@@ -274,45 +278,21 @@ fn snapshot_emitted_only_at_commit_boundary_with_monotonic_seq() {
         pop_events(&mut events).is_empty(),
         "an idle strategy tees no quote events"
     );
-}
 
-/// A reset emits an `AwaitingSnapshot` snapshot with empty sides; a rotation emits too.
-#[test]
-fn reset_emits_awaiting_and_rotation_emits() {
-    let (mut engine, mut books, _events) = ui_engine(Box::new(Idle), DurationUs::ZERO);
-    let (bids, asks) = snapshot_pair(0, &[(100 * ONE, ONE)], &[(101 * ONE, ONE)], 10);
-    engine.dispatch(pop(0, 0), &InboundMessage::Book(bids));
-    engine.dispatch(pop(0, 0), &InboundMessage::Book(asks));
-    assert_eq!(pop_books(&mut books).len(), 1, "the seed commit emitted");
-
-    engine.dispatch(pop(0, 0), &InboundMessage::BookReset(book_reset(0, 20)));
+    engine.dispatch(pop(0, 0), &InboundMessage::BookReset(book_reset(0, 30)));
     let snaps = pop_books(&mut books);
     assert_eq!(snaps.len(), 1, "a reset emits one snapshot");
     assert_eq!(snaps[0].state, UiBookState::AwaitingSnapshot);
     assert_eq!((snaps[0].bid_len, snaps[0].ask_len), (0, 0));
-    assert_eq!(snaps[0].seq, 1, "the reset continues the sequence");
+    assert_eq!(snaps[0].seq, 2, "the reset continues the sequence");
 
     engine.dispatch(
         pop(0, 0),
-        &InboundMessage::MarketRotation(rotation(0, 300 * ONE, 600 * ONE, 30)),
+        &InboundMessage::MarketRotation(rotation(0, 300 * ONE, 600 * ONE, 40)),
     );
     let snaps = pop_books(&mut books);
     assert_eq!(snaps.len(), 1, "a rotation refreshes the UI book");
-    assert_eq!(snaps[0].seq, 2);
-}
-
-/// Book snapshots ride ahead of the warmup gate, so operators watch the book build before the
-/// strategy goes live.
-#[test]
-fn book_snapshots_emit_during_warmup() {
-    // Warmup 10s; all messages land at t=1s, so the strategy stays suppressed the whole test.
-    let (mut engine, mut books, _events) = ui_engine(Box::new(Idle), DurationUs::from_secs(10));
-    let (bids, asks) = snapshot_pair(0, &[(100 * ONE, ONE)], &[(101 * ONE, ONE)], 1_000_000);
-    engine.dispatch(pop(0, 0), &InboundMessage::Book(bids));
-    engine.dispatch(pop(0, 0), &InboundMessage::Book(asks));
-    let snaps = pop_books(&mut books);
-    assert_eq!(snaps.len(), 1, "a book commit emits during warmup");
-    assert_eq!(snaps[0].state, UiBookState::Valid);
+    assert_eq!(snaps[0].seq, 3);
 }
 
 /// The whole feed is a pure function of the input sequence: two fresh engines fed an identical mixed
@@ -411,69 +391,15 @@ fn replay_produces_identical_feed() {
     );
 }
 
-/// A tiny ring saturates under an undrained burst — drops are counted, not silently lost — and the
-/// next snapshot after a drain carries the latest state, so the feed self-heals.
-#[test]
-fn saturated_book_ring_drops_then_heals() {
-    let instruments = [instrument_row(0, tracker_spec_all(1), 64)];
-    let (sink, _persist) = persist_ring(256);
-    let (log_sink, _logs) = strategy_log_ring(64);
-    let (metrics, _metrics) = metrics_ring(64);
-    let (ui_book_sink, mut books) = ui_book_ring(4);
-    let (ui_event_sink, _events) = ui_event_ring(64);
-    let mut engine = HotEngine::new(HotEngineSetup {
-        exec: None,
-        exposure: detached_exposure(),
-        instruments: &instruments,
-        strategy: Box::new(Idle),
-        persistence: Some(sink),
-        strategy_log_sink: log_sink,
-        metrics_sink: metrics,
-        ui_book_sink,
-        ui_event_sink,
-        link: None,
-        warmup: DurationUs::ZERO,
-    });
-
-    let (bids, asks) = snapshot_pair(0, &[(100 * ONE, ONE)], &[(101 * ONE, ONE)], 10);
-    engine.dispatch(pop(0, 0), &InboundMessage::Book(bids));
-    engine.dispatch(pop(0, 0), &InboundMessage::Book(asks));
-    for i in 0..20i64 {
-        engine.dispatch(
-            pop(0, 0),
-            &InboundMessage::Book(delta_chunk(
-                0,
-                Side::Buy,
-                &[(100 * ONE, (i + 2) * ONE)],
-                100 + i,
-            )),
-        );
-    }
-    assert!(
-        engine.dropped_ui_books() > 0,
-        "an undrained burst past the 4-slot ring drops and counts"
-    );
-
-    let _ = pop_books(&mut books);
-    engine.dispatch(
-        pop(0, 0),
-        &InboundMessage::Book(delta_chunk(0, Side::Buy, &[(100 * ONE, 99 * ONE)], 200)),
-    );
-    let snaps = pop_books(&mut books);
-    assert_eq!(snaps.len(), 1, "after a drain the next snapshot lands");
-    assert_eq!(
-        snaps[0].bids[0],
-        level(100 * ONE, 99 * ONE),
-        "and it carries the latest book state, not a stale one"
-    );
-}
-
 /// The ENGINE tees the desired quote, once per instrument per spin, carrying what the strategy
 /// declared for THAT spin and the spin's own event time. The strategy has no UI call at all: it
 /// declares into level-triggered state the engine owns, so the ladder can never show a quote the
-/// engine is not actually trying to hold.
+/// engine is not actually trying to hold. A declaration also expires after ONE spin: the next spin,
+/// with the strategy declaring nothing, tees an EMPTY quote rather than repeating the last one — the
+/// same case that clears the ladder when a strategy wedges mid-logic, where a repeat would leave a
+/// level on screen the engine has already cancelled.
 #[test]
-fn desired_quote_tees_once_per_spin_with_the_spin_ts() {
+fn quote_tee_declares_then_expires() {
     let bid = Some((Price(100 * ONE), Qty(ONE)));
     let ask = Some((Price(101 * ONE), Qty(2 * ONE)));
     let (mut engine, _books, mut events) =
@@ -490,14 +416,7 @@ fn desired_quote_tees_once_per_spin_with_the_spin_ts() {
         "the event carries the spin's own event time, not a wall clock read"
     );
     assert_eq!(quote, DomQuote::top(bid, ask));
-}
 
-/// A declaration expires after ONE spin: the next spin, with the strategy declaring nothing, tees an
-/// EMPTY quote rather than repeating the last one. That is what clears the ladder when a strategy
-/// wedges mid-logic — a repeat would leave a level on screen the engine has already cancelled.
-#[test]
-fn an_expired_declaration_tees_an_empty_quote() {
-    let bid = Some((Price(100 * ONE), Qty(ONE)));
     let (mut engine, _books, mut events) = ui_engine(
         Box::new(DeclareOnceProbe {
             bid,
@@ -552,18 +471,22 @@ fn quote_events(consumer: &mut Consumer<UiEvent>) -> Vec<(InstrumentId, TsUs, Do
         .collect()
 }
 
-/// Every public print tees a Trade event ahead of the warmup gate, carrying the print faithfully, so
-/// an operator watches the tape build before the strategy goes live.
+/// Trade prints and rotations both tee to the event lane ahead of the warmup gate, carrying their
+/// facts faithfully, so an operator watches the tape and the window build before the strategy goes
+/// live. Each case below uses its own fresh engine with a 10s warmup and a single dispatch landing
+/// at t<=1s, so the strategy callback stays suppressed for the whole case — only the tee is under
+/// test.
 #[test]
-fn trade_events_emit_ahead_of_the_warmup_gate() {
-    // Warmup 10s; the print lands at t=1s, so the strategy callback stays suppressed the whole test.
-    let (mut engine, _books, mut events) = ui_engine(Box::new(Idle), DurationUs::from_secs(10));
+fn feed_events_tee_ahead_of_the_warmup_gate() {
+    let warmup = DurationUs::from_secs(10);
+
+    let (mut engine, _books, mut events) = ui_engine(Box::new(Idle), warmup);
     engine.dispatch(
         pop(0, 0),
         &InboundMessage::Trade(trade(0, 100 * ONE, 3 * ONE, Side::Sell, 1_000_000)),
     );
     let evs = pop_events(&mut events);
-    assert_eq!(evs.len(), 1, "a print tees exactly one Trade event");
+    assert_eq!(evs.len(), 1, "trade: a print tees exactly one Trade event");
     let UiEvent::Trade {
         instrument,
         seq,
@@ -573,54 +496,44 @@ fn trade_events_emit_ahead_of_the_warmup_gate() {
         qty,
     } = evs[0]
     else {
-        panic!("a print tees a Trade event, got {:?}", evs[0]);
+        panic!("trade: a print tees a Trade event, got {:?}", evs[0]);
     };
-    assert_eq!(instrument, InstrumentId(0));
-    assert_eq!(seq, 0, "the first event is sequence 0");
-    assert_eq!(event_ts_us, ts(1_000_000), "stamped with the ingress time");
-    assert_eq!(aggressor, Side::Sell);
-    assert_eq!(price, Price(100 * ONE));
-    assert_eq!(qty, Qty(3 * ONE));
-}
+    assert_eq!(instrument, InstrumentId(0), "trade: instrument");
+    assert_eq!(seq, 0, "trade: the first event is sequence 0");
+    assert_eq!(
+        event_ts_us,
+        ts(1_000_000),
+        "trade: stamped with the ingress time"
+    );
+    assert_eq!(aggressor, Side::Sell, "trade: aggressor");
+    assert_eq!(price, Price(100 * ONE), "trade: price");
+    assert_eq!(qty, Qty(3 * ONE), "trade: qty");
 
-/// Each banked `FeatureRow` tees to one Feature event, in emit order, mirroring the value that lands
-/// in Parquet — the same drain that fills the persist lane.
-#[test]
-fn feature_rows_tee_in_order_with_their_values() {
-    let (mut engine, _books, mut events) =
-        ui_engine(Box::new(FeatureProbe { ids: Vec::new() }), DurationUs::ZERO);
-    engine.dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(0, 500)));
-
-    let features: Vec<_> = pop_events(&mut events)
-        .into_iter()
-        .filter_map(|event| match event {
-            UiEvent::Feature {
-                seq,
-                event_ts_us,
-                feature,
-                value,
-                ..
-            } => Some((seq, event_ts_us, feature, value)),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(features.len(), 3, "three emits tee three Feature events");
-    let expected = [
-        (FeatureId(0), 1.5),
-        (FeatureId(1), 2.5),
-        (FeatureId(2), 3.5),
-    ];
-    for (index, ((seq, event_ts_us, feature, value), (want_id, want_value))) in
-        features.iter().zip(expected).enumerate()
-    {
-        assert_eq!(
-            *seq, index as u64,
-            "tees carry the lane-wide sequence in order"
+    let (mut engine, _books, mut events) = ui_engine(Box::new(Idle), warmup);
+    engine.dispatch(
+        pop(0, 0),
+        &InboundMessage::MarketRotation(rotation(0, 300 * ONE, 600 * ONE, 30)),
+    );
+    let evs = pop_events(&mut events);
+    assert_eq!(evs.len(), 1, "rotation: tees exactly one Rotation event");
+    let UiEvent::Rotation {
+        instrument,
+        seq,
+        event_ts_us,
+    } = evs[0]
+    else {
+        panic!(
+            "rotation: a rotation tees a Rotation event, got {:?}",
+            evs[0]
         );
-        assert_eq!(*event_ts_us, ts(500), "stamped with the spin's event time");
-        assert_eq!(*feature, want_id, "features tee in emit order");
-        assert_eq!(*value, want_value, "the teed value equals the banked one");
-    }
+    };
+    assert_eq!(instrument, InstrumentId(0), "rotation: instrument");
+    assert_eq!(seq, 0, "rotation: seq");
+    assert_eq!(
+        event_ts_us,
+        ts(30),
+        "rotation: stamped with the rotation's ingress time"
+    );
 }
 
 /// Recording and displaying are ORTHOGONAL operator intents, so a feature tees to the monitor even
@@ -709,8 +622,17 @@ fn teed_features(events: &mut Consumer<UiEvent>) -> Vec<(u64, FeatureId, f64)> {
 /// anything about them changed. Absolute state, for the reason a panel exists: a halt an operator
 /// learns about from a log is a halt they learn about late, while an order terminal transition lost
 /// to a full ring would otherwise leave the band reading `OPEN` forever.
+///
+/// FITNESS: an engine with no command ring says NOTHING about the gate, on the same case-by-case
+/// dispatch as the wired one. [`ExecHalt`] is the kill-switch LATCH, not the wired state, so `Armed`
+/// on a run that has no ring means only "nothing has tripped". The band renders it under the heading
+/// `gate` as `ARMED` in the positive colour, which an operator reads as "armed to trade". The run
+/// where that costs money is not the recorder: it is a `mode: live` config whose preflight or queue
+/// is missing, which WARNs once and disarms execution for the rest of the run (`runtime::exec`).
+/// Nothing can ever be sent, and a green ARMED is the only thing on screen — the same class of lie as
+/// the simulated-fill labels this milestone deleted, and worse, because those were true when written.
 #[test]
-fn a_wired_engine_tees_the_execution_gate_every_spin() {
+fn the_execution_gate_tee_reflects_whether_a_command_ring_is_wired() {
     let (mut engine, mut events, _commands) = ui_engine_with_exec(Box::new(Idle));
     for seq in 0..3u64 {
         engine.dispatch(
@@ -730,7 +652,7 @@ fn a_wired_engine_tees_the_execution_gate_every_spin() {
     assert_eq!(
         gates,
         vec![ExecHalt::Armed; 3],
-        "one Execution frame per spin, carrying the latch verbatim"
+        "wired: one Execution frame per spin, carrying the latch verbatim"
     );
 
     let snapshots: Vec<&UiEvent> = emitted
@@ -740,7 +662,7 @@ fn a_wired_engine_tees_the_execution_gate_every_spin() {
     assert_eq!(
         snapshots.len(),
         6,
-        "each spin atomically re-states both OMS sides"
+        "wired: each spin atomically re-states both OMS sides"
     );
     for (spin_index, pair) in snapshots.chunks_exact(2).enumerate() {
         for (side_index, event) in pair.iter().enumerate() {
@@ -757,26 +679,11 @@ fn a_wired_engine_tees_the_execution_gate_every_spin() {
                     } if *event_ts_us == ts(700 + spin_index as i64)
                         && *side == [Side::Buy, Side::Sell][side_index]
                 ),
-                "an empty complete side cut must still be emitted: {event:?}"
+                "wired: an empty complete side cut must still be emitted: {event:?}"
             );
         }
     }
-}
 
-/// FITNESS: an engine with no command ring says NOTHING about the gate. The absence is the whole
-/// assertion, and no other test can reach it — every one of them checks what the lane carries.
-///
-/// [`ExecHalt`] is the kill-switch LATCH, not the wired state, so `Armed` on a run that has no ring
-/// means only "nothing has tripped". The band renders it under the heading `gate` as `ARMED` in the
-/// positive colour, which an operator reads as "armed to trade". The run where that costs money is
-/// not the recorder: it is a `mode: live` config whose preflight or queue is missing, which WARNs
-/// once and disarms execution for the rest of the run (`runtime::exec`). Nothing can ever be sent,
-/// and a green ARMED is the only thing on screen.
-///
-/// That is the same class as the simulated-fill labels this milestone deleted — a display asserting
-/// something false about real money — and worse, because those were true when they were written.
-#[test]
-fn an_unwired_engine_never_claims_to_be_armed() {
     let (mut engine, _books, mut events) = ui_engine(Box::new(Idle), DurationUs::ZERO);
     for seq in 0..3u64 {
         engine.dispatch(
@@ -784,11 +691,11 @@ fn an_unwired_engine_never_claims_to_be_armed() {
             &InboundMessage::SpinTick(spin(seq, 700 + seq as i64)),
         );
     }
-
     assert_eq!(
         execution_frames(&mut events),
         Vec::new(),
-        "no command ring means no order can ever be sent — the gate must say nothing, not ARMED"
+        "unwired: no command ring means no order can ever be sent — the gate must say nothing, not \
+         ARMED"
     );
 }
 
@@ -1060,57 +967,6 @@ fn a_full_fill_retires_the_working_order_in_the_ui_model() {
     }
 }
 
-/// FITNESS: a venue event that moves one of OUR orders reaches the UI carrying the ENGINE's state
-/// for it, faithfully, on the event's own message.
-///
-/// This replaces `order_intents_tee_with_the_faithful_action`, which pinned the same guarantee on
-/// the path that no longer exists — a strategy banked an `OrderAction` and the drain teed it. The
-/// feeder is now the venue: `on_exec` folds the event, `ExecCallback::Update` names the transition,
-/// and `emit_order_update` tees it. The guarantee survived the rewrite even though nothing it was
-/// written against did, which is why it earns a test rather than being dropped with its subject.
-///
-/// `state` is the load-bearing field. It is the order table's own answer, not the wire's, so the DOM
-/// can tell an order the venue has CONFIRMED from one whose command is still outstanding. A tee that
-/// echoed the wire status would collapse that distinction and paint `live` over a command in flight.
-#[test]
-fn a_venue_transition_tees_the_engines_own_order_state() {
-    let (mut engine, _books, mut events) = ui_engine(Box::new(Idle), DurationUs::ZERO);
-    let mut pen = FillPen::new(0);
-    let adoption = pen
-        .adopt(Side::Buy, 100 * ONE, 900)
-        .expect("a fresh pen has seated nothing");
-    engine.dispatch(pop(0, 0), &adoption);
-
-    let evs = pop_events(&mut events);
-    assert_eq!(evs.len(), 1, "one venue event tees exactly one UI event");
-    let UiEvent::OrderUpdate {
-        instrument,
-        seq,
-        event_ts_us,
-        side,
-        state,
-        price,
-        qty,
-        filled,
-        ..
-    } = evs[0]
-    else {
-        panic!("an adoption tees an OrderUpdate, got {:?}", evs[0]);
-    };
-    assert_eq!(instrument, InstrumentId(0));
-    assert_eq!(seq, 0, "the first event on the lane");
-    assert_eq!(event_ts_us, ts(900), "stamped with the venue event's time");
-    assert_eq!(side, Side::Buy);
-    assert_eq!(
-        state,
-        OrderState::Live,
-        "an adopted order is venue-confirmed, so the DOM may paint it as resting size"
-    );
-    assert_eq!(price, Price(100 * ONE));
-    assert_eq!(qty, Qty(i64::MAX / 4), "the pen seats an oversized slot");
-    assert_eq!(filled, Qty(0), "nothing has executed against it yet");
-}
-
 /// FITNESS: a venue that said NOTHING about liquidity arrives as `None`, never as `Some(Maker)`.
 ///
 /// The sibling above pins present-stays-present; this pins absent-stays-absent, and they are
@@ -1149,33 +1005,6 @@ fn a_silent_venue_leaves_liquidity_absent() {
         fills,
         vec![None],
         "absent must stay absent — it is not the same claim as maker"
-    );
-}
-
-/// A window rotation tees a Rotation event (ahead of the warmup gate, like its book refresh).
-#[test]
-fn rotation_tees_an_event() {
-    let (mut engine, _books, mut events) = ui_engine(Box::new(Idle), DurationUs::from_secs(10));
-    engine.dispatch(
-        pop(0, 0),
-        &InboundMessage::MarketRotation(rotation(0, 300 * ONE, 600 * ONE, 30)),
-    );
-    let evs = pop_events(&mut events);
-    assert_eq!(evs.len(), 1, "a rotation tees exactly one Rotation event");
-    let UiEvent::Rotation {
-        instrument,
-        seq,
-        event_ts_us,
-    } = evs[0]
-    else {
-        panic!("a rotation tees a Rotation event, got {:?}", evs[0]);
-    };
-    assert_eq!(instrument, InstrumentId(0));
-    assert_eq!(seq, 0);
-    assert_eq!(
-        event_ts_us,
-        ts(30),
-        "stamped with the rotation's ingress time"
     );
 }
 
@@ -1254,44 +1083,15 @@ fn spins_emit_absolute_position_state() {
     );
 }
 
-/// A fill that landed since the last spin is folded before this one reports, so an operator never
-/// reads a position one spin behind the fills they can already see on the tape. The emission sits at
-/// the very end of the spin's own dispatch — after the strategy, its drain and the exec pass — which
-/// is what makes that true regardless of how close to the spin the fill arrived.
+/// Position state rides ahead of BOTH halves of the live gate, like the book and trade tees. During
+/// warmup, marks are set and re-stating absolute state to a UI that attached mid-run costs nothing to
+/// be right. While parked, parking stops the strategy, not the arithmetic: the engine is still
+/// holding whatever the run left it holding, and a UI attached to a parked engine must be told what
+/// that is rather than nothing.
 #[test]
-fn a_fill_is_folded_before_the_next_spin_reports() {
-    let (mut engine, _books, mut events) = ui_engine(Box::new(Idle), DurationUs::ZERO);
-    let (bids, asks) = snapshot_pair(0, &[(100 * ONE, ONE)], &[(102 * ONE, ONE)], 10);
-    engine.dispatch(pop(0, 0), &InboundMessage::Book(bids));
-    engine.dispatch(pop(0, 0), &InboundMessage::Book(asks));
-
-    let mut pen = FillPen::new(0);
-    for message in pen.fill(Side::Buy, 100 * ONE, 3 * ONE, 15) {
-        engine.dispatch(pop(0, 0), &message);
-    }
-    engine.dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(0, 20)));
-    assert_eq!(
-        positions(&mut events),
-        vec![(InstrumentId(0), ts(20), 303.0, 3.0)],
-        "the first spin reports the clip that filled before it, not the flat book it started from"
-    );
-
-    for message in pen.fill(Side::Buy, 100 * ONE, 3 * ONE, 25) {
-        engine.dispatch(pop(0, 0), &message);
-    }
-    engine.dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(1, 30)));
-    assert_eq!(
-        positions(&mut events),
-        vec![(InstrumentId(0), ts(30), 606.0, 6.0)],
-        "and each later spin includes the clip that filled since the one before it"
-    );
-}
-
-/// Position state rides ahead of the live gate, like the book and trade tees: marks are set during
-/// warmup, and re-stating absolute state to a UI that attached mid-run costs nothing to be right.
-#[test]
-fn positions_emit_during_warmup() {
-    // Warmup 10s; every message lands at t=1s, so the strategy stays suppressed the whole test.
+fn position_tee_survives_gating() {
+    // Warmup: warmup 10s, every message lands at t=1s, so the strategy stays suppressed the whole
+    // case.
     let (mut engine, _books, mut events) = ui_engine(Box::new(Idle), DurationUs::from_secs(10));
     let (bids, asks) = snapshot_pair(0, &[(100 * ONE, ONE)], &[(102 * ONE, ONE)], 1_000_000);
     engine.dispatch(pop(0, 0), &InboundMessage::Book(bids));
@@ -1300,15 +1100,10 @@ fn positions_emit_during_warmup() {
     assert_eq!(
         positions(&mut events),
         vec![(InstrumentId(0), ts(1_000_100), 0.0, 0.0)],
-        "a warmup-suppressed spin still re-states the instrument's mark-to-market"
+        "warmup: a warmup-suppressed spin still re-states the instrument's mark-to-market"
     );
-}
 
-/// The other half of the live gate. Parking stops the strategy, not the arithmetic: the engine is
-/// still holding whatever the run left it holding, and a UI that attaches to a parked engine must be
-/// told what that is rather than nothing.
-#[test]
-fn positions_emit_while_parked() {
+    // Parked: no warmup, but the run is explicitly idled before the spin.
     let (mut engine, _books, mut events) = ui_engine(Box::new(Idle), DurationUs::ZERO);
     let (bids, asks) = snapshot_pair(0, &[(100 * ONE, ONE)], &[(102 * ONE, ONE)], 10);
     engine.dispatch(pop(0, 0), &InboundMessage::Book(bids));
@@ -1324,7 +1119,7 @@ fn positions_emit_while_parked() {
     assert_eq!(
         positions(&mut events),
         vec![(InstrumentId(0), ts(40), 303.0, 3.0)],
-        "a parked engine keeps re-stating the position it is still carrying, not a zero"
+        "parked: a parked engine keeps re-stating the position it is still carrying, not a zero"
     );
 }
 

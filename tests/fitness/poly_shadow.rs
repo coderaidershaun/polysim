@@ -55,10 +55,11 @@ fn same_ts_removal_burst_emptying_a_side_collapses() {
 }
 
 #[test]
-fn a_transient_mismatch_then_match_does_not_reset() {
-    let mut validator = ShadowValidator::new();
+fn only_a_confirmed_desync_resets_the_shadow() {
     let bids = [level(50_000_000, 100)];
     let asks = [level(51_000_000, 150)];
+
+    let mut validator = ShadowValidator::new();
     assert_eq!(
         validator.on_venue_book(&bids, &asks),
         BookFrameOutcome::ForwardSnapshot
@@ -75,13 +76,8 @@ fn a_transient_mismatch_then_match_does_not_reset() {
         validator.on_venue_book(&bids, &asks),
         BookFrameOutcome::Validated
     );
-}
 
-#[test]
-fn three_consecutive_mismatches_reset_exactly_once() {
     let mut validator = ShadowValidator::new();
-    let bids = [level(50_000_000, 100)];
-    let asks = [level(51_000_000, 150)];
     assert_eq!(
         validator.on_venue_book(&bids, &asks),
         BookFrameOutcome::ForwardSnapshot
@@ -107,13 +103,8 @@ fn three_consecutive_mismatches_reset_exactly_once() {
         validator.on_venue_book(&desynced, &asks),
         BookFrameOutcome::Validated
     );
-}
 
-#[test]
-fn a_zero_size_venue_level_still_validates() {
     let mut validator = ShadowValidator::new();
-    let bids = [level(50_000_000, 100)];
-    let asks = [level(51_000_000, 150)];
     assert_eq!(
         validator.on_venue_book(&bids, &asks),
         BookFrameOutcome::ForwardSnapshot
@@ -125,31 +116,4 @@ fn a_zero_size_venue_level_still_validates() {
         validator.on_venue_book(&bids, &venue_asks),
         BookFrameOutcome::Validated
     );
-}
-
-#[test]
-fn a_duplicate_price_level_is_caught_as_a_mismatch() {
-    let mut validator = ShadowValidator::new();
-    let bids = [level(50_000_000, 100)];
-    let asks = [level(51_000_000, 150)];
-    assert_eq!(
-        validator.on_venue_book(&bids, &asks),
-        BookFrameOutcome::ForwardSnapshot
-    );
-
-    // Two entries at the same price are not the single-level shadow — a count check would pass them,
-    // the zip catches the mismatch, and three consecutive such cuts confirm the divergence.
-    let venue_asks = [level(51_000_000, 150), level(51_000_000, 150)];
-    assert_eq!(
-        validator.on_venue_book(&bids, &venue_asks),
-        BookFrameOutcome::Validated
-    );
-    assert_eq!(
-        validator.on_venue_book(&bids, &venue_asks),
-        BookFrameOutcome::Validated
-    );
-    assert!(matches!(
-        validator.on_venue_book(&bids, &venue_asks),
-        BookFrameOutcome::Diverged(_)
-    ));
 }

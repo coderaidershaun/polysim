@@ -661,18 +661,20 @@ fn a_refused_cancel_is_re_sent_by_either_the_next_command_or_the_next_sweep() {
     assert_eq!(swept.phase(), Phase::Settled);
 }
 
-/// FITNESS: an in-flight cancel's latch is touched only by the answer that actually resolves it —
-/// never re-sent while merely awaiting a reply, and never probed a second time while an earlier probe
-/// is itself still outstanding.
+/// FITNESS: an in-flight cancel's latch is touched only by the answer that actually resolves it.
 ///
-/// The two go together deliberately: both guard the SAME latch from being disturbed too early, from
-/// its two premature triggers. An AMBIGUOUS answer is not a refusal — the cancel may have landed, so
-/// re-arming here would put a second cancel on the wire for an order whose state nobody knows yet.
-/// And a cancel merely awaiting its ordinary answer is not probed at all — the request timeout exists
-/// for that, and asking during the ordinary wait would put a second request behind every cancel a
-/// sweep sends.
+/// The four go together deliberately: all guard the SAME latch from being disturbed by an event that
+/// looks like it could plausibly answer it but does not. An AMBIGUOUS answer is not a refusal — the
+/// cancel may have landed, so re-arming here would put a second cancel on the wire for an order whose
+/// state nobody knows yet — and the same open probe must not be asked again while it is still
+/// outstanding. A cancel merely awaiting its ordinary answer is not probed at all — the request
+/// timeout exists for that, and asking during the ordinary wait would put a second request behind
+/// every cancel a sweep sends. A generic open-orders row can predate a cancel sent on another venue
+/// pipeline, and refreshing its price must not pretend that cancel was answered. And a probe itself
+/// can be lost — refused by the REST queue, or dead with the socket — so at exit, with no hot thread
+/// left to re-derive the question, the sweep must ask again itself; nothing else ever would.
 #[test]
-fn an_outstanding_cancel_is_neither_re_sent_nor_probed_before_it_is_actually_resolved() {
+fn an_outstanding_cancels_latch_is_touched_only_by_its_own_resolving_answer() {
     let mut ambiguous = quoting_core();
     effects_of(|emit| ambiguous.on_command(place(1), emit));
     let cancel = ExecCommand::Cancel {
@@ -710,19 +712,7 @@ fn an_outstanding_cancel_is_neither_re_sent_nor_probed_before_it_is_actually_res
         "the sweep asked about an order whose cancel is still in flight: {:?}",
         sent_requests(&swept)
     );
-}
 
-/// FITNESS: an outstanding cancel's latch is cleared ONLY by the correlated answer that resolves
-/// it — never by an unrelated snapshot refreshing the same order's descriptive fields, and never
-/// dropped just because the probe meant to resolve it can itself go missing.
-///
-/// The two go together deliberately: both are the latch surviving an event that looks like it could
-/// plausibly answer it but does not. A generic open-orders row can predate a cancel sent on another
-/// venue pipeline, and refreshing its price must not pretend that cancel was answered. And a probe
-/// itself can be lost — refused by the REST queue, or dead with the socket — so at exit, with no hot
-/// thread left to re-derive the question, the sweep must ask again itself; nothing else ever would.
-#[test]
-fn an_outstanding_cancels_latch_survives_unrelated_snapshots_and_a_lost_probe() {
     let mut snapshot = quoting_core();
     effects_of(|emit| snapshot.on_command(place(1), emit));
     effects_of(|emit| {

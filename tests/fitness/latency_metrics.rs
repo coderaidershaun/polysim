@@ -188,6 +188,10 @@ fn assert_single_sample(
     assert_eq!(stat.max_us, expected_us, "{label}: max");
 }
 
+/// Both a lone-stamp venue (book) and a synthesised local event (the second exec message, which
+/// never touched a venue) share the same failure mode: fabricating a stamp the message never
+/// carried. The exec case is the sharper one — only the venue-decoded event may reach exch->recv, or
+/// the engine ends up timing its own clock against itself.
 #[test]
 fn each_stage_subtracts_the_stamps_its_name_claims() {
     let snapshot = dispatch_stamped_traffic();
@@ -226,13 +230,9 @@ fn each_stage_subtracts_the_stamps_its_name_claims() {
         0,
         "a lone venue stamp yields no match->send gap"
     );
-}
 
-#[test]
-fn a_synthesised_exec_event_contributes_no_exchange_latency() {
-    let snapshot = dispatch_stamped_traffic();
-
-    // Both exec events were dispatched — only the venue-decoded one may reach exch->recv, or the engine would be timing its own clock against itself.
+    // The synthesised exec event was dispatched too — only the venue-decoded one may reach
+    // exch->recv.
     assert_single_sample(
         &snapshot,
         Category::Exec,

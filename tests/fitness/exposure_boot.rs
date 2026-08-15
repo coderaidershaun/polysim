@@ -11,12 +11,11 @@
 //!
 //! The gate avoids it by taking each instrument's baseline at its FIRST MARK rather than at
 //! construction, so the figure it measures is a mark-to-market delta and the restored cost basis
-//! cancels. These are the pins for that, and they need a seeded ledger, which is why they live here
-//! beside the restore rather than in `risk_gate.rs`.
-//!
-//! The second test is the counterweight: the baseline must not be so generous that the limit stops
-//! working. A baseline captured at CONSTRUCTION would also let the engine quote — while silently
-//! carrying the whole restored position's cost as headroom, so no session loss could ever trip it.
+//! cancels. The first test pins that, and its counterweight beside it in the same fn: the baseline
+//! must not be so generous that the limit stops working, because a baseline captured at CONSTRUCTION
+//! would also let the engine quote — while silently carrying the whole restored position's cost as
+//! headroom, so no session loss could ever trip it. They need a seeded ledger, which is why they live
+//! here beside the restore rather than in `risk_gate.rs`.
 //!
 //! The last two are the other end of the same promise. Restoring a position is worth nothing unless
 //! the run that takes fills WRITES one, so they drive the whole path — engine, snapshot, ring, writer
@@ -289,11 +288,18 @@ fn restored_long() -> [InstrumentExposure; 1] {
     }]
 }
 
-/// FITNESS: an engine that boots holding inventory quotes. The restored cost basis is 60,000 against
-/// a 5-unit loss budget, so any gate reading raw PnL — or taking its baseline before the first mark —
-/// withdraws both sides here and never places an order again.
+/// FITNESS: an engine that boots holding inventory quotes, and the session limit still bites once it
+/// does.
+///
+/// The two go together deliberately: both are the loss gate's baseline-at-mark fix read from its two
+/// directions. The restored cost basis is 60,000 against a 5-unit loss budget, so any gate reading
+/// raw PnL — or taking its baseline before the first mark — withdraws both sides on boot and never
+/// places an order again; a construction-time baseline would swallow that same 60,000 units as
+/// headroom, so no session loss could ever reach the limit and the gate would be decoration. Driving
+/// a real session loss AFTER the baseline is set proves it is not: the adding side is withdrawn while
+/// the reducing side is not.
 #[test]
-fn a_restored_position_does_not_halt_the_engine_on_boot() {
+fn a_restored_position_boots_quoting_and_the_session_limit_still_bites() {
     let instruments = [instrument_row(0, TrackerSpec::default(), 64)];
     let (mut engine, mut commands) = restored_engine(&instruments, &restored_long());
     make_ready(&mut engine, 0);
@@ -306,40 +312,21 @@ fn a_restored_position_does_not_halt_the_engine_on_boot() {
     // The market has moved AGAINST the restored position: marked at 59,000 against a 60,000 basis,
     // raw PnL is -1,000 — two hundred times the loss budget, and entirely last session's.
     reseat_book(&mut engine, 58_990 * ONE, 59_010 * ONE, 10);
-    spin_at(&mut engine, 1, 20);
-
-    let first = drain_commands(&mut commands);
-    assert!(
-        placed(&first, Side::Buy).is_some(),
-        "the side that would ADD to the restored position must still quote — the loss it appears to \
-         carry is last session's cost basis, not this session's result: {first:?}"
-    );
-    assert!(
-        placed(&first, Side::Sell).is_some(),
-        "and so must the side that would reduce it: {first:?}"
-    );
-}
-
-/// FITNESS: the baseline is taken at the MARK, not at construction. A construction-time baseline
-/// would carry the whole restored cost basis as headroom — 60,000 units of it — so no session loss
-/// could ever reach the limit and the gate would be decoration. This drives a real session loss
-/// after the baseline is set and asserts the adding side is withdrawn while the reducing side is not.
-#[test]
-fn the_session_limit_still_bites_after_a_restore() {
-    let instruments = [instrument_row(0, TrackerSpec::default(), 64)];
-    let (mut engine, mut commands) = restored_engine(&instruments, &restored_long());
-    make_ready(&mut engine, 0);
-    // Same pre-book spin. A baseline captured on the first spin rather than the first MARK would be
-    // taken here, at minus the cost basis, and would hand the session limit 60,000 units of headroom
-    // it never earned — after which no loss this run could make would ever reach it.
-    spin_at(&mut engine, 1, 5);
-    drain_commands(&mut commands);
-
-    reseat_book(&mut engine, 58_990 * ONE, 59_010 * ONE, 10);
     spin_at(&mut engine, 2, 20);
-    let first = drain_commands(&mut commands);
-    let buy = placed(&first, Side::Buy).expect("the buy side quoted at the first mark");
-    let sell = placed(&first, Side::Sell).expect("the sell side quoted at the first mark");
+
+    let boot = drain_commands(&mut commands);
+    assert!(
+        placed(&boot, Side::Buy).is_some(),
+        "the side that would ADD to the restored position must still quote — the loss it appears to \
+         carry is last session's cost basis, not this session's result: {boot:?}"
+    );
+    assert!(
+        placed(&boot, Side::Sell).is_some(),
+        "and so must the side that would reduce it: {boot:?}"
+    );
+
+    let buy = placed(&boot, Side::Buy).expect("the buy side quoted at the first mark");
+    let sell = placed(&boot, Side::Sell).expect("the sell side quoted at the first mark");
     // Seat both orders so the next pass judges resting quotes rather than waiting on in-flight ones.
     ack_placed(&mut engine, buy, Side::Buy, 58_990 * ONE, 30);
     ack_placed(&mut engine, sell, Side::Sell, 59_010 * ONE, 30);

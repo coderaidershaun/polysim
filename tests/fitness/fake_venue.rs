@@ -6,17 +6,15 @@ use polysim::adapters::binance::exec::{
 use polysim::adapters::exchange_sim::core::orders::{CORPUS_VENUE_ORDER_ID, SimOrder};
 use polysim::adapters::exchange_sim::core::wallet::FillSettlement;
 use polysim::adapters::exchange_sim::wire::{
-    SimBalance, SimFill, VenueWire, response_messages, stream_messages,
+    SimFill, VenueWire, response_messages, stream_messages,
 };
 use polysim::adapters::exec::{EngineIdentity, ExecRequest, TeTag};
 use polysim::config::RunIdentity;
-use polysim::ids::{AssetId, ClientOrderId, InstrumentId, Price, Qty, Side, TradeId, VenueOrderId};
+use polysim::ids::{AssetId, ClientOrderId, Price, Qty, Side, TradeId, VenueOrderId};
 use polysim::msg::exec::{ExecEvent, OrderStyle, VenueOrderStatus};
 use polysim::msg::inbound::InboundMessage;
 use polysim::registry::{AssetDictionary, Registry};
 use polysim::time::TsUs;
-
-pub use polysim::adapters::exchange_sim::wire::decimal;
 
 pub const STRATEGY_ID: &str = "strat-micro-recorder";
 pub const TE_ID: &str = "te-binance-spot-btcusdt";
@@ -25,11 +23,6 @@ pub const TE_ID: &str = "te-binance-spot-btcusdt";
 pub const RUN_NONCE: u32 = 1_785_000_000;
 
 const FIRST_TRADE_ID: TradeId = TradeId(778_291);
-
-const OPENING_BASE_FREE: Qty = Qty(135_871);
-const OPENING_BASE_LOCKED: Qty = Qty(10_000);
-const OPENING_QUOTE_FREE: Qty = Qty(17_114_535_000);
-const OPENING_QUOTE_LOCKED: Qty = Qty(1_180_000_000);
 
 #[derive(Debug, Clone)]
 struct ScenarioOrders {
@@ -123,7 +116,6 @@ pub struct FakeVenue {
     symbols: SymbolTable,
     identity: EngineIdentity,
     wire: VenueWire,
-    instrument: InstrumentId,
     orders: ScenarioOrders,
     best_bid: Price,
     best_ask: Price,
@@ -146,7 +138,6 @@ impl FakeVenue {
             symbols,
             identity,
             wire: VenueWire::new(identity),
-            instrument: InstrumentId(0),
             orders: ScenarioOrders::new(),
             best_bid: Price(117_999 * polysim::ids::FIXED_SCALE),
             best_ask: Price(118_001 * polysim::ids::FIXED_SCALE),
@@ -159,23 +150,8 @@ impl FakeVenue {
         self.identity
     }
 
-    pub fn instrument(&self) -> InstrumentId {
-        self.instrument
-    }
-
     pub fn set_delivery(&mut self, delivery: Delivery) {
         self.delivery = delivery;
-    }
-
-    /// Post-only rejection is decided against this, so moving the book is how a scenario makes a
-    /// quote cross.
-    pub fn set_book(&mut self, best_bid: Price, best_ask: Price) {
-        self.best_bid = best_bid;
-        self.best_ask = best_ask;
-    }
-
-    pub fn resting_count(&self) -> usize {
-        self.orders.resting().len()
     }
 
     pub fn is_resting(&self, client_id: ClientOrderId) -> bool {
@@ -263,25 +239,6 @@ impl FakeVenue {
             },
         );
         self.stream_messages(&[report], at)
-    }
-
-    /// Balances published after a scenario changes the account.
-    pub fn account_update(&self, at: TsUs) -> Vec<InboundMessage> {
-        let balances = [
-            SimBalance {
-                asset: "BTC",
-                free: OPENING_BASE_FREE,
-                locked: OPENING_BASE_LOCKED,
-            },
-            SimBalance {
-                asset: "USDT",
-                free: OPENING_QUOTE_FREE,
-                locked: OPENING_QUOTE_LOCKED,
-            },
-        ];
-        let update_ts_ms = (at.micros() / 1_000) as u64;
-        let position = self.wire.account_position(&balances, at, update_ts_ms);
-        self.stream_messages(&[position], at)
     }
 
     fn place(&mut self, placement: Placement, at: TsUs) -> (Vec<String>, Vec<String>) {

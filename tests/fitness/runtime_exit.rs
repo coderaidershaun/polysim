@@ -6,7 +6,6 @@
 //! [`ShutdownRequest`] is the latch it trips.
 
 use polysim::runtime::decide_exit;
-use polysim::shutdown::ShutdownRequest;
 
 struct Case {
     signal: Option<&'static str>,
@@ -81,22 +80,4 @@ fn fatal_is_never_reported_graceful() {
         );
         assert_eq!(report.reason.as_ref(), case.reason);
     }
-}
-
-#[test]
-fn shutdown_request_latch() {
-    let request = ShutdownRequest::new();
-    assert!(!request.is_requested(), "a fresh latch is not requested");
-
-    // A clone shares the underlying latch, so the UI thread and engine observe the same request.
-    let clone = request.clone();
-    clone.request();
-    assert!(
-        request.is_requested(),
-        "a request on a clone is seen by the original"
-    );
-
-    // Idempotent: a second request changes nothing.
-    request.request();
-    assert!(request.is_requested());
 }

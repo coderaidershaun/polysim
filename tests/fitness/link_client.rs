@@ -176,31 +176,41 @@ proptest! {
     }
 }
 
+/// Epoch discipline cuts both ways: a NEWER epoch discards whatever the old one gathered (a
+/// restarted engine announcing fewer features must not inherit the old run's count), and an OLDER,
+/// delayed datagram must not mix into the epoch that has already superseded it. `build` separately
+/// validates a frame's claimed total two different ways, and an untrusted sender can get either
+/// wrong without the workstation panicking: a dense feature list with a hole in it (an id past the
+/// frame's OWN declared total) must never complete, and a sender whose per-frame total disagrees with
+/// the heartbeat's yields ids that do not tile the assembled list — a peer's arithmetic must never
+/// panic us, since anyone who can reach the port can forge a frame. A trading engine that declares no
+/// feature columns (the polymarket publisher's own shape) announces no feature frame at all, so a
+/// total learned from those frames alone would never arrive; the count must ride the once-a-second
+/// heartbeat instead.
 #[test]
-fn a_newer_catalog_epoch_discards_what_the_old_one_gathered() {
-    let mut assembly = CatalogAssembly::new();
-    assembly.accept_instrument(instrument_frame(0, 1, CATALOG_EPOCH));
-    assembly.accept_feature(feature_frame(0, 2, CATALOG_EPOCH));
+fn catalog_assembly_epoch_and_total_validation() {
+    {
+        let mut assembly = CatalogAssembly::new();
+        assembly.accept_instrument(instrument_frame(0, 1, CATALOG_EPOCH));
+        assembly.accept_feature(feature_frame(0, 2, CATALOG_EPOCH));
 
-    // The restarted engine announces ONE feature where the old run had two.
-    let next = CATALOG_EPOCH + DurationUs::RESOLUTION;
-    assembly.accept_instrument(instrument_frame(0, 1, next));
-    assert!(
-        assembly
+        // The restarted engine announces ONE feature where the old run had two.
+        let next = CATALOG_EPOCH + DurationUs::RESOLUTION;
+        assembly.accept_instrument(instrument_frame(0, 1, next));
+        assert!(
+            assembly
+                .build("strat-fitness", peer(), reported(1))
+                .is_none(),
+            "the previous epoch's feature must not count towards the new one"
+        );
+
+        assembly.accept_feature(feature_frame(0, 1, next));
+        let catalog = assembly
             .build("strat-fitness", peer(), reported(1))
-            .is_none(),
-        "the previous epoch's feature must not count towards the new one"
-    );
+            .expect("the new epoch is complete");
+        assert_eq!(catalog.feature_names.len(), 1);
+    }
 
-    assembly.accept_feature(feature_frame(0, 1, next));
-    let catalog = assembly
-        .build("strat-fitness", peer(), reported(1))
-        .expect("the new epoch is complete");
-    assert_eq!(catalog.feature_names.len(), 1);
-}
-
-#[test]
-fn a_stale_catalog_epoch_is_ignored_rather_than_mixed_in() {
     let mut assembly = CatalogAssembly::new();
     let next = CATALOG_EPOCH + DurationUs::RESOLUTION;
     assembly.accept_instrument(instrument_frame(0, 1, next));
@@ -214,60 +224,71 @@ fn a_stale_catalog_epoch_is_ignored_rather_than_mixed_in() {
         .expect("the current epoch stays complete");
     assert_eq!(catalog.feature_names.len(), 1);
     assert_eq!(catalog.feature_names[0].as_ref(), "feature_0");
+
+    totals_validation_cases();
 }
 
-#[test]
-fn a_feature_index_past_the_declared_total_is_refused() {
-    let mut assembly = CatalogAssembly::new();
-    assembly.accept_instrument(instrument_frame(0, 1, CATALOG_EPOCH));
-    assembly.accept_feature(feature_frame(0, 2, CATALOG_EPOCH));
-    assembly.accept_feature(feature_frame(7, 2, CATALOG_EPOCH));
-
-    assert!(
-        assembly
-            .build("strat-fitness", peer(), reported(2))
-            .is_none(),
-        "an out-of-range id must not be counted towards the declared total, or the dense feature \
-         list would complete with a hole in it"
-    );
-}
-
-/// FITNESS: a trading engine that declares no feature columns announces no feature frame, so a
-/// total learned from those frames alone would never arrive and the workstation would sit on
-/// "waiting for engine" for the life of the run. The strategy's polymarket publisher is exactly such
-/// an engine, which is why the count rides the once-a-second heartbeat instead.
-#[test]
-fn a_catalog_with_no_features_completes_from_the_heartbeat_total() {
-    let mut assembly = CatalogAssembly::new();
-    assembly.accept_instrument(instrument_frame(0, 1, CATALOG_EPOCH));
-
-    let catalog = assembly.build("strat-fitness", peer(), reported(0)).expect(
-        "an engine with no feature columns has a complete catalog once its instruments land",
-    );
-    assert_eq!(catalog.instruments.len(), 1);
-    assert!(catalog.feature_names.is_empty());
-}
-
-/// FITNESS: the id a feature frame carries is admitted against that frame's own total, while
-/// completion counts against the heartbeat's. A sender whose two disagree yields ids that do not
-/// tile the assembled list, and a peer's arithmetic must never panic us — anyone who can reach
-/// the port can forge a frame, so this is reachable input, not a hypothetical.
-#[test]
-fn a_sender_whose_totals_disagree_never_panics_the_workstation() {
-    let mut assembly = CatalogAssembly::new();
-    assembly.accept_instrument(instrument_frame(0, 1, CATALOG_EPOCH));
-    // Catalog frames claim ten columns; the heartbeat below claims two. Id 7 is admitted here and
-    // would index past a two-element list.
-    for index in [0, 7] {
-        assembly.accept_feature(feature_frame(index, 10, CATALOG_EPOCH));
+fn totals_validation_cases() {
+    struct Case {
+        name: &'static str,
+        instruments: &'static [(u16, u16)],
+        features: &'static [(u16, u16)],
+        heartbeat_features: u16,
+        expect: Option<(usize, usize)>,
     }
+    let cases = [
+        Case {
+            name: "feature id past its own frame's declared total is refused",
+            instruments: &[(0, 1)],
+            features: &[(0, 2), (7, 2)],
+            heartbeat_features: 2,
+            expect: None,
+        },
+        Case {
+            name: "an engine with no feature columns completes from the heartbeat total",
+            instruments: &[(0, 1)],
+            features: &[],
+            heartbeat_features: 0,
+            expect: Some((1, 0)),
+        },
+        Case {
+            name: "a sender whose per-frame total disagrees with the heartbeat never panics",
+            instruments: &[(0, 1)],
+            features: &[(0, 10), (7, 10)],
+            heartbeat_features: 2,
+            expect: None,
+        },
+    ];
 
-    assert!(
-        assembly
-            .build("strat-fitness", peer(), reported(2))
-            .is_none(),
-        "a catalog whose ids do not tile its list is incomplete, not a panic"
-    );
+    for case in cases {
+        let mut assembly = CatalogAssembly::new();
+        for &(index, total) in case.instruments {
+            assembly.accept_instrument(instrument_frame(index, total, CATALOG_EPOCH));
+        }
+        for &(index, total) in case.features {
+            assembly.accept_feature(feature_frame(index, total, CATALOG_EPOCH));
+        }
+        let built = assembly.build("strat-fitness", peer(), reported(case.heartbeat_features));
+        match case.expect {
+            None => assert!(built.is_none(), "case {}: expected no catalog", case.name),
+            Some((instruments, features)) => {
+                let catalog =
+                    built.unwrap_or_else(|| panic!("case {}: expected a catalog", case.name));
+                assert_eq!(
+                    catalog.instruments.len(),
+                    instruments,
+                    "case {}: instrument count",
+                    case.name
+                );
+                assert_eq!(
+                    catalog.feature_names.len(),
+                    features,
+                    "case {}: feature count",
+                    case.name
+                );
+            }
+        }
+    }
 }
 
 fn book_snapshot(seq: u64, best_bid: i64) -> UiBookSnapshot {
@@ -393,8 +414,15 @@ proptest! {
     }
 }
 
+/// The whole trust model of the control epoch in one place: 0 is the reserved "no opinion" that lets
+/// a workstation watch an engine without taking control away from whoever holds it; asserting yields
+/// an epoch strictly above 0, releasing drops the current assertion back to "no opinion" without
+/// rewinding the underlying counter, and a later boot stamp — a restarted workstation — must outrank
+/// this process's own previous run rather than reuse its epochs. Against an engine's acknowledged
+/// epoch, an older one reads as still in flight, a match reads as applied, and a higher one reads as
+/// lost to another controller.
 #[test]
-fn a_controller_claims_nothing_until_it_asserts_and_nothing_again_once_it_releases() {
+fn controller_epoch_rises_and_its_verdict_tracks_the_engines_acknowledgement() {
     let mut controller = Controller::new(TsUs::from_micros(1_700_000_000_000_000));
 
     assert_eq!(
@@ -407,40 +435,29 @@ fn a_controller_claims_nothing_until_it_asserts_and_nothing_again_once_it_releas
     assert_eq!(controller.verdict(None), ControlVerdict::NoOpinion);
 
     controller.assert(RunState::Idle);
-    let held = controller.assertion().epoch;
-    controller.release();
-    assert_eq!(controller.assertion().epoch, 0);
-    assert_eq!(controller.verdict(None), ControlVerdict::NoOpinion);
-
-    controller.assert(RunState::Idle);
-    assert!(
-        controller.assertion().epoch > held,
-        "epochs are per-controller and monotonic — attaching to another engine must not rewind them"
-    );
-}
-
-#[test]
-fn controller_epochs_start_above_zero_and_rise_across_a_restart() {
-    let mut first = Controller::new(TsUs::from_micros(1_700_000_000_000_000));
-    first.assert(RunState::Idle);
-    let opening = first.assertion();
+    let opening = controller.assertion();
     assert_eq!(opening.state, RunState::Idle);
     assert!(
         opening.epoch > 0,
         "the engine accepts on a strict >, so 0 could never win"
     );
 
-    first.assert(RunState::Running);
-    assert!(first.assertion().epoch > opening.epoch);
+    controller.release();
+    assert_eq!(controller.assertion().epoch, 0);
+    assert_eq!(controller.verdict(None), ControlVerdict::NoOpinion);
+
+    controller.assert(RunState::Running);
+    assert!(
+        controller.assertion().epoch > opening.epoch,
+        "epochs are per-controller and monotonic — attaching to another engine must not rewind them"
+    );
+    let held = controller.assertion().epoch;
 
     // A later boot stamp is what makes a restarted workstation outrank its own previous run.
     let mut restarted = Controller::new(TsUs::from_micros(1_700_000_060_000_000));
     restarted.assert(RunState::Idle);
-    assert!(restarted.assertion().epoch > first.assertion().epoch);
-}
+    assert!(restarted.assertion().epoch > held);
 
-#[test]
-fn a_controller_tells_a_frame_in_flight_from_a_race_it_lost() {
     let mut controller = Controller::new(TsUs::from_micros(1_000));
     controller.assert(RunState::Idle);
     let mine = controller.assertion().epoch;

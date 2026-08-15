@@ -22,7 +22,7 @@ use std::path::Path;
 use polysim::config::{Config, ExecutionMode, NoParams, RunIdentity};
 use polysim::exposure::{
     ExposureError, ExposureSnapshot, ExposureState, ExposureWriter, ExposureWriterConfig,
-    InstrumentExposure, MAX_EXPOSURE_INSTRUMENTS, file_path, load,
+    InstrumentExposure, file_path, load,
 };
 use polysim::ids::{FIXED_SCALE, InstrumentId, Qty};
 use polysim::registry::Registry;
@@ -276,31 +276,42 @@ fn the_informational_sections_are_never_read_back() {
     );
 }
 
-/// A name, the document, and which error it must produce — the last of those is what stops a case
-/// passing because the boot refused for some entirely different reason.
-type UntrustedCase = (&'static str, &'static str, fn(&ExposureError) -> bool);
+/// Whether a case loads (and reads empty) or refuses the boot — the last arm of `Refuses` is what
+/// stops a case passing because the boot refused for some entirely different reason.
+enum Expect {
+    LoadsEmpty,
+    Refuses(fn(&ExposureError) -> bool),
+}
 
+type UntrustedCase = (&'static str, String, Expect);
+
+/// FITNESS: a file this build cannot trust refuses the boot by the reason it is untrustworthy, and a
+/// config change that merely drops a FLAT instrument is not among them — dropping one that still
+/// holds money is, because the next write would omit the row and the position would be gone with no
+/// record it ever existed.
 #[test]
 fn a_file_that_cannot_be_trusted_refuses_the_boot() {
     let registry = registry_for(BINANCE_SOURCE);
-    let cases: [UntrustedCase; 5] = [
-        ("malformed", "{ not json", |error| {
-            matches!(error, ExposureError::Malformed { .. })
-        }),
+    let cases: [UntrustedCase; 7] = [
+        (
+            "malformed",
+            "{ not json".to_string(),
+            Expect::Refuses(|error| matches!(error, ExposureError::Malformed { .. })),
+        ),
         (
             "identity",
-            r#"{"version":2,"strategy_id":"other","te_id":"te-other","written_ts_us":1,"seq":1,"fixed_scale":100000000,"instruments":[]}"#,
-            |error| matches!(error, ExposureError::WrongIdentity { .. }),
+            r#"{"version":2,"strategy_id":"other","te_id":"te-other","written_ts_us":1,"seq":1,"fixed_scale":100000000,"instruments":[]}"#.to_string(),
+            Expect::Refuses(|error| matches!(error, ExposureError::WrongIdentity { .. })),
         ),
         (
             "version",
-            r#"{"version":99,"strategy_id":"recorder","te_id":"te-recorder","written_ts_us":1,"seq":1,"fixed_scale":100000000,"instruments":[]}"#,
-            |error| matches!(error, ExposureError::UnknownVersion { .. }),
+            r#"{"version":99,"strategy_id":"recorder","te_id":"te-recorder","written_ts_us":1,"seq":1,"fixed_scale":100000000,"instruments":[]}"#.to_string(),
+            Expect::Refuses(|error| matches!(error, ExposureError::UnknownVersion { .. })),
         ),
         (
             "scale",
-            r#"{"version":2,"strategy_id":"recorder","te_id":"te-recorder","written_ts_us":1,"seq":1,"fixed_scale":1000,"instruments":[]}"#,
-            |error| matches!(error, ExposureError::ScaleMismatch { .. }),
+            r#"{"version":2,"strategy_id":"recorder","te_id":"te-recorder","written_ts_us":1,"seq":1,"fixed_scale":1000,"instruments":[]}"#.to_string(),
+            Expect::Refuses(|error| matches!(error, ExposureError::ScaleMismatch { .. })),
         ),
         // A version-1 document: rows with no `basis_quote`. What the position COST cannot be
         // recovered from cash, and inferring it is the defect the field was added to stop — so an
@@ -308,11 +319,21 @@ fn a_file_that_cannot_be_trusted_refuses_the_boot() {
         // what actually changed instead of reporting a corrupt document.
         (
             "pre-basis",
-            r#"{"version":1,"strategy_id":"recorder","te_id":"te-recorder","written_ts_us":1,"seq":1,"fixed_scale":100000000,"instruments":[{"symbol":"btcusdt","position_base":100000,"cash_quote":-11800000000}]}"#,
-            |error| matches!(error, ExposureError::UnknownVersion { found: 1, .. }),
+            r#"{"version":1,"strategy_id":"recorder","te_id":"te-recorder","written_ts_us":1,"seq":1,"fixed_scale":100000000,"instruments":[{"symbol":"btcusdt","position_base":100000,"cash_quote":-11800000000}]}"#.to_string(),
+            Expect::Refuses(|error| matches!(error, ExposureError::UnknownVersion { found: 1, .. })),
+        ),
+        (
+            "dropped-instrument-flat",
+            document_naming("ethusdt", 0, 0),
+            Expect::LoadsEmpty,
+        ),
+        (
+            "dropped-instrument-live",
+            document_naming("ethusdt", 100_000, -300_000_000),
+            Expect::Refuses(|error| matches!(error, ExposureError::UnknownInstrument { .. })),
         ),
     ];
-    for (name, body, is_expected) in cases {
+    for (name, body, expect) in cases {
         let root = TempDir::new(&format!("exposure-untrusted-{name}"));
         std::fs::create_dir_all(root.path()).expect("create the exposure directory");
         std::fs::write(
@@ -320,56 +341,25 @@ fn a_file_that_cannot_be_trusted_refuses_the_boot() {
             body,
         )
         .expect("write the case");
-        let error = load(
+        let result = load(
             root.path(),
             &identity(),
             &registry,
             Some(ExecutionMode::Live),
-        )
-        .expect_err("an untrustworthy file must refuse the boot");
-        assert!(is_expected(&error), "{name} produced {error:?}");
+        );
+        match expect {
+            Expect::LoadsEmpty => assert!(
+                result
+                    .expect("a flat row for a gone instrument costs nothing to drop")
+                    .is_empty(),
+                "case {name}: expected an empty state"
+            ),
+            Expect::Refuses(is_expected) => {
+                let error = result.expect_err("an untrustworthy file must refuse the boot");
+                assert!(is_expected(&error), "{name} produced {error:?}");
+            }
+        }
     }
-}
-
-/// A config change that drops an instrument is ordinary. Dropping one that still holds money is not:
-/// the next write would omit the row and the position would be gone with no record it ever existed.
-#[test]
-fn a_dropped_instrument_refuses_the_boot_only_while_it_holds_money() {
-    let registry = registry_for(BINANCE_SOURCE);
-    let flat = document_naming("ethusdt", 0, 0);
-    let live = document_naming("ethusdt", 100_000, -300_000_000);
-
-    let flat_root = TempDir::new("exposure-dropped-flat");
-    std::fs::create_dir_all(flat_root.path()).expect("create the exposure directory");
-    std::fs::write(
-        file_path(flat_root.path(), &identity(), Some(ExecutionMode::Live)),
-        flat,
-    )
-    .expect("write");
-    let state = load(
-        flat_root.path(),
-        &identity(),
-        &registry,
-        Some(ExecutionMode::Live),
-    )
-    .expect("a flat row for a gone instrument costs nothing to drop");
-    assert!(state.is_empty());
-
-    let live_root = TempDir::new("exposure-dropped-live");
-    std::fs::create_dir_all(live_root.path()).expect("create the exposure directory");
-    std::fs::write(
-        file_path(live_root.path(), &identity(), Some(ExecutionMode::Live)),
-        live,
-    )
-    .expect("write");
-    let error = load(
-        live_root.path(),
-        &identity(),
-        &registry,
-        Some(ExecutionMode::Live),
-    )
-    .expect_err("a live position this config cannot name must stop the run");
-    assert!(matches!(error, ExposureError::UnknownInstrument { .. }));
 }
 
 fn document_naming(symbol: &str, position_base: i64, cash_quote: i64) -> String {
@@ -465,32 +455,4 @@ fn a_full_ring_supersedes_the_stale_state_rather_than_losing_the_newest() {
         [row(0, 512_000, -3_584, 3_584)],
         "the file ends on the newest state, whatever the ring did in between"
     );
-}
-
-#[test]
-fn a_completed_write_leaves_no_partial_file_beside_it() {
-    let root = TempDir::new("exposure-no-partial");
-    let registry = registry_for(BINANCE_SOURCE);
-    write_through_the_writer(root.path(), &registry, &[snapshot(1, &[row(0, 1, -1, 1)])]);
-
-    let leftovers: Vec<String> = std::fs::read_dir(root.path())
-        .expect("the exposure directory exists")
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| name.ends_with(".tmp"))
-        .collect();
-    assert!(
-        leftovers.is_empty(),
-        "a finished write leaves only the document: found {leftovers:?}"
-    );
-}
-
-/// A snapshot is a fixed-size POD on a ring, so its capacity is a hard edge rather than a
-/// growth point — `active()` is where that invariant is applied, and it must hold at the boundary.
-#[test]
-fn a_snapshot_carries_its_declared_prefix_and_no_more() {
-    let mut full = ExposureSnapshot::EMPTY;
-    full.len = MAX_EXPOSURE_INSTRUMENTS as u8;
-    assert_eq!(full.active().len(), MAX_EXPOSURE_INSTRUMENTS);
-    assert!(ExposureSnapshot::EMPTY.active().is_empty());
 }

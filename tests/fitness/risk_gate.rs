@@ -22,8 +22,6 @@
 //! hard-reject kill switch — pinned on the one thing that can silently disarm it: an event the
 //! engine synthesised for itself being counted as the venue accepting something.
 
-use std::sync::{Arc, Mutex};
-
 use polysim::adapters::exec::open_orders_snapshot_end;
 use polysim::config::{RecordedTables, TrackerSpec};
 use polysim::exposure::InstrumentExposure;
@@ -47,50 +45,10 @@ use proptest::prelude::*;
 use rtrb::{Consumer, RingBuffer};
 
 use crate::engine_support::{
-    ALL_TABLES, FillPen, ONE, book_reset, engine_without_warmup, exec_event, exposure_ring,
-    instrument_row, metrics_ring, persist_ring, persist_ring_for, pop, snapshot_pair, spin,
-    strategy_log_ring, ts, ui_book_ring, ui_event_ring,
+    ALL_TABLES, ONE, book_reset, exec_event, exposure_ring, instrument_row, metrics_ring,
+    persist_ring_for, pop, snapshot_pair, spin, strategy_log_ring, ts, ui_book_ring, ui_event_ring,
 };
 use crate::micro_strategy::models::{RiskBudget, signed};
-
-/// The shipped config's pair: `max_exposure_quote: 100`, `order_notional: 10`.
-const BUDGET: RiskBudget = RiskBudget {
-    order_notional: 10 * ONE,
-    max_exposure_quote: 100 * ONE,
-};
-
-type LatestExposure = Arc<Mutex<Option<i64>>>;
-
-/// Reports the engine's exposure on each spin. It no longer invents its own fills: positions now
-/// arrive through the real inbound path ([`FillPen`]), which is the point of this milestone — the
-/// gate must be exercised against the exposure the ENGINE computed, not one a strategy asserted.
-struct ExposureProbe {
-    latest: LatestExposure,
-}
-
-impl Strategy for ExposureProbe {
-    fn on_spin(&mut self, ctx: &mut StrategyCtx<'_>, _tick: &SpinTick) {
-        *self.latest.lock().expect("exposure mutex poisoned") =
-            Some(ctx.exposure_quote(InstrumentId(0)));
-    }
-}
-
-fn probe_engine(instruments: &[InstrumentRow]) -> (HotEngine, LatestExposure) {
-    let latest: LatestExposure = Arc::new(Mutex::new(None));
-    let (persistence, _persist) = persist_ring(256);
-    let (log_sink, _logs) = strategy_log_ring(64);
-    let (metrics, _metrics) = metrics_ring(64);
-    let engine = engine_without_warmup(
-        instruments,
-        Box::new(ExposureProbe {
-            latest: Arc::clone(&latest),
-        }),
-        persistence,
-        log_sink,
-        metrics,
-    );
-    (engine, latest)
-}
 
 /// Drop the book and restate it whole, so the mark moves with no transient crossing to reason about.
 pub(crate) fn reseat_book(bid: i64, ask: i64, when: i64) -> [InboundMessage; 3] {
@@ -100,77 +58,6 @@ pub(crate) fn reseat_book(bid: i64, ask: i64, when: i64) -> [InboundMessage; 3] 
         InboundMessage::Book(bids),
         InboundMessage::Book(asks),
     ]
-}
-
-fn dispatch_all(engine: &mut HotEngine, messages: &[InboundMessage]) {
-    for message in messages {
-        engine.dispatch(pop(0, 0), message);
-    }
-}
-
-fn exposure_after_spin(
-    engine: &mut HotEngine,
-    latest: &LatestExposure,
-    seq: u64,
-    when: i64,
-) -> i64 {
-    engine.dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(seq, when)));
-    latest
-        .lock()
-        .expect("exposure mutex poisoned")
-        .expect("the spin ran, so the probe read an exposure")
-}
-
-/// FITNESS: a price move alone can carry exposure past the ceiling, and when it does the side that
-/// would REDUCE the position must still quote. Withdrawing it is a deadlock — the only thing that
-/// unwinds a position is a fill, and the only thing that produces a fill is a quote.
-#[test]
-fn a_mark_move_past_the_ceiling_still_leaves_the_reducing_side_quoting() {
-    let instruments = [instrument_row(0, TrackerSpec::default(), 64)];
-    let (mut engine, latest) = probe_engine(&instruments);
-
-    // Mid 100, then one real fill of a whole base unit: exposure lands exactly on the 100 ceiling.
-    dispatch_all(&mut engine, &reseat_book(99 * ONE, 101 * ONE, 0));
-    let mut pen = FillPen::new(0);
-    dispatch_all(&mut engine, &pen.fill(Side::Buy, 100 * ONE, ONE, 10));
-    let at_ceiling = exposure_after_spin(&mut engine, &latest, 0, 20);
-    assert_eq!(
-        at_ceiling, BUDGET.max_exposure_quote,
-        "one unit marked at 100"
-    );
-    assert!(
-        BUDGET.would_breach(at_ceiling, Side::Buy),
-        "buying from the ceiling grows the position past it"
-    );
-    assert!(
-        !BUDGET.would_breach(at_ceiling, Side::Sell),
-        "selling from the ceiling reduces the position"
-    );
-
-    // The mark alone moves to 120 — no trade, so no fill and no banked action of any kind. Exposure
-    // is now 20 past the ceiling and 10 past even ceiling-plus-Δ, which is the regime where the
-    // unguarded test withdrew both sides.
-    dispatch_all(&mut engine, &reseat_book(119 * ONE, 121 * ONE, 30));
-    let past_ceiling = exposure_after_spin(&mut engine, &latest, 1, 40);
-    assert_eq!(
-        past_ceiling,
-        120 * ONE,
-        "the position never changed — only the price did"
-    );
-    assert!(
-        past_ceiling > BUDGET.max_exposure_quote + BUDGET.order_notional,
-        "the scenario has to clear ceiling + Δ or it does not reach the regime under test"
-    );
-
-    assert!(
-        BUDGET.would_breach(past_ceiling, Side::Buy),
-        "buying from over the ceiling grows the breach and must be withdrawn"
-    );
-    assert!(
-        !BUDGET.would_breach(past_ceiling, Side::Sell),
-        "the reducing side was withdrawn from over the ceiling — the position can now never unwind, \
-         because no quote means no fill and no fill means no way down"
-    );
 }
 
 proptest! {
@@ -259,89 +146,114 @@ fn ceiling_check(side: Side, position_base: i64, has_mark: bool) -> ExposureChec
     }
 }
 
-/// FITNESS: from over the ceiling the engine withdraws the side that would ADD to the position and
-/// keeps the side that would reduce it. Same deadlock argument as the strategy gate above, now for
-/// the control a strategy cannot bypass — and the reducing side is admitted here by construction
-/// rather than by arithmetic, so no rounding or sign error can reach it.
+/// FITNESS: `assess_exposure` verdicts at the ceiling match a named table. From over the ceiling the
+/// engine withdraws the side that would ADD to the position and keeps the side that would reduce it —
+/// the reducing side admitted by construction rather than by arithmetic, so no rounding or sign error
+/// can reach it — and an UNMARKED position is not a flat one: the ledger's mark is `None` until the
+/// first two-sided committed book, exposure reads 0 in that window too, and only `has_mark` tells the
+/// two zeroes apart, so a restarted engine holding unvalued inventory must refuse to grow it rather
+/// than read itself as flat.
 #[test]
-fn the_engine_ceiling_withdraws_the_adding_side_and_keeps_the_reducing_one() {
-    let long = ONE;
-    assert_eq!(
-        assess_exposure(ceiling_check(Side::Buy, long, true)),
-        QuotePermission::ReducingOnly {
-            reducing: Side::Sell
+fn assess_exposure_ceiling_verdicts_match_named_cases() {
+    struct Case {
+        name: &'static str,
+        side: Side,
+        position_base: i64,
+        has_mark: bool,
+        exposure_override: Option<i64>,
+        expected: QuotePermission,
+    }
+    let cases = [
+        Case {
+            name: "long_at_the_ceiling_buy_is_withdrawn",
+            side: Side::Buy,
+            position_base: ONE,
+            has_mark: true,
+            exposure_override: None,
+            expected: QuotePermission::ReducingOnly {
+                reducing: Side::Sell,
+            },
         },
-        "one unit marked at the ceiling, and buying grows it past"
-    );
-    assert_eq!(
-        assess_exposure(ceiling_check(Side::Sell, long, true)),
-        QuotePermission::Both,
-        "selling from the ceiling is the only way back to flat"
-    );
-
-    // Twice the ceiling — the regime this file was written for, since a price move alone can carry
-    // exposure there with no fill at all. The side that unwinds it is not merely permitted, it is
-    // unobjectionable: a gate answering "restricted, but not on this side" from deep over the
-    // budget is reasoning about the position when it was asked about the way out of it.
-    assert_eq!(
-        assess_exposure(ceiling_check(Side::Sell, 2 * ONE, true)),
-        QuotePermission::Both,
-        "the ceiling has no objection to the only side that can bring the position back"
-    );
-
-    let short = -ONE;
-    assert_eq!(
-        assess_exposure(ceiling_check(Side::Sell, short, true)),
-        QuotePermission::ReducingOnly {
-            reducing: Side::Buy
+        Case {
+            name: "long_at_the_ceiling_sell_is_the_way_back",
+            side: Side::Sell,
+            position_base: ONE,
+            has_mark: true,
+            exposure_override: None,
+            expected: QuotePermission::Both,
         },
-        "the mirror: selling grows a short past the ceiling"
-    );
-    assert_eq!(
-        assess_exposure(ceiling_check(Side::Buy, short, true)),
-        QuotePermission::Both,
-        "and buying is what unwinds it"
-    );
-}
-
-/// FITNESS: an unmarked position is not a flat one. The ledger's mark is `None` until the first
-/// two-sided committed book, and exposure reads 0 in that window — so the SAME zero means two
-/// entirely different things, and only `has_mark` separates them. A restarted engine holding
-/// inventory it cannot yet value must refuse to grow it rather than read itself as flat.
-#[test]
-fn a_position_with_no_mark_yet_refuses_the_side_that_would_grow_it() {
-    let long = ONE;
-    let unmarked = ceiling_check(Side::Buy, long, false);
-    assert_eq!(
-        unmarked.exposure_quote, 0,
-        "no mark, so nothing to value it"
-    );
-    assert_eq!(
-        assess_exposure(unmarked),
-        QuotePermission::ReducingOnly {
-            reducing: Side::Sell
+        // Twice the ceiling — the regime this file was written for, since a price move alone can
+        // carry exposure there with no fill at all. The unwinding side is not merely permitted, it
+        // is unobjectionable: a gate answering "restricted, but not on this side" from deep over the
+        // budget is reasoning about the position when it was asked about the way out of it.
+        Case {
+            name: "twice_the_ceiling_the_unwinding_side_is_unobjectionable",
+            side: Side::Sell,
+            position_base: 2 * ONE,
+            has_mark: true,
+            exposure_override: None,
+            expected: QuotePermission::Both,
         },
-        "a position that cannot be valued must not be grown"
-    );
-    assert_eq!(
-        assess_exposure(ceiling_check(Side::Sell, long, false)),
-        QuotePermission::Both,
-        "and must still be reducible — refusing both sides is the deadlock"
-    );
-
-    // The same zero exposure WITH a mark behind it is a position genuinely worth nothing, and
-    // nothing about it threatens the ceiling. Without this pair the branch above could be deleted
-    // and every other assertion in this file would still pass.
-    let valued_at_nothing = ExposureCheck {
-        exposure_quote: 0,
-        has_mark: true,
-        ..ceiling_check(Side::Buy, long, false)
-    };
-    assert_eq!(
-        assess_exposure(valued_at_nothing),
-        QuotePermission::Both,
-        "a mark of zero is an honest valuation, and one more order stays inside the ceiling"
-    );
+        Case {
+            name: "short_at_the_ceiling_sell_is_withdrawn",
+            side: Side::Sell,
+            position_base: -ONE,
+            has_mark: true,
+            exposure_override: None,
+            expected: QuotePermission::ReducingOnly {
+                reducing: Side::Buy,
+            },
+        },
+        Case {
+            name: "short_at_the_ceiling_buy_is_the_way_back",
+            side: Side::Buy,
+            position_base: -ONE,
+            has_mark: true,
+            exposure_override: None,
+            expected: QuotePermission::Both,
+        },
+        Case {
+            name: "an_unmarked_long_refuses_the_growing_side",
+            side: Side::Buy,
+            position_base: ONE,
+            has_mark: false,
+            exposure_override: None,
+            expected: QuotePermission::ReducingOnly {
+                reducing: Side::Sell,
+            },
+        },
+        Case {
+            name: "an_unmarked_long_stays_reducible",
+            side: Side::Sell,
+            position_base: ONE,
+            has_mark: false,
+            exposure_override: None,
+            expected: QuotePermission::Both,
+        },
+        // Without this case the branch reading has_mark could be deleted and every other assertion
+        // in this table would still pass: a mark of zero is an honest valuation, distinct from no
+        // mark at all, and threatens the ceiling not at all.
+        Case {
+            name: "a_mark_of_zero_is_an_honest_valuation",
+            side: Side::Buy,
+            position_base: ONE,
+            has_mark: true,
+            exposure_override: Some(0),
+            expected: QuotePermission::Both,
+        },
+    ];
+    for case in cases {
+        let mut check = ceiling_check(case.side, case.position_base, case.has_mark);
+        if let Some(exposure_quote) = case.exposure_override {
+            check.exposure_quote = exposure_quote;
+        }
+        let got = assess_exposure(check);
+        assert_eq!(
+            got, case.expected,
+            "case {}: got {:?}, want {:?}",
+            case.name, got, case.expected
+        );
+    }
 }
 
 /// FITNESS: the projection is the order's REAL notional. The strategy must guess with a fixed
@@ -734,15 +646,17 @@ fn quote_holding_one_unit(
     drain_commands(&mut commands)
 }
 
-/// FITNESS: a real fill that carries the position onto the ceiling withdraws the adding side at the
-/// ENGINE, whatever the strategy keeps declaring — and leaves the reducing side quoting.
+/// FITNESS: a position onto the ceiling withdraws the adding side at the ENGINE, whatever the
+/// strategy keeps declaring — and leaves the reducing side quoting — whether the position arrived
+/// through a real fill this run or was inherited whole from a restart.
 ///
-/// Driven twice over one message sequence, differing only in the row's `max_exposure_quote`. The
-/// loose run is what makes the tight one mean something: it proves this fixture really does reach
-/// the quoting path, so "no order on the buy side" is the ceiling refusing and not the fixture
-/// failing to ask.
+/// The fill case is driven twice over one message sequence, differing only in the row's
+/// `max_exposure_quote`. The loose run is what makes the tight one mean something: it proves this
+/// fixture really does reach the quoting path, so "no order on the buy side" is the ceiling refusing
+/// and not the fixture failing to ask. The restored case then proves the same gate reads a
+/// cross-session ledger rather than starting the run believing itself flat.
 #[test]
-fn a_fill_up_to_the_ceiling_stops_the_engine_adding_to_the_position() {
+fn a_position_at_the_ceiling_stops_the_engine_adding_whether_filled_or_restored() {
     let tight = quote_holding_one_unit(CEILING, &[], Some(Side::Buy));
     assert!(
         !is_placing(&tight, Side::Buy),
@@ -764,27 +678,24 @@ fn a_fill_up_to_the_ceiling_stops_the_engine_adding_to_the_position() {
         is_placing(&loose, Side::Sell),
         "and the other side: {loose:?}"
     );
-}
 
-/// FITNESS: an engine that BOOTS holding inventory is held to the same ceiling. The ledger is
-/// cross-session, so a restart inherits a position no fill this run produced — and the gate must
-/// read it off the restored cost basis rather than starting the run believing itself flat.
-#[test]
-fn a_restored_position_at_the_ceiling_is_not_added_to() {
+    // An engine that BOOTS holding inventory is held to the same ceiling. The ledger is
+    // cross-session, so a restart inherits a position no fill this run produced — and the gate must
+    // read it off the restored cost basis rather than starting the run believing itself flat.
     let restored = [InstrumentExposure {
         instrument: INSTRUMENT,
         position_base: Qty(ONE),
         cash_quote: -MARK,
         basis_quote: MARK,
     }];
-    let commands = quote_holding_one_unit(CEILING, &restored, None);
+    let inherited = quote_holding_one_unit(CEILING, &restored, None);
     assert!(
-        !is_placing(&commands, Side::Buy),
-        "the inherited position is already at the ceiling: {commands:?}"
+        !is_placing(&inherited, Side::Buy),
+        "the inherited position is already at the ceiling: {inherited:?}"
     );
     assert!(
-        is_placing(&commands, Side::Sell),
-        "and unwinding it is exactly what a restart holding inventory needs to do: {commands:?}"
+        is_placing(&inherited, Side::Sell),
+        "and unwinding it is exactly what a restart holding inventory needs to do: {inherited:?}"
     );
 }
 

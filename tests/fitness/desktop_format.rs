@@ -30,37 +30,65 @@ const UNDERFLOW: &str = "<-1e6";
 /// Rounding is the half of the writer the grouping property cannot reach: it feeds whole
 /// magnitudes, so only literals pin what a fraction does. Negative readings are ordinary here — a
 /// venue clock ahead of the local one, and the simulated venue stamping venue time against a
-/// wall-clock receive, both put an arrival before its own send.
+/// wall-clock receive, both put an arrival before its own send. Both writers share the shape (round
+/// an `f64` to their displayed precision), so one table covers them.
 #[test]
-fn a_latency_reading_rounds_to_whole_microseconds() {
+fn a_reading_rounds_to_its_displayed_precision() {
+    struct Case {
+        name: &'static str,
+        writer: fn(&mut String, f64),
+        input: f64,
+        expected: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "latency rounds down within a group",
+            writer: write_latency_micros,
+            input: 999.4,
+            expected: "999",
+        },
+        Case {
+            name: "latency rounding up across a group boundary gains the separator",
+            writer: write_latency_micros,
+            input: 999.5,
+            expected: "1 000",
+        },
+        Case {
+            name: "a latency reading that rounds away its magnitude drops its sign",
+            writer: write_latency_micros,
+            input: -0.4,
+            expected: "0",
+        },
+        Case {
+            name: "an empty slot queue is a number the operator wants",
+            writer: write_slots,
+            input: 0.0,
+            expected: "0.0",
+        },
+        Case {
+            name: "slots round down within a place",
+            writer: write_slots,
+            input: 0.44,
+            expected: "0.4",
+        },
+        Case {
+            name: "slots round, unlike the truncating money writers",
+            writer: write_slots,
+            input: 0.45,
+            expected: "0.5",
+        },
+        Case {
+            name: "slots round down at a larger magnitude",
+            writer: write_slots,
+            input: 12.349,
+            expected: "12.3",
+        },
+    ];
     let mut buf = String::new();
-
-    write_latency_micros(&mut buf, 999.4);
-    assert_eq!(buf, "999");
-    write_latency_micros(&mut buf, 999.5);
-    assert_eq!(
-        buf, "1 000",
-        "rounding up across a group boundary must gain the separator"
-    );
-    write_latency_micros(&mut buf, -0.4);
-    assert_eq!(
-        buf, "0",
-        "a reading that rounds away its magnitude must not keep a sign"
-    );
-}
-
-#[test]
-fn the_slot_count_rounds_to_one_place() {
-    let mut buf = String::new();
-
-    write_slots(&mut buf, 0.0);
-    assert_eq!(buf, "0.0", "an empty queue is a number the operator wants");
-    write_slots(&mut buf, 0.44);
-    assert_eq!(buf, "0.4");
-    write_slots(&mut buf, 0.45);
-    assert_eq!(buf, "0.5", "rounds, unlike the truncating money writers");
-    write_slots(&mut buf, 12.349);
-    assert_eq!(buf, "12.3");
+    for case in cases {
+        (case.writer)(&mut buf, case.input);
+        assert_eq!(buf, case.expected, "{}", case.name);
+    }
 }
 
 /// Both writers take an `f64` off a UDP link, so a NaN or an infinity is reachable without a bug

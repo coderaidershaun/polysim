@@ -233,14 +233,38 @@ mod depth_synthetic {
     }
 
     #[test]
-    fn a_spot_snapshot_at_the_exhausted_id_is_stale() {
-        let mut sequencer = DepthSequencer::new(ChainRule::Spot, INSTRUMENT, 8);
-        assert_eq!(
-            sequencer.apply_snapshot(synthetic_snapshot(u64::MAX), &mut |_, _| {}),
-            SnapshotOutcome::Stale,
-            "a snapshot with no representable successor cannot establish a live chain"
-        );
-        assert!(!sequencer.is_live());
+    fn a_snapshot_past_the_exhausted_id_is_stale() {
+        struct Case {
+            name: &'static str,
+            prime: fn(&mut DepthSequencer),
+            snapshot_at: u64,
+        }
+        let cases = [
+            Case {
+                name: "no_prior_diff_at_the_ceiling",
+                prime: |_| {},
+                snapshot_at: u64::MAX,
+            },
+            Case {
+                name: "buffered_chain_cannot_wrap_its_successor_to_zero",
+                prime: |seq| {
+                    seq.on_diff(synthetic_diff(u64::MAX - 1, u64::MAX, None), &mut |_, _| {});
+                    seq.on_diff(synthetic_diff(u64::MAX, u64::MAX, None), &mut |_, _| {});
+                },
+                snapshot_at: u64::MAX - 2,
+            },
+        ];
+        for case in cases {
+            let mut sequencer = DepthSequencer::new(ChainRule::Spot, INSTRUMENT, 8);
+            (case.prime)(&mut sequencer);
+            assert_eq!(
+                sequencer.apply_snapshot(synthetic_snapshot(case.snapshot_at), &mut |_, _| {}),
+                SnapshotOutcome::Stale,
+                "{}: a snapshot with no representable successor cannot establish a live chain",
+                case.name
+            );
+            assert!(!sequencer.is_live(), "{}", case.name);
+        }
     }
 
     /// Spot re-sends events the book already holds, and the sequencer throws them away. The outcome
@@ -266,25 +290,6 @@ mod depth_synthetic {
         );
         assert_eq!(outcome, DiffOutcome::AlreadyApplied);
     }
-
-    #[test]
-    fn a_buffered_spot_chain_cannot_continue_past_the_exhausted_id() {
-        let mut sequencer = DepthSequencer::new(ChainRule::Spot, INSTRUMENT, 8);
-        assert_eq!(
-            sequencer.on_diff(synthetic_diff(u64::MAX - 1, u64::MAX, None), &mut |_, _| {}),
-            DiffOutcome::Buffered
-        );
-        assert_eq!(
-            sequencer.on_diff(synthetic_diff(u64::MAX, u64::MAX, None), &mut |_, _| {}),
-            DiffOutcome::Buffered
-        );
-        assert_eq!(
-            sequencer.apply_snapshot(synthetic_snapshot(u64::MAX - 2), &mut |_, _| {}),
-            SnapshotOutcome::Stale,
-            "a buffered chain must not wrap its successor back to zero"
-        );
-        assert!(!sequencer.is_live());
-    }
 }
 
 /// The simulated venue reconstructs continuity from the metadata riding beside each message and
@@ -307,28 +312,28 @@ mod venue_metadata {
         sequencer
     }
 
+    /// The reset's own stamp is the BROKEN diff's exchange time, not the receipt the message
+    /// carries — the receipt is clamped to the emitted floor and the venue clock is not.
     #[test]
-    fn a_snapshot_chunk_claims_no_continuity_of_its_own() {
+    fn venue_meta_matches_the_event_kind_it_stamps() {
         let mut sequencer = DepthSequencer::new(ChainRule::Spot, INSTRUMENT, 8);
         let mut stamped = Vec::new();
         sequencer.apply_snapshot(synthetic_snapshot(490), &mut |message, venue_meta| {
             stamped.push((message, venue_meta));
         });
-        assert!(!stamped.is_empty(), "a snapshot emits its book");
+        assert!(!stamped.is_empty(), "snapshot: a snapshot emits its book");
         for (message, venue_meta) in &stamped {
             assert!(
-                matches!(message, InboundMessage::Book(chunk) if chunk.kind == BookChunkKind::Snapshot)
+                matches!(message, InboundMessage::Book(chunk) if chunk.kind == BookChunkKind::Snapshot),
+                "snapshot"
             );
             assert_eq!(
                 *venue_meta,
                 VenueMeta::None,
-                "a snapshot replaces the book, so it chains onto nothing"
+                "snapshot: a snapshot replaces the book, so it chains onto nothing"
             );
         }
-    }
 
-    #[test]
-    fn every_delta_chunk_carries_the_diff_exchange_stamp_it_came_from() {
         let mut sequencer = live_spot_sequencer();
         let diff = synthetic_diff(501, 510, None);
         let mut stamped = Vec::new();
@@ -336,36 +341,37 @@ mod venue_metadata {
             sequencer.on_diff(diff.clone(), &mut |message, venue_meta| {
                 stamped.push((message, venue_meta));
             }),
-            DiffOutcome::Applied
+            DiffOutcome::Applied,
+            "delta"
         );
-        assert!(!stamped.is_empty(), "a chaining diff emits its levels");
+        assert!(
+            !stamped.is_empty(),
+            "delta: a chaining diff emits its levels"
+        );
         for (message, venue_meta) in &stamped {
             assert!(
-                matches!(message, InboundMessage::Book(chunk) if chunk.kind == BookChunkKind::Delta)
+                matches!(message, InboundMessage::Book(chunk) if chunk.kind == BookChunkKind::Delta),
+                "delta"
             );
             assert_eq!(
                 *venue_meta,
                 VenueMeta::DepthDelta {
                     exchange_ts_us: diff.exchange_ts_us
-                }
+                },
+                "delta"
             );
         }
-    }
 
-    /// The reset's own stamp is the BROKEN diff's exchange time, not the receipt the message
-    /// carries — the receipt is clamped to the emitted floor and the venue clock is not.
-    #[test]
-    fn a_broken_chain_resets_with_the_venue_stamp_that_broke_it() {
         let mut sequencer = live_spot_sequencer();
         let mut broken = synthetic_diff(600, 610, None);
         broken.exchange_ts_us = RESET_EXCHANGE_TS;
-
         let mut stamped = Vec::new();
         assert_eq!(
             sequencer.on_diff(broken, &mut |message, venue_meta| {
                 stamped.push((message, venue_meta));
             }),
-            DiffOutcome::Resync
+            DiffOutcome::Resync,
+            "reset"
         );
         assert!(
             matches!(
@@ -377,7 +383,7 @@ mod venue_metadata {
                     }
                 )]
             ),
-            "got {stamped:?}"
+            "reset: got {stamped:?}"
         );
     }
 

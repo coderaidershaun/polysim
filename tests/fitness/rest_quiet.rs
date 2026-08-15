@@ -14,30 +14,32 @@ const CEILING: Duration = Duration::from_secs(60);
 
 /// FITNESS: `Retry-After` arrives straight off the wire, so the value is whatever answers as the
 /// venue. At the top of the range the deadline arithmetic overflows outright, which is why the
-/// unclamped form is a panic rather than a long sleep.
+/// unclamped form is a panic rather than a long sleep. No header means the venue said nothing
+/// about how long, not that the client may retry at once, so it clamps to the same floor as a
+/// too-small header.
 #[test]
-fn an_absurd_retry_after_clamps_to_the_ceiling_instead_of_panicking() {
+fn open_clamps_retry_after_between_floor_and_ceiling() {
     let now = Instant::now();
-    for absurd in [u64::MAX, u64::MAX - 1, u64::MAX / 2, 86_400, 3_600, 61] {
+    let cases: &[(&str, Option<u64>, Duration)] = &[
+        ("absurd_max", Some(u64::MAX), CEILING),
+        ("absurd_max_minus_one", Some(u64::MAX - 1), CEILING),
+        ("absurd_max_half", Some(u64::MAX / 2), CEILING),
+        ("absurd_day", Some(86_400), CEILING),
+        ("absurd_hour", Some(3_600), CEILING),
+        ("just_over_ceiling", Some(61), CEILING),
+        ("no_header", None, FLOOR),
+        ("zero_seconds", Some(0), FLOOR),
+        ("one_second", Some(1), FLOOR),
+    ];
+    for (name, retry_after, expected) in cases {
         let mut quiet = RestQuiet::new();
         assert_eq!(
-            quiet.open(Some(absurd), now),
-            CEILING,
-            "a Retry-After of {absurd}s was honoured past the ceiling, so one venue answer can \
-             park order placement and cancellation for the rest of the run"
+            quiet.open(*retry_after, now),
+            *expected,
+            "{name}: a Retry-After of {retry_after:?}s did not clamp to {expected:?}, so one \
+             venue answer can park order placement and cancellation for the rest of the run"
         );
     }
-}
-
-/// FITNESS: no header means the venue said nothing about how long, not that the client may retry
-/// at once.
-#[test]
-fn a_headerless_answer_still_waits_the_floor() {
-    let now = Instant::now();
-    let mut quiet = RestQuiet::new();
-    assert_eq!(quiet.open(None, now), FLOOR);
-    assert_eq!(quiet.open(Some(0), now), FLOOR);
-    assert_eq!(quiet.open(Some(1), now), FLOOR);
 }
 
 /// FITNESS: the window is over at its deadline, not one tick after — `is_active` and `remaining`

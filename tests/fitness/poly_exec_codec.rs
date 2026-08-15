@@ -161,55 +161,173 @@ fn stream_order(fixture: &str, wiring: &Wiring) -> ExecEvent {
     }
 }
 
+/// The fill law: which payload may be folded and which may not, pinned per response shape. The
+/// live venue answers a matched taker with DECIMAL-DOLLAR amounts (`"2.549999"`), not the
+/// doc-shaped 6-decimal integer the write surface signs — a taker that reads $2.55 as $0.0000255
+/// spends real money against a phantom quote. A gateway 502/504 with an HTML body no message table
+/// matches may have left the order LIVE, so it must class Ambiguous rather than Fatal: closing the
+/// slot on a wrong Fatal orphans a resting order past every sweep.
 #[test]
-fn a_taker_fill_folds_from_the_place_response_amounts() {
+fn place_responses_decode_to_the_outcome_each_shape_demands() {
     let wiring = Wiring::new();
-    let outcome = answered(
-        decode_place(
-            ok(fixture!("place_matched")),
-            &buy_request(CLIENT_B),
-            &wiring.decode(),
-        )
-        .expect("committed fixture decodes"),
-    );
 
-    assert_eq!(outcome.event.cumulative_qty, SIZE);
-    assert_eq!(outcome.event.cumulative_quote, 520_000_000);
-    assert_eq!(outcome.event.status, Some(VenueOrderStatus::Filled));
-    assert_eq!(outcome.event.kind, ExecKind::AckPlaced);
+    // A taker fill folds from the place response amounts.
+    {
+        let outcome = answered(
+            decode_place(
+                ok(fixture!("place_matched")),
+                &buy_request(CLIENT_B),
+                &wiring.decode(),
+            )
+            .expect("committed fixture decodes"),
+        );
+        assert_eq!(outcome.event.cumulative_qty, SIZE);
+        assert_eq!(outcome.event.cumulative_quote, 520_000_000);
+        assert_eq!(outcome.event.status, Some(VenueOrderStatus::Filled));
+        assert_eq!(outcome.event.kind, ExecKind::AckPlaced);
+        let placed = outcome.placed.expect("a matched placement still has an id");
+        assert_eq!(&*placed.venue_order_id, ORDER_B);
+        assert_eq!(placed.status, PlacementStatus::Matched);
+    }
 
-    let placed = outcome.placed.expect("a matched placement still has an id");
-    assert_eq!(&*placed.venue_order_id, ORDER_B);
-    assert_eq!(placed.status, PlacementStatus::Matched);
+    // A matched taker folds the venue's decimal-dollar amounts, never a scaled integer.
+    {
+        let outcome = answered(
+            decode_place(
+                ok(fixture!("place_matched_live")),
+                &buy_request(CLIENT_B),
+                &wiring.decode(),
+            )
+            .expect("the live decimal-dollar amounts decode"),
+        );
+        assert_eq!(outcome.event.cumulative_qty, Qty(542_553_000));
+        assert_eq!(outcome.event.cumulative_quote, 254_999_900);
+        assert_eq!(outcome.event.status, Some(VenueOrderStatus::Filled));
+        assert_eq!(outcome.event.kind, ExecKind::AckPlaced);
+        assert_eq!(
+            outcome
+                .placed
+                .expect("a matched placement still has an id")
+                .status,
+            PlacementStatus::Matched
+        );
+    }
+
+    // A delayed placement is pending and not a fill.
+    {
+        let outcome = answered(
+            decode_place(
+                ok(fixture!("place_delayed")),
+                &buy_request(CLIENT_B),
+                &wiring.decode(),
+            )
+            .expect("committed fixture decodes"),
+        );
+        assert_eq!(
+            outcome.placed.expect("delayed is accepted").status,
+            PlacementStatus::Delayed
+        );
+        assert_eq!(outcome.event.cumulative_qty, Qty(0));
+        assert_eq!(outcome.event.status, Some(VenueOrderStatus::New));
+        assert_eq!(outcome.event.reject, None);
+    }
+
+    // An unmatched placement is live with empty amounts — the venue leaves these EMPTY rather
+    // than "0"; a strict integer parse would fail the frame.
+    {
+        let outcome = answered(
+            decode_place(
+                ok(fixture!("place_unmatched")),
+                &buy_request(CLIENT_A),
+                &wiring.decode(),
+            )
+            .expect("committed fixture decodes"),
+        );
+        assert_eq!(
+            outcome.placed.expect("unmatched rests").status,
+            PlacementStatus::Unmatched
+        );
+        assert_eq!(outcome.event.cumulative_qty, Qty(0));
+        assert_eq!(outcome.event.cumulative_quote, 0);
+    }
+
+    // HTTP 200 with success:false is a rejection, not an accepted order.
+    {
+        let outcome = answered(
+            decode_place(
+                ok(fixture!("place_failure_balance")),
+                &buy_request(CLIENT_A),
+                &wiring.decode(),
+            )
+            .expect("committed fixture decodes"),
+        );
+        assert_eq!(
+            outcome.placed, None,
+            "a refused placement has no venue id to record"
+        );
+        assert_eq!(outcome.event.kind, ExecKind::AckFailed);
+        assert_eq!(
+            outcome.event.reject,
+            Some(RejectClass::Fatal),
+            "branching on the http status alone reads this body as an accepted order"
+        );
+        assert_eq!(outcome.event.client_id, CLIENT_A);
+    }
+
+    // An unknown gateway 5xx on a place is ambiguous, not fatal — it may have left the order LIVE.
+    {
+        let bad_gateway = HttpAnswer {
+            status: 502,
+            body: "<html><body>502 Bad Gateway</body></html>",
+        };
+        let outcome = answered(
+            decode_place(bad_gateway, &buy_request(CLIENT_A), &wiring.decode())
+                .expect("a non-json 5xx body still decodes to a verdict"),
+        );
+        assert_eq!(outcome.placed, None);
+        assert_eq!(outcome.event.reject, Some(RejectClass::Ambiguous));
+    }
 }
 
-/// The live venue answers a matched taker with DECIMAL-DOLLAR amounts (`"2.549999"`), not the
-/// doc-shaped 6-decimal integer the write surface signs. The doc fixture missed it and the first
-/// real fill bailed the run. This is the recorded response, byte-for-byte; the mantissas are the
-/// exact-decimal parse, never a scaled integer — a taker that reads $2.55 as $0.0000255 spends real
-/// money against a phantom quote.
+/// Two edge cases in `classify_error` outside the documented-error table below: the STATUS-only
+/// fallback for a gateway failure no message table matches, and the one message ("order not
+/// found") whose verdict depends entirely on which request asked.
 #[test]
-fn a_matched_taker_folds_the_venues_decimal_dollar_amounts() {
-    let wiring = Wiring::new();
-    let outcome = answered(
-        decode_place(
-            ok(fixture!("place_matched_live")),
-            &buy_request(CLIENT_B),
-            &wiring.decode(),
-        )
-        .expect("the live decimal-dollar amounts decode"),
+fn gateway_status_fallback_and_cancel_not_found_classify_correctly() {
+    use RejectClass::{Ambiguous, Fatal};
+    for (status, want) in [
+        (502, Ambiguous),
+        (504, Ambiguous),
+        (500, Ambiguous),
+        (418, Fatal),
+        (400, Fatal),
+    ] {
+        assert_eq!(
+            classify_error(
+                VenueFailure::new(status, "<html>gateway</html>"),
+                RejectSubject::Placement
+            ),
+            RejectVerdict::Order(want)
+        );
+    }
+    assert_eq!(
+        classify_error(
+            VenueFailure::new(500, "order timed out"),
+            RejectSubject::Placement
+        ),
+        RejectVerdict::Order(RejectClass::Refused),
     );
 
-    assert_eq!(outcome.event.cumulative_qty, Qty(542_553_000));
-    assert_eq!(outcome.event.cumulative_quote, 254_999_900);
-    assert_eq!(outcome.event.status, Some(VenueOrderStatus::Filled));
-    assert_eq!(outcome.event.kind, ExecKind::AckPlaced);
+    // A cancel that finds no order is Gone only on the cancel path; anywhere else "not found" is
+    // a claim about the request, not about the order.
+    let message = "order not found";
     assert_eq!(
-        outcome
-            .placed
-            .expect("a matched placement still has an id")
-            .status,
-        PlacementStatus::Matched
+        classify_error(VenueFailure::new(400, message), RejectSubject::Cancellation),
+        RejectVerdict::Order(RejectClass::Gone)
+    );
+    assert_eq!(
+        classify_error(VenueFailure::new(400, message), RejectSubject::Read),
+        RejectVerdict::Order(RejectClass::Ambiguous)
     );
 }
 
@@ -237,32 +355,101 @@ fn a_maker_fill_folds_from_the_cumulative_size_matched() {
     );
 }
 
+/// Everything downstream of a trade frame that is NOT the failed↔matched settlement transition
+/// pinned separately below: owner filtering, on-chain evidence, and ownership surviving past the
+/// point the order behind a trade can no longer be named.
 #[test]
-fn our_maker_fill_is_owner_filtered_and_never_read_from_the_taker_order() {
+fn trade_frames_decode_owner_filtering_and_settlement_evidence() {
     let wiring = Wiring::new();
-    let StreamEvent::Trade(made) = stream(fixture!("ws_trade_maker"), &wiring) else {
-        panic!("maker trade fixture is a trade frame");
-    };
-    assert_eq!(made.role, Some(Liquidity::Maker));
-    assert_eq!(made.maker_fills.len(), 1);
-    assert_eq!(made.maker_fills[0].client_id, CLIENT_A);
-    assert_eq!(made.maker_fills[0].matched, SIZE);
-    assert_eq!(
-        made.taker_order, None,
-        "the taker order id on a maker trade belongs to the counterparty"
-    );
 
-    let StreamEvent::Trade(took) = stream(fixture!("ws_trade_taker"), &wiring) else {
-        panic!("taker trade fixture is a trade frame");
-    };
-    assert_eq!(took.role, Some(Liquidity::Taker));
-    assert_eq!(took.taker_order, Some(CLIENT_B));
-    assert!(
-        took.maker_fills.is_empty(),
-        "maker_orders on a taker trade holds the counterparty; owner filtering is what excludes it"
-    );
+    // Our own maker fill is owner-filtered and never read from the taker order.
+    {
+        let StreamEvent::Trade(made) = stream(fixture!("ws_trade_maker"), &wiring) else {
+            panic!("maker trade fixture is a trade frame");
+        };
+        assert_eq!(made.role, Some(Liquidity::Maker));
+        assert_eq!(made.maker_fills.len(), 1);
+        assert_eq!(made.maker_fills[0].client_id, CLIENT_A);
+        assert_eq!(made.maker_fills[0].matched, SIZE);
+        assert_eq!(
+            made.taker_order, None,
+            "the taker order id on a maker trade belongs to the counterparty"
+        );
+
+        let StreamEvent::Trade(took) = stream(fixture!("ws_trade_taker"), &wiring) else {
+            panic!("taker trade fixture is a trade frame");
+        };
+        assert_eq!(took.role, Some(Liquidity::Taker));
+        assert_eq!(took.taker_order, Some(CLIENT_B));
+        assert!(
+            took.maker_fills.is_empty(),
+            "maker_orders on a taker trade holds the counterparty; owner filtering is what \
+             excludes it"
+        );
+    }
+
+    // Only a trade the venue put ON CHAIN is evidence the money moved — a match is an off-chain
+    // promise, and reading it as settled money frees a reservation against collateral the venue
+    // is still holding.
+    {
+        let StreamEvent::Trade(mined) = stream(fixture!("ws_trade_mined"), &wiring) else {
+            panic!("mined trade fixture is a trade frame");
+        };
+        assert_eq!(mined.settlement, TradeSettlement::Mined);
+        assert!(mined.settlement.is_on_chain());
+
+        let StreamEvent::Trade(matched) = stream(fixture!("ws_trade_maker"), &wiring) else {
+            panic!("maker trade fixture is a trade frame");
+        };
+        assert!(
+            !matched.settlement.is_on_chain(),
+            "a match was read as settled money"
+        );
+
+        let StreamEvent::Trade(failed) = stream(fixture!("ws_trade_failed"), &wiring) else {
+            panic!("failed trade fixture is a trade frame");
+        };
+        assert!(
+            !failed.settlement.is_on_chain(),
+            "a settlement that never happened was read as settled money"
+        );
+    }
+
+    // Ownership survives once the order behind a trade can no longer be named — the
+    // venue-stamped credential on each maker leg is all that is left by then.
+    {
+        let forgotten = Wiring {
+            tokens: tokens(),
+            orders: OrderIndex::with_capacity(16),
+        };
+        let StreamEvent::Trade(ours) = stream(fixture!("ws_trade_failed"), &forgotten) else {
+            panic!("failed trade fixture is a trade frame");
+        };
+        assert!(
+            ours.maker_fills.is_empty() && ours.taker_order.is_none(),
+            "the index this pin exists for must name nothing"
+        );
+        assert!(
+            ours.is_ours,
+            "our own failed settlement read as a stranger's"
+        );
+
+        let StreamEvent::Trade(theirs) = stream(fixture!("ws_trade_failed_foreign"), &forgotten)
+        else {
+            panic!("foreign failed trade fixture is a trade frame");
+        };
+        assert!(
+            !theirs.is_ours,
+            "a failure the venue attributes to another credential would halt a healthy run"
+        );
+    }
 }
 
+/// A trade-id dedup applied naively drops this transition: the same `venue_trade_id` walks every
+/// settlement step (MATCHED -> MINED -> CONFIRMED/FAILED), so a trade first seen MATCHED is
+/// already deduped, and a later FAILED update on the same id would vanish — settlement failure
+/// never detected. Kept its own named fn rather than folded into a table: this is the regression a
+/// dedup once swallowed, and it stays legible as the specific case it is.
 #[test]
 fn a_failed_settlement_is_terminal_and_distinguishable() {
     let wiring = Wiring::new();
@@ -277,173 +464,6 @@ fn a_failed_settlement_is_terminal_and_distinguishable() {
     };
     assert_eq!(matched.settlement, TradeSettlement::Matched);
     assert!(!matched.settlement.is_terminal());
-}
-
-/// A match is an off-chain promise; the transfer behind it lands later. Every balance answer before
-/// that point still carries the pre-fill number, so reading a match as evidence money moved frees a
-/// reservation against collateral the venue is still holding.
-#[test]
-fn only_a_trade_the_venue_put_on_chain_is_evidence_the_money_moved() {
-    let wiring = Wiring::new();
-    let StreamEvent::Trade(mined) = stream(fixture!("ws_trade_mined"), &wiring) else {
-        panic!("mined trade fixture is a trade frame");
-    };
-    assert_eq!(mined.settlement, TradeSettlement::Mined);
-    assert!(mined.settlement.is_on_chain());
-
-    let StreamEvent::Trade(matched) = stream(fixture!("ws_trade_maker"), &wiring) else {
-        panic!("maker trade fixture is a trade frame");
-    };
-    assert!(
-        !matched.settlement.is_on_chain(),
-        "a match was read as settled money"
-    );
-
-    let StreamEvent::Trade(failed) = stream(fixture!("ws_trade_failed"), &wiring) else {
-        panic!("failed trade fixture is a trade frame");
-    };
-    assert!(
-        !failed.settlement.is_on_chain(),
-        "a settlement that never happened was read as settled money"
-    );
-}
-
-/// Ownership decides whether a failed settlement stops the run, and it is asked LONG after the
-/// order went terminal — by then the venue id that named it has been forgotten from the index, and
-/// our own fill resolves to exactly as much as a stranger's. Only the credential the venue stamps
-/// on each maker leg survives that, so that is what the answer rests on.
-#[test]
-fn a_trade_stays_ours_once_the_order_behind_it_can_no_longer_be_named() {
-    let forgotten = Wiring {
-        tokens: tokens(),
-        orders: OrderIndex::with_capacity(16),
-    };
-    let StreamEvent::Trade(ours) = stream(fixture!("ws_trade_failed"), &forgotten) else {
-        panic!("failed trade fixture is a trade frame");
-    };
-    assert!(
-        ours.maker_fills.is_empty() && ours.taker_order.is_none(),
-        "the index this pin exists for must name nothing"
-    );
-    assert!(
-        ours.is_ours,
-        "our own failed settlement read as a stranger's"
-    );
-
-    let StreamEvent::Trade(theirs) = stream(fixture!("ws_trade_failed_foreign"), &forgotten) else {
-        panic!("foreign failed trade fixture is a trade frame");
-    };
-    assert!(
-        !theirs.is_ours,
-        "a failure the venue attributes to another credential would halt a healthy run"
-    );
-}
-
-#[test]
-fn a_delayed_placement_is_pending_and_not_a_fill() {
-    let wiring = Wiring::new();
-    let outcome = answered(
-        decode_place(
-            ok(fixture!("place_delayed")),
-            &buy_request(CLIENT_B),
-            &wiring.decode(),
-        )
-        .expect("committed fixture decodes"),
-    );
-    assert_eq!(
-        outcome.placed.expect("delayed is accepted").status,
-        PlacementStatus::Delayed
-    );
-    assert_eq!(outcome.event.cumulative_qty, Qty(0));
-    assert_eq!(outcome.event.status, Some(VenueOrderStatus::New));
-    assert_eq!(outcome.event.reject, None);
-}
-
-#[test]
-fn an_unmatched_placement_is_live_with_empty_amounts() {
-    let wiring = Wiring::new();
-    let outcome = answered(
-        decode_place(
-            ok(fixture!("place_unmatched")),
-            &buy_request(CLIENT_A),
-            &wiring.decode(),
-        )
-        .expect("committed fixture decodes"),
-    );
-    assert_eq!(
-        outcome.placed.expect("unmatched rests").status,
-        PlacementStatus::Unmatched
-    );
-    // The venue leaves these EMPTY rather than "0"; a strict integer parse would fail the frame.
-    assert_eq!(outcome.event.cumulative_qty, Qty(0));
-    assert_eq!(outcome.event.cumulative_quote, 0);
-}
-
-#[test]
-fn http_200_with_success_false_is_a_rejection() {
-    let wiring = Wiring::new();
-    let outcome = answered(
-        decode_place(
-            ok(fixture!("place_failure_balance")),
-            &buy_request(CLIENT_A),
-            &wiring.decode(),
-        )
-        .expect("committed fixture decodes"),
-    );
-    assert_eq!(
-        outcome.placed, None,
-        "a refused placement has no venue id to record"
-    );
-    assert_eq!(outcome.event.kind, ExecKind::AckFailed);
-    assert_eq!(
-        outcome.event.reject,
-        Some(RejectClass::Fatal),
-        "branching on the http status alone reads this body as an accepted order"
-    );
-    assert_eq!(outcome.event.client_id, CLIENT_A);
-}
-
-/// A gateway that fails the RESPONSE to a place — a 502/504 with an HTML body no message table
-/// matches — may have left the order LIVE. Classing it Fatal closes the slot and orphans a resting
-/// order past every sweep; Ambiguous nudges the resync instead. The doc fixtures are all statuses
-/// with JSON error bodies, so this shape had no pin and one gateway hiccup would have halted the run.
-#[test]
-fn an_unknown_gateway_5xx_on_a_place_is_ambiguous_not_fatal() {
-    let wiring = Wiring::new();
-    let bad_gateway = HttpAnswer {
-        status: 502,
-        body: "<html><body>502 Bad Gateway</body></html>",
-    };
-    let outcome = answered(
-        decode_place(bad_gateway, &buy_request(CLIENT_A), &wiring.decode())
-            .expect("a non-json 5xx body still decodes to a verdict"),
-    );
-    assert_eq!(outcome.placed, None);
-    assert_eq!(outcome.event.reject, Some(RejectClass::Ambiguous));
-
-    use RejectClass::{Ambiguous, Fatal};
-    for (status, want) in [
-        (502, Ambiguous),
-        (504, Ambiguous),
-        (500, Ambiguous),
-        (418, Fatal),
-        (400, Fatal),
-    ] {
-        assert_eq!(
-            classify_error(
-                VenueFailure::new(status, "<html>gateway</html>"),
-                RejectSubject::Placement
-            ),
-            RejectVerdict::Order(want)
-        );
-    }
-    assert_eq!(
-        classify_error(
-            VenueFailure::new(500, "order timed out"),
-            RejectSubject::Placement
-        ),
-        RejectVerdict::Order(RejectClass::Refused),
-    );
 }
 
 #[test]
@@ -469,116 +489,136 @@ fn a_partial_cancel_reports_both_halves() {
     assert_eq!(refused.reject, Some(RejectClass::Ambiguous));
 }
 
+/// Page decoding: which orders a page can name, and where the list truly ends. `LTE=` is this
+/// venue's end-of-list marker, so a decoder that reports it as a cursor tells the resync there is
+/// another page and the resync answers by walking forever.
 #[test]
-fn the_open_orders_page_separates_orders_this_run_cannot_name() {
+fn open_orders_and_trades_pages_paginate_and_separate_unmapped_orders() {
     let wiring = Wiring::new();
-    let decoded = answered(
-        decode_orders_page(
-            ok(fixture!("data_orders_wrapped")),
-            OrdersRead {
-                instrument: UP,
-                recon_seq: 7,
-            },
-            &wiring.decode(),
-        )
-        .expect("committed fixture decodes"),
-    );
 
-    // One mapped order plus the end marker; the unmapped one is NOT an event, because classifying
-    // it is a decision only the driver can make.
-    assert_eq!(decoded.events.len(), 2);
-    assert_eq!(decoded.events[0].client_id, CLIENT_A);
-    assert_eq!(decoded.events[0].kind, ExecKind::SnapshotOrder);
-    assert_eq!(decoded.events[0].cumulative_qty, Qty(4 * FIXED_SCALE));
-    assert_eq!(decoded.events[0].recon_seq, 7);
-    assert_eq!(decoded.events[1].kind, ExecKind::SnapshotEnd);
-    assert_eq!(decoded.unmapped.len(), 1);
-    assert_eq!(&*decoded.unmapped[0].venue_order_id, ORDER_FOREIGN);
-    assert_eq!(decoded.unmapped[0].instrument, DOWN);
-    assert_eq!(decoded.unmapped[0].side, Side::Sell);
-    assert_eq!(decoded.next_cursor, None);
-}
+    // One mapped order plus the end marker; the unmapped one is NOT an event, because
+    // classifying it is a decision only the driver can make.
+    {
+        let decoded = answered(
+            decode_orders_page(
+                ok(fixture!("data_orders_wrapped")),
+                OrdersRead {
+                    instrument: UP,
+                    recon_seq: 7,
+                },
+                &wiring.decode(),
+            )
+            .expect("committed fixture decodes"),
+        );
+        assert_eq!(decoded.events.len(), 2);
+        assert_eq!(decoded.events[0].client_id, CLIENT_A);
+        assert_eq!(decoded.events[0].kind, ExecKind::SnapshotOrder);
+        assert_eq!(decoded.events[0].cumulative_qty, Qty(4 * FIXED_SCALE));
+        assert_eq!(decoded.events[0].recon_seq, 7);
+        assert_eq!(decoded.events[1].kind, ExecKind::SnapshotEnd);
+        assert_eq!(decoded.unmapped.len(), 1);
+        assert_eq!(&*decoded.unmapped[0].venue_order_id, ORDER_FOREIGN);
+        assert_eq!(decoded.unmapped[0].instrument, DOWN);
+        assert_eq!(decoded.unmapped[0].side, Side::Sell);
+        assert_eq!(decoded.next_cursor, None);
+    }
 
-// `LTE=` is this venue's end-of-list marker, so a decoder that reports it as a cursor tells the
-// resync there is another page and the resync answers by walking forever. Anything else is a real
-// page the pass has not read yet, and finishing without it claims a completeness it never had.
-#[test]
-fn the_end_of_list_marker_is_not_a_page_to_follow() {
-    let wiring = Wiring::new();
-    let more = r#"{"next_cursor":"MTAw","data":[]}"#;
-    let decoded = answered(
-        decode_orders_page(
-            ok(more),
-            OrdersRead {
-                instrument: UP,
-                recon_seq: 1,
-            },
-            &wiring.decode(),
-        )
-        .expect("a well-formed page decodes"),
-    );
-    assert_eq!(decoded.next_cursor.as_deref(), Some("MTAw"));
-
-    let trades = answered(
-        decode_trades_page(ok(r#"{"next_cursor":"LTE=","data":[]}"#), &wiring.decode())
+    // Anything other than `LTE=` is a real page the pass has not read yet, and finishing without
+    // it claims a completeness it never had.
+    {
+        let more = r#"{"next_cursor":"MTAw","data":[]}"#;
+        let decoded = answered(
+            decode_orders_page(
+                ok(more),
+                OrdersRead {
+                    instrument: UP,
+                    recon_seq: 1,
+                },
+                &wiring.decode(),
+            )
             .expect("a well-formed page decodes"),
-    );
-    assert_eq!(trades.next_cursor, None);
+        );
+        assert_eq!(decoded.next_cursor.as_deref(), Some("MTAw"));
+
+        let trades = answered(
+            decode_trades_page(ok(r#"{"next_cursor":"LTE=","data":[]}"#), &wiring.decode())
+                .expect("a well-formed page decodes"),
+        );
+        assert_eq!(trades.next_cursor, None);
+    }
 }
 
+/// Single-fixture reads through four different decoders — a bare-object order, a two-role trades
+/// page, six-decimal balance rescaling, and the tick read off market metadata.
 #[test]
-fn the_single_order_read_answers_a_bare_object() {
+fn single_fixture_reads_decode_their_documented_shape() {
     let wiring = Wiring::new();
-    let event = answered(
-        decode_single_order(ok(fixture!("data_order_single")), 3, &wiring.decode())
-            .expect("committed fixture decodes"),
-    )
-    .expect("the fixture names an order this run placed");
-    assert_eq!(event.client_id, CLIENT_A);
-    assert_eq!(event.status, Some(VenueOrderStatus::PartiallyFilled));
-    assert_eq!(event.qty, SIZE);
-}
 
-#[test]
-fn the_trades_page_decodes_both_roles() {
-    let wiring = Wiring::new();
-    let page = answered(
-        decode_trades_page(ok(fixture!("data_trades")), &wiring.decode())
-            .expect("committed fixture decodes"),
-    );
-    let trades = page.trades;
-    assert_eq!(trades.len(), 2);
-    assert_eq!(page.next_cursor, None);
-    assert_eq!(trades[0].role, Some(Liquidity::Maker));
-    assert_eq!(trades[1].role, Some(Liquidity::Taker));
-    assert_ne!(trades[0].venue_trade_id, trades[1].venue_trade_id);
-    assert_ne!(trades[0].trade_id, trades[1].trade_id);
-}
-
-#[test]
-fn balances_rescale_from_the_venues_six_decimals() {
-    let wiring = Wiring::new();
-    let quote = AssetId(0);
-    let balance = answered(
-        decode_balance(
-            ok(fixture!("balance_allowance_collateral")),
-            quote,
-            &wiring.decode(),
+    // The single order read answers a bare object.
+    {
+        let event = answered(
+            decode_single_order(ok(fixture!("data_order_single")), 3, &wiring.decode())
+                .expect("committed fixture decodes"),
         )
-        .expect("committed fixture decodes"),
-    );
-    assert_eq!(balance.free, 7_436_809_900);
-    assert_eq!(balance.asset, quote);
+        .expect("the fixture names an order this run placed");
+        assert_eq!(event.client_id, CLIENT_A);
+        assert_eq!(event.status, Some(VenueOrderStatus::PartiallyFilled));
+        assert_eq!(event.qty, SIZE);
+    }
 
-    let shares = answered(
-        decode_balance(
-            ok(fixture!("balance_allowance_conditional")),
-            AssetId(1),
-            &wiring.decode(),
-        )
-        .expect("committed fixture decodes"),
-    );
-    assert_eq!(shares.free, 10 * FIXED_SCALE);
+    // The trades page decodes both roles.
+    {
+        let page = answered(
+            decode_trades_page(ok(fixture!("data_trades")), &wiring.decode())
+                .expect("committed fixture decodes"),
+        );
+        let trades = page.trades;
+        assert_eq!(trades.len(), 2);
+        assert_eq!(page.next_cursor, None);
+        assert_eq!(trades[0].role, Some(Liquidity::Maker));
+        assert_eq!(trades[1].role, Some(Liquidity::Taker));
+        assert_ne!(trades[0].venue_trade_id, trades[1].venue_trade_id);
+        assert_ne!(trades[0].trade_id, trades[1].trade_id);
+    }
+
+    // Balances rescale from the venue's six decimals.
+    {
+        let quote = AssetId(0);
+        let balance = answered(
+            decode_balance(
+                ok(fixture!("balance_allowance_collateral")),
+                quote,
+                &wiring.decode(),
+            )
+            .expect("committed fixture decodes"),
+        );
+        assert_eq!(balance.free, 7_436_809_900);
+        assert_eq!(balance.asset, quote);
+
+        let shares = answered(
+            decode_balance(
+                ok(fixture!("balance_allowance_conditional")),
+                AssetId(1),
+                &wiring.decode(),
+            )
+            .expect("committed fixture decodes"),
+        );
+        assert_eq!(shares.free, 10 * FIXED_SCALE);
+    }
+
+    // Market metadata reads the tick without a float.
+    {
+        let market =
+            decode_clob_market(fixture!("clob_market")).expect("committed fixture decodes");
+        assert_eq!(market.condition_id.as_ref(), CONDITION);
+        assert_eq!(market.tick_size, TICK);
+        assert_eq!(market.min_order_size, Qty(5 * FIXED_SCALE));
+        assert_eq!(market.tokens.len(), 2);
+        assert_eq!(market.tokens[0].token_id.as_ref(), UP_TOKEN);
+        assert_eq!(market.tokens[0].outcome.as_ref(), "Up");
+        assert!(market.is_accepting_orders);
+        assert!(market.has_taker_delay);
+    }
 }
 
 const NONE: SettlementWatermark = SettlementWatermark::NONE;
@@ -590,120 +630,91 @@ fn stamps(settled_through: SettlementWatermark) -> AccountStamps {
     }
 }
 
+/// Chunking and stamping policy for `account_snapshot`: only the last chunk arms readiness, and a
+/// chunk is stamped by settlement, never by our own clock. This venue publishes no account clock
+/// for that stamp to come from — reading ours in makes every chunk look newer than the last, and on
+/// this venue a balance read taken right after a fill still answers the pre-fill number.
 #[test]
-fn only_the_last_chunk_of_a_balance_sweep_arms_readiness() {
-    let balances: Vec<_> = (0..3)
-        .map(|index| polysim::msg::exec::AssetBalance {
-            asset: AssetId(index),
+fn account_snapshot_chunks_arm_readiness_and_stamp_from_settlement() {
+    // Only the last chunk of a balance sweep arms readiness.
+    {
+        let balances: Vec<_> = (0..3)
+            .map(|index| polysim::msg::exec::AssetBalance {
+                asset: AssetId(index),
+                free: 100,
+                locked: 0,
+            })
+            .collect();
+        let chunks = account_snapshot(&balances, AccountChunkKind::Snapshot, stamps(NONE));
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].is_last_chunk);
+        assert_eq!(chunks[0].len, 3);
+        let empty = account_snapshot(&[], AccountChunkKind::Snapshot, stamps(NONE));
+        assert_eq!(empty.len(), 1);
+        assert!(empty[0].is_last_chunk);
+        assert_eq!(empty[0].len, 0);
+    }
+
+    // A balance chunk is stamped by settlement, not by our clock.
+    {
+        let balances = [polysim::msg::exec::AssetBalance {
+            asset: AssetId(1),
             free: 100,
             locked: 0,
-        })
-        .collect();
-    let chunks = account_snapshot(&balances, AccountChunkKind::Snapshot, stamps(NONE));
-    assert_eq!(chunks.len(), 1);
-    assert!(chunks[0].is_last_chunk);
-    assert_eq!(chunks[0].len, 3);
-    let empty = account_snapshot(&[], AccountChunkKind::Snapshot, stamps(NONE));
-    assert_eq!(empty.len(), 1);
-    assert!(empty[0].is_last_chunk);
-    assert_eq!(empty[0].len, 0);
+        }];
+        let chunks = account_snapshot(&balances, AccountChunkKind::Snapshot, stamps(NONE));
+        assert_eq!(
+            chunks[0].venue_update_ts_ms, 0,
+            "a run that has watched nothing settle has no evidence to stamp"
+        );
+
+        let wiring = Wiring::new();
+        let StreamEvent::Trade(mined) = stream(fixture!("ws_trade_mined"), &wiring) else {
+            panic!("mined trade fixture is a trade frame");
+        };
+        let mut settled = NONE;
+        assert!(settled.advance_to(mined.exchange_ts_us), "first settlement");
+        assert!(
+            !settled.advance_to(mined.exchange_ts_us),
+            "the same trade re-sends once per settlement step, and only the first is new evidence"
+        );
+        let chunks = account_snapshot(&balances, AccountChunkKind::Update, stamps(settled));
+        assert_eq!(
+            chunks[0].venue_update_ts_ms,
+            (mined.exchange_ts_us.micros() / 1_000) as u64,
+            "the chunk carries something other than the settled trade's own venue stamp"
+        );
+    }
 }
 
-/// The hot side holds a balance reservation until a chunk stamped later than the reservation lands,
-/// and this venue publishes no account clock for that stamp to come from. Reading our own clock into
-/// it makes every chunk look newer than the last, so the first balance read after a fill frees the
-/// reservation whether or not the money has moved — and on this venue it has not, because a read
-/// taken right after a fill still answers the pre-fill number.
+/// The startup gate's own reads, both of which must FAIL CLOSED. The protocol version shipped
+/// comparing the RAW body to `"2"`, which the live venue's `{"version":2}` never equals — so the
+/// engine refused to arm on the real venue every time. The closed-only flag shipped
+/// `#[serde(default)] bool`, which read an error envelope or `{}` as "may trade" and would have
+/// armed a closed-only account into quoting one side straight into rejection.
 #[test]
-fn a_balance_chunk_is_stamped_by_settlement_not_by_our_clock() {
-    let balances = [polysim::msg::exec::AssetBalance {
-        asset: AssetId(1),
-        free: 100,
-        locked: 0,
-    }];
-    let chunks = account_snapshot(&balances, AccountChunkKind::Snapshot, stamps(NONE));
-    assert_eq!(
-        chunks[0].venue_update_ts_ms, 0,
-        "a run that has watched nothing settle has no evidence to stamp"
-    );
+fn the_startup_gates_read_fail_closed() {
+    // The protocol version is read as a number from both shapes.
+    {
+        let live = decode_protocol_version(fixture!("version"));
+        assert_eq!(live, Some(2));
+        assert_eq!(live, Some(PROTOCOL_VERSION));
+        assert_eq!(decode_protocol_version("2"), Some(PROTOCOL_VERSION));
+    }
 
-    let wiring = Wiring::new();
-    let StreamEvent::Trade(mined) = stream(fixture!("ws_trade_mined"), &wiring) else {
-        panic!("mined trade fixture is a trade frame");
-    };
-    let mut settled = NONE;
-    assert!(settled.advance_to(mined.exchange_ts_us), "first settlement");
-    assert!(
-        !settled.advance_to(mined.exchange_ts_us),
-        "the same trade re-sends once per settlement step, and only the first is new evidence"
-    );
-    let chunks = account_snapshot(&balances, AccountChunkKind::Update, stamps(settled));
-    assert_eq!(
-        chunks[0].venue_update_ts_ms,
-        (mined.exchange_ts_us.micros() / 1_000) as u64,
-        "the chunk carries something other than the settled trade's own venue stamp"
-    );
-}
-
-#[test]
-fn market_metadata_reads_the_tick_without_a_float() {
-    let market = decode_clob_market(fixture!("clob_market")).expect("committed fixture decodes");
-    assert_eq!(market.condition_id.as_ref(), CONDITION);
-    assert_eq!(market.tick_size, TICK);
-    assert_eq!(market.min_order_size, Qty(5 * FIXED_SCALE));
-    assert_eq!(market.tokens.len(), 2);
-    assert_eq!(market.tokens[0].token_id.as_ref(), UP_TOKEN);
-    assert_eq!(market.tokens[0].outcome.as_ref(), "Up");
-    assert!(market.is_accepting_orders);
-    assert!(market.has_taker_delay);
-}
-
-/// The startup gate's own read. It shipped comparing the RAW body to `"2"`, which the live venue's
-/// `{"version":2}` never equals — so the engine refused to arm on the real venue every time.
-#[test]
-fn the_protocol_version_is_read_as_a_number_from_both_shapes() {
-    let live = decode_protocol_version(fixture!("version"));
-    assert_eq!(live, Some(2));
-    assert_eq!(live, Some(PROTOCOL_VERSION));
-    assert_eq!(decode_protocol_version("2"), Some(PROTOCOL_VERSION));
-}
-
-/// A CLOB speaking anything else must not arm this engine: V2 went live with no V1 compatibility,
-/// and a mismatched protocol rejects each order for reasons it never states.
-#[test]
-fn a_protocol_version_the_signatures_are_not_shaped_for_fails_the_gate() {
-    let next_protocol = decode_protocol_version(r#"{"version":3}"#);
-    assert_eq!(next_protocol, Some(3));
-    assert_ne!(next_protocol, Some(PROTOCOL_VERSION));
-    assert_ne!(decode_protocol_version("3"), Some(PROTOCOL_VERSION));
-}
-
-/// A body carrying no version is not a version. Reading one as the required number would arm the
-/// engine against a venue that never said what it speaks.
-#[test]
-fn a_body_carrying_no_version_never_satisfies_the_gate() {
-    let gateway_html = "<html>502 Bad Gateway</html>";
-    assert_eq!(decode_protocol_version(gateway_html), None);
-    assert_eq!(decode_protocol_version(r#"{"error":"not found"}"#), None);
-    assert_eq!(decode_protocol_version(""), None);
-}
-
-/// The startup refusal gate reads this, so it must FAIL CLOSED: a body that does not carry the flag
-/// is not proof the account may open positions. It shipped `#[serde(default)] bool`, which read an
-/// error envelope or `{}` as "may trade" and would have armed a closed-only account into quoting one
-/// side straight into rejection. `None` is what the gate turns into a refusal.
-#[test]
-fn a_body_carrying_no_closed_only_flag_refuses_the_arm() {
-    assert_eq!(decode_closed_only(r#"{"closed_only":true}"#), Some(true));
-    assert_eq!(decode_closed_only(r#"{"closed_only":false}"#), Some(false));
-    // Absent field, error envelope, empty object, non-json — every one is "cannot prove it".
-    assert_eq!(decode_closed_only("{}"), None);
-    assert_eq!(decode_closed_only(r#"{"error":"unauthorized"}"#), None);
-    assert_eq!(
-        decode_closed_only("<html>500 Internal Server Error</html>"),
-        None
-    );
-    assert_eq!(decode_closed_only(""), None);
+    // A body carrying no closed-only flag refuses the arm. Absent field, error envelope, empty
+    // object, non-json — every one is "cannot prove it".
+    {
+        assert_eq!(decode_closed_only(r#"{"closed_only":true}"#), Some(true));
+        assert_eq!(decode_closed_only(r#"{"closed_only":false}"#), Some(false));
+        assert_eq!(decode_closed_only("{}"), None);
+        assert_eq!(decode_closed_only(r#"{"error":"unauthorized"}"#), None);
+        assert_eq!(
+            decode_closed_only("<html>500 Internal Server Error</html>"),
+            None
+        );
+        assert_eq!(decode_closed_only(""), None);
+    }
 }
 
 fn expected_verdicts() -> Vec<(&'static str, RejectVerdict)> {
@@ -793,6 +804,9 @@ fn error_cases() -> Vec<ErrorCase> {
         .collect()
 }
 
+/// Every documented error message classifies as written, and no venue-wide outage (425/429/503)
+/// ever reaches a reject counter that would fire precisely while the engine is offline rather than
+/// wrong.
 #[test]
 fn every_documented_error_classifies_as_written() {
     let cases = error_cases();
@@ -820,23 +834,12 @@ fn every_documented_error_classifies_as_written() {
             got, want,
             "message {name:?} classified {got:?}, expected {want:?}"
         );
-    }
-}
-
-#[test]
-fn venue_outages_never_reach_the_reject_counters() {
-    for case in error_cases() {
-        let verdict = classify_error(
-            VenueFailure {
-                status: case.status,
-                message: &case.message,
-                code: &case.code,
-                retry_after_secs: case.retry_after_secs,
-            },
-            RejectSubject::Placement,
-        );
         let is_outage = matches!(case.status, 425 | 429 | 503);
-        assert_eq!(matches!(verdict, RejectVerdict::Venue(_)), is_outage);
+        assert_eq!(
+            matches!(got, RejectVerdict::Venue(_)),
+            is_outage,
+            "outage classification for {name:?}"
+        );
     }
 }
 
@@ -855,20 +858,6 @@ fn a_full_pause_is_distinguishable_from_a_pause_that_still_takes_cancels() {
     ] {
         assert!(state.allows_cancel());
     }
-}
-
-#[test]
-fn a_cancel_that_finds_no_order_is_gone_only_on_the_cancel_path() {
-    let message = "order not found";
-    assert_eq!(
-        classify_error(VenueFailure::new(400, message), RejectSubject::Cancellation),
-        RejectVerdict::Order(RejectClass::Gone)
-    );
-    // Anywhere else "not found" is a claim about the request, not about the order.
-    assert_eq!(
-        classify_error(VenueFailure::new(400, message), RejectSubject::Read),
-        RejectVerdict::Order(RejectClass::Ambiguous)
-    );
 }
 
 fn sign_vector() -> Value {
@@ -980,12 +969,15 @@ fn the_place_body_is_byte_exact_against_the_sdk_signature() {
     assert!(encoded.query.is_empty());
 }
 
+/// Encoding through the real signer: order-type/postOnly selection, cancel addressability
+/// (mapped vs never-acknowledged), and read/rotation requests scoped by token — plus the token
+/// table's own rebind policy, which every encoded request ultimately depends on.
 #[test]
-fn post_only_and_immediate_choose_different_order_types() {
+fn requests_encode_by_token_and_the_token_table_rebinds_correctly() {
     let vector = sign_vector();
     let signer = vector_signer(&vector);
     let table = tokens();
-    let orders = OrderIndex::with_capacity(4);
+    let orders = index();
     let context = EncodeContext {
         tokens: &table,
         orders: &orders,
@@ -993,179 +985,138 @@ fn post_only_and_immediate_choose_different_order_types() {
         sent_ts_us: NOW,
     };
 
-    let place = |style| {
-        encode_request(
-            ExecRequest::Place {
+    // Post-only and immediate choose different order types.
+    {
+        let place = |style| {
+            encode_request(
+                ExecRequest::Place {
+                    instrument: UP,
+                    client_id: CLIENT_A,
+                    side: Side::Buy,
+                    price: PRICE,
+                    qty: SIZE,
+                    style,
+                },
+                &context,
+            )
+            .expect("both styles encode")
+            .body
+        };
+        let resting = place(OrderStyle::PostOnly);
+        assert!(resting.contains(r#""orderType":"GTC""#));
+        assert!(resting.contains(r#""postOnly":true"#));
+
+        let taking = place(OrderStyle::Immediate);
+        assert!(taking.contains(r#""orderType":"FAK""#));
+        assert!(taking.contains(r#""postOnly":false"#));
+    }
+
+    // An order the venue never acknowledged cannot be addressed.
+    {
+        let known = encode_request(
+            ExecRequest::Cancel {
                 instrument: UP,
                 client_id: CLIENT_A,
-                side: Side::Buy,
-                price: PRICE,
-                qty: SIZE,
-                style,
             },
             &context,
         )
-        .expect("both styles encode")
-        .body
-    };
+        .expect("a mapped order can be cancelled");
+        assert!(known.body.contains(ORDER_A));
+        assert_eq!(known.path, "/order");
 
-    let resting = place(OrderStyle::PostOnly);
-    assert!(resting.contains(r#""orderType":"GTC""#));
-    assert!(resting.contains(r#""postOnly":true"#));
-
-    let taking = place(OrderStyle::Immediate);
-    assert!(taking.contains(r#""orderType":"FAK""#));
-    assert!(taking.contains(r#""postOnly":false"#));
-}
-
-#[test]
-fn an_order_the_venue_never_acknowledged_cannot_be_addressed() {
-    let vector = sign_vector();
-    let signer = vector_signer(&vector);
-    let table = tokens();
-    let orders = index();
-    let context = EncodeContext {
-        tokens: &table,
-        orders: &orders,
-        signer: &signer,
-        sent_ts_us: NOW,
-    };
-
-    let known = encode_request(
-        ExecRequest::Cancel {
-            instrument: UP,
-            client_id: CLIENT_A,
-        },
-        &context,
-    )
-    .expect("a mapped order can be cancelled");
-    assert!(known.body.contains(ORDER_A));
-    assert_eq!(known.path, "/order");
-
-    let unmapped = encode_request(
-        ExecRequest::Cancel {
-            instrument: UP,
-            client_id: ClientOrderId(0xdead_beef),
-        },
-        &context,
-    );
-    assert!(unmapped.is_err());
-}
-
-#[test]
-fn amendment_is_refused_by_name() {
-    let vector = sign_vector();
-    let signer = vector_signer(&vector);
-    let table = tokens();
-    let orders = index();
-    let context = EncodeContext {
-        tokens: &table,
-        orders: &orders,
-        signer: &signer,
-        sent_ts_us: NOW,
-    };
-    assert!(
-        encode_request(
-            ExecRequest::AmendQty {
+        let unmapped = encode_request(
+            ExecRequest::Cancel {
                 instrument: UP,
-                client_id: CLIENT_A,
-                qty: SIZE,
+                client_id: ClientOrderId(0xdead_beef),
             },
             &context,
-        )
-        .is_err()
-    );
+        );
+        assert!(unmapped.is_err());
+    }
+
+    // The open orders read scopes to a token outside the signature.
+    {
+        let encoded = encode_request(ExecRequest::OpenOrders { instrument: UP }, &context)
+            .expect("bound token");
+        assert_eq!(encoded.path, "/data/orders");
+        assert_eq!(encoded.query, format!("asset_id={UP_TOKEN}"));
+        assert!(encoded.body.is_empty());
+    }
+
+    // The rotation sweep cancels by token.
+    {
+        let encoded = cancel_market_orders(UP_TOKEN).expect("body serialises");
+        assert_eq!(encoded.path, "/cancel-market-orders");
+        assert!(encoded.body.contains(UP_TOKEN));
+    }
+
+    // A retired token still routes its late fills home.
+    {
+        let mut table = tokens();
+        let stale_token = UP_TOKEN.to_owned();
+        table.bind(TokenBinding {
+            instrument: UP,
+            token_id: "999888777666555444333222111".into(),
+            tick: TICK,
+            is_neg_risk: false,
+        });
+        assert_eq!(table.instrument(&stale_token), Some(UP));
+        assert_eq!(
+            table
+                .live_binding(UP)
+                .expect("the new binding is live")
+                .token_id
+                .as_ref(),
+            "999888777666555444333222111"
+        );
+    }
 }
 
+/// Frames the driver must hold rather than misroute: one naming a token this run no longer
+/// tracks, and one naming an order whose placement answer has not landed yet.
 #[test]
-fn the_open_orders_read_scopes_to_a_token_outside_the_signature() {
-    let vector = sign_vector();
-    let signer = vector_signer(&vector);
-    let table = tokens();
-    let orders = index();
-    let context = EncodeContext {
-        tokens: &table,
-        orders: &orders,
-        signer: &signer,
-        sent_ts_us: NOW,
-    };
-    let encoded =
-        encode_request(ExecRequest::OpenOrders { instrument: UP }, &context).expect("bound token");
+fn untracked_and_unmapped_stream_frames_are_held_or_dropped_correctly() {
+    // An untracked token is dropped rather than misrouted.
+    {
+        let mut table = TokenTable::with_retired_capacity(2);
+        table.bind(TokenBinding {
+            instrument: DOWN,
+            token_id: DOWN_TOKEN.into(),
+            tick: TICK,
+            is_neg_risk: false,
+        });
+        let orders = index();
+        let context = DecodeContext {
+            tokens: &table,
+            orders: &orders,
+            api_key: API_KEY,
+            received_ts_us: NOW,
+        };
+        let event = decode_stream_frame(fixture!("ws_order_placement"), &context)
+            .expect("committed fixture decodes");
+        assert!(matches!(
+            event,
+            StreamEvent::Ignored(IgnoredReason::UntrackedToken)
+        ));
+    }
 
-    assert_eq!(encoded.path, "/data/orders");
-    assert_eq!(encoded.query, format!("asset_id={UP_TOKEN}"));
-    assert!(encoded.body.is_empty());
-}
-
-#[test]
-fn the_rotation_sweep_cancels_by_token() {
-    let encoded = cancel_market_orders(UP_TOKEN).expect("body serialises");
-    assert_eq!(encoded.path, "/cancel-market-orders");
-    assert!(encoded.body.contains(UP_TOKEN));
-}
-
-#[test]
-fn a_retired_token_still_routes_its_late_fills_home() {
-    let mut table = tokens();
-    let stale_token = UP_TOKEN.to_owned();
-    table.bind(TokenBinding {
-        instrument: UP,
-        token_id: "999888777666555444333222111".into(),
-        tick: TICK,
-        is_neg_risk: false,
-    });
-
-    assert_eq!(table.instrument(&stale_token), Some(UP));
-    assert_eq!(
-        table
-            .live_binding(UP)
-            .expect("the new binding is live")
-            .token_id
-            .as_ref(),
-        "999888777666555444333222111"
-    );
-}
-
-#[test]
-fn an_untracked_token_is_dropped_rather_than_misrouted() {
-    let mut table = TokenTable::with_retired_capacity(2);
-    table.bind(TokenBinding {
-        instrument: DOWN,
-        token_id: DOWN_TOKEN.into(),
-        tick: TICK,
-        is_neg_risk: false,
-    });
-    let orders = index();
-    let context = DecodeContext {
-        tokens: &table,
-        orders: &orders,
-        api_key: API_KEY,
-        received_ts_us: NOW,
-    };
-    let event = decode_stream_frame(fixture!("ws_order_placement"), &context)
-        .expect("committed fixture decodes");
-    assert!(matches!(
-        event,
-        StreamEvent::Ignored(IgnoredReason::UntrackedToken)
-    ));
-}
-
-#[test]
-fn a_stream_event_racing_its_placement_answer_is_held_not_discarded() {
-    let table = tokens();
-    let orders = OrderIndex::with_capacity(4);
-    let context = DecodeContext {
-        tokens: &table,
-        orders: &orders,
-        api_key: API_KEY,
-        received_ts_us: NOW,
-    };
-    let event = decode_stream_frame(fixture!("ws_order_placement"), &context)
-        .expect("committed fixture decodes");
-    assert!(matches!(
-        event,
-        StreamEvent::Ignored(IgnoredReason::UnknownOrder)
-    ));
+    // A stream event racing its placement answer is held, not discarded.
+    {
+        let table = tokens();
+        let orders = OrderIndex::with_capacity(4);
+        let context = DecodeContext {
+            tokens: &table,
+            orders: &orders,
+            api_key: API_KEY,
+            received_ts_us: NOW,
+        };
+        let event = decode_stream_frame(fixture!("ws_order_placement"), &context)
+            .expect("committed fixture decodes");
+        assert!(matches!(
+            event,
+            StreamEvent::Ignored(IgnoredReason::UnknownOrder)
+        ));
+    }
 }
 
 #[test]

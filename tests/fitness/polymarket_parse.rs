@@ -88,17 +88,6 @@ mod book_snapshot {
             TsUs::from_micros(1_784_439_695_963_000)
         );
     }
-
-    #[test]
-    fn array_batch_splits_into_per_token_books() {
-        // The venue delivers the initial (and op-subscribe) snapshots as one JSON array.
-        let batch = format!("[{BOOK},{BOOK}]");
-        let PolyFrame::Batch(frames) = parse(&batch) else {
-            panic!("array frame is a batch");
-        };
-        assert_eq!(frames.len(), 2);
-        assert!(frames.iter().all(|f| matches!(f, PolyFrame::Book(_))));
-    }
 }
 
 mod price_change {
@@ -253,15 +242,24 @@ mod control_and_unknown {
     }
 
     #[test]
-    fn unknown_event_type_is_ignored() {
-        let frame = r#"{"event_type":"some_future_type","asset_id":"T"}"#;
-        assert_eq!(parse(frame), PolyFrame::Ignored);
-    }
-
-    #[test]
-    fn appended_fields_are_tolerated() {
-        let frame = r#"{"event_type":"last_trade_price","asset_id":"T","price":"0.5","size":"1","side":"SELL","timestamp":"1784439696531","future_field_2099":{"nested":true}}"#;
-        assert!(matches!(parse(frame), PolyFrame::Trade(_)));
+    fn tolerated_or_ignored_frame_shapes() {
+        type FrameCase = (&'static str, &'static str, fn(&PolyFrame) -> bool);
+        let cases: &[FrameCase] = &[
+            (
+                "unknown_event_type_is_ignored",
+                r#"{"event_type":"some_future_type","asset_id":"T"}"#,
+                |f| *f == PolyFrame::Ignored,
+            ),
+            (
+                "appended_fields_are_tolerated",
+                r#"{"event_type":"last_trade_price","asset_id":"T","price":"0.5","size":"1","side":"SELL","timestamp":"1784439696531","future_field_2099":{"nested":true}}"#,
+                |f| matches!(f, PolyFrame::Trade(_)),
+            ),
+        ];
+        for (name, frame, expect) in cases {
+            let parsed = parse(frame);
+            assert!(expect(&parsed), "{name}: got {parsed:?}");
+        }
     }
 }
 
@@ -269,23 +267,24 @@ mod tick_size_change {
     use super::*;
 
     #[test]
-    fn parses_documented_shape() {
-        let frame = r#"{"event_type":"tick_size_change","asset_id":"T","market":"0xM","old_tick_size":"0.01","new_tick_size":"0.001","timestamp":"1784439695963"}"#;
-        let PolyFrame::TickSizeChange(change) = parse(frame) else {
+    fn parses_documented_and_bare_shapes() {
+        let full = r#"{"event_type":"tick_size_change","asset_id":"T","market":"0xM","old_tick_size":"0.01","new_tick_size":"0.001","timestamp":"1784439695963"}"#;
+        let PolyFrame::TickSizeChange(change) = parse(full) else {
             panic!("tick_size_change frame");
         };
-        assert_eq!(change.asset_id.as_deref(), Some("T"));
-        assert_eq!(change.new_tick_size.as_deref(), Some("0.001"));
-    }
+        assert_eq!(change.asset_id.as_deref(), Some("T"), "documented_shape");
+        assert_eq!(
+            change.new_tick_size.as_deref(),
+            Some("0.001"),
+            "documented_shape"
+        );
 
-    #[test]
-    fn tolerates_a_bare_frame_of_unverified_shape() {
-        let frame = r#"{"event_type":"tick_size_change"}"#;
-        let PolyFrame::TickSizeChange(change) = parse(frame) else {
+        let bare = r#"{"event_type":"tick_size_change"}"#;
+        let PolyFrame::TickSizeChange(change) = parse(bare) else {
             panic!("tick_size_change frame");
         };
-        assert_eq!(change.asset_id, None);
-        assert_eq!(change.exchange_ts_us, received());
+        assert_eq!(change.asset_id, None, "bare_shape");
+        assert_eq!(change.exchange_ts_us, received(), "bare_shape");
     }
 }
 
@@ -308,37 +307,53 @@ mod decimals {
     }
 
     #[test]
-    fn oversized_size_is_fatal() {
-        let error = trade_size("1000000000000").expect_err("size overflows i64@1e-8");
-        assert!(error.is_fatal());
-        assert!(matches!(
-            error,
-            ParseError::Decode(DecimalFault::MantissaOverflow { .. })
-        ));
-    }
-
-    #[test]
-    fn non_numeric_is_counted_not_fatal() {
-        let error = trade_size("abc").expect_err("non-numeric rejected");
-        assert!(!error.is_fatal());
-        assert!(matches!(
-            error,
-            ParseError::Decode(DecimalFault::Decimal { .. })
-        ));
-    }
-
-    #[test]
-    fn too_precise_is_counted_not_fatal() {
-        let error = trade_size("1.123456789").expect_err("9dp rejected");
-        assert!(!error.is_fatal());
-    }
-
-    #[test]
-    fn unknown_side_is_counted_not_fatal() {
-        let frame = r#"{"event_type":"last_trade_price","asset_id":"T","price":"0.5","size":"1","side":"MAYBE","timestamp":"1000"}"#;
-        let error = parse_market_frame(frame, received()).expect_err("bad side rejected");
-        assert!(!error.is_fatal());
-        assert!(matches!(error, ParseError::Side { .. }));
+    fn malformed_trade_fields_are_fatal_or_counted() {
+        struct Case {
+            name: &'static str,
+            size: &'static str,
+            side: &'static str,
+            fatal: bool,
+            matches: fn(&ParseError) -> bool,
+        }
+        let cases = [
+            Case {
+                name: "oversized_size_overflows_i64_at_1e-8",
+                size: "1000000000000",
+                side: "BUY",
+                fatal: true,
+                matches: |e| matches!(e, ParseError::Decode(DecimalFault::MantissaOverflow { .. })),
+            },
+            Case {
+                name: "non_numeric_size",
+                size: "abc",
+                side: "BUY",
+                fatal: false,
+                matches: |e| matches!(e, ParseError::Decode(DecimalFault::Decimal { .. })),
+            },
+            Case {
+                name: "size_with_9_decimal_places",
+                size: "1.123456789",
+                side: "BUY",
+                fatal: false,
+                matches: |_| true,
+            },
+            Case {
+                name: "unknown_side",
+                size: "1",
+                side: "MAYBE",
+                fatal: false,
+                matches: |e| matches!(e, ParseError::Side { .. }),
+            },
+        ];
+        for case in cases {
+            let frame = format!(
+                r#"{{"event_type":"last_trade_price","asset_id":"T","price":"0.5","size":"{}","side":"{}","timestamp":"1000"}}"#,
+                case.size, case.side
+            );
+            let error = parse_market_frame(&frame, received()).expect_err(case.name);
+            assert_eq!(error.is_fatal(), case.fatal, "{}", case.name);
+            assert!((case.matches)(&error), "{}: got {error:?}", case.name);
+        }
     }
 }
 

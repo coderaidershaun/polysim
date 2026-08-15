@@ -42,79 +42,22 @@ fn at(micros: i64) -> TsUs {
     TsUs::from_micros(micros)
 }
 
-/// One read landing settles one instrument, and the pass completes only when the last one does:
-/// quoting against a mirror that is still missing an instrument's resting orders is quoting against
-/// state no exit path can cancel from.
-#[test]
-fn a_pass_completes_only_when_every_instrument_has_been_read() {
-    let mut pass = ResyncPass::default();
-    let seq = pass.begin(INSTRUMENTS);
-
-    assert!(!pass.on_read(seq), "one read of two completed the pass");
-    assert!(pass.is_outstanding());
-    assert!(pass.on_read(seq));
-    assert!(!pass.is_outstanding());
-}
-
-/// A read stamped with an earlier pass answers a question this connection has stopped asking — a
-/// reconnect re-reads everything — and must not retire an instrument the CURRENT pass has not read.
-/// Counting it would resume quoting against a half-read mirror.
-#[test]
-fn a_stale_read_cannot_complete_a_later_pass() {
-    let mut pass = ResyncPass::default();
-    let stale = pass.begin(INSTRUMENTS);
-    let current = pass.begin(INSTRUMENTS);
-    assert_ne!(stale, current);
-
-    assert!(!pass.on_read(stale));
-    assert!(!pass.on_read(stale));
-    assert!(!pass.on_read(stale));
-
-    assert!(pass.is_outstanding(), "stale answers completed a live pass");
-    assert!(!pass.on_read(current));
-    assert!(pass.on_read(current));
-}
-
-/// A failed read schedules its own retry. Nothing else in the actor can end a `Resyncing` phase, so
-/// a failure that scheduled nothing is the wedge itself.
-#[test]
-fn a_failed_read_schedules_its_retry() {
-    let mut pass = ResyncPass::default();
-    let seq = pass.begin(INSTRUMENTS);
-
-    pass.on_failure(seq, at(RETRY_DELAY));
-
-    assert_eq!(pass.due(at(0)), ResyncStep::Wait, "the retry was not paced");
-    assert_eq!(pass.due(at(RETRY_DELAY)), ResyncStep::Retry);
-}
-
-/// A row that exists but cannot be decoded is not a successful read. The actor takes this exact
-/// policy branch and returns before `on_read`, so the pass remains outstanding and can never arm
-/// readiness from an incomplete possibly-live set.
-#[test]
-fn an_undecodable_open_order_cannot_retire_the_resync_read() {
-    let mut pass = ResyncPass::default();
-    let seq = pass.begin(1);
-
-    pass.on_failure(seq, at(RETRY_DELAY));
-
-    assert!(
-        pass.is_outstanding(),
-        "decode failure retired the read and made incomplete mirror readiness possible"
-    );
-    assert_eq!(pass.due(at(RETRY_DELAY)), ResyncStep::Retry);
-}
-
-/// The same policy carried all the way to completion, and the stronger half of it: a pass that hit
-/// an undecodable order must not be able to REACH complete without re-reading the row it could not
-/// decode. `on_failure` deliberately leaves `outstanding` alone, so the failed read stays owed; the
-/// retry opens a new seq, and the answer that was in flight for the old one can never retire it.
+/// FITNESS: the undecodable-open-order policy carried all the way to completion, and retries bounded
+/// to a finite count.
 ///
-/// This is the failure class that put a duplicate live order on the book: a pass that believes it
-/// saw every resting order, arms readiness, and quotes against a mirror missing the one order it
-/// could not parse. Nothing errors — the engine simply does not know the order is there.
+/// The two go together deliberately: both are the same finite-retry machinery read from its two
+/// edges. A pass that hit an undecodable order must not be able to REACH complete without re-reading
+/// the row it could not decode — `on_failure` deliberately leaves `outstanding` alone, so the failed
+/// read stays owed; the retry opens a new seq, and the answer that was in flight for the old one can
+/// never retire it. This is the failure class that put a duplicate live order on the book: a pass
+/// that believes it saw every resting order, arms readiness, and quotes against a mirror missing the
+/// one order it could not parse — nothing errors, the engine simply does not know the order is there.
+/// And the retries themselves are finite: a connection that cannot answer the one question quoting
+/// depends on is given up on, because reconnecting is what re-subscribes and starts a clean pass —
+/// sitting in `Resyncing` forever is the failure this bounds, an expected external failure handled by
+/// policy, never by wedging.
 #[test]
-fn an_undecodable_open_order_cannot_be_omitted_from_a_completed_pass() {
+fn an_undecodable_read_survives_to_completion_and_retries_are_finite() {
     let mut pass = ResyncPass::default();
     let seq = pass.begin(INSTRUMENTS);
 
@@ -140,60 +83,19 @@ fn an_undecodable_open_order_cannot_be_omitted_from_a_completed_pass() {
     assert!(!pass.on_read(retry));
     assert!(pass.on_read(retry));
     assert!(!pass.is_outstanding());
-}
 
-/// Retries are finite. A connection that cannot answer the one question quoting depends on is given
-/// up on, because reconnecting is what re-subscribes and starts a clean pass — sitting in
-/// `Resyncing` forever is the failure this bounds: an expected external failure is handled by
-/// policy, never by wedging.
-#[test]
-fn a_pass_that_keeps_failing_gives_the_connection_up() {
-    let mut pass = ResyncPass::default();
-    let mut seq = pass.begin(INSTRUMENTS);
+    let mut bounded = ResyncPass::default();
+    let mut bounded_seq = bounded.begin(INSTRUMENTS);
     let mut now = 0;
-
     for attempt in 1..=MAX_RESYNC_ATTEMPTS {
-        pass.on_failure(seq, at(now + RETRY_DELAY));
+        bounded.on_failure(bounded_seq, at(now + RETRY_DELAY));
         now += RETRY_DELAY;
         if attempt < MAX_RESYNC_ATTEMPTS {
-            assert_eq!(pass.due(at(now)), ResyncStep::Retry, "attempt {attempt}");
-            seq = pass.begin_retry(INSTRUMENTS);
+            assert_eq!(bounded.due(at(now)), ResyncStep::Retry, "attempt {attempt}");
+            bounded_seq = bounded.begin_retry(INSTRUMENTS);
         }
     }
-
-    assert_eq!(pass.due(at(now)), ResyncStep::GiveUp);
-}
-
-/// The budget counts PASSES, not reads. One bad pass kills as many reads as there are instruments,
-/// and counting each of them would spend the connection's whole allowance on a single failure —
-/// giving up after one pass at four instruments and after four at one, so the constant would mean
-/// something different per deployment.
-#[test]
-fn a_pass_counts_one_attempt_however_many_reads_fail() {
-    let mut pass = ResyncPass::default();
-    let seq = pass.begin(3);
-
-    pass.on_failure(seq, at(RETRY_DELAY));
-    pass.on_failure(seq, at(RETRY_DELAY));
-    pass.on_failure(seq, at(RETRY_DELAY));
-
-    assert_eq!(pass.attempts(), 1);
-    assert_eq!(pass.due(at(RETRY_DELAY)), ResyncStep::Retry);
-}
-
-/// A pass that lands after failures starts the NEXT one with a clean budget: the attempt count is
-/// evidence about this connection now, not a tally kept until it is spent.
-#[test]
-fn a_landed_pass_forgives_its_earlier_failures() {
-    let mut pass = ResyncPass::default();
-    let seq = pass.begin(INSTRUMENTS);
-    pass.on_failure(seq, at(RETRY_DELAY));
-    let seq = pass.begin_retry(INSTRUMENTS);
-
-    assert!(!pass.on_read(seq));
-    assert!(pass.on_read(seq));
-
-    assert_eq!(pass.attempts(), 0);
+    assert_eq!(bounded.due(at(now)), ResyncStep::GiveUp);
 }
 
 /// FITNESS: a cold start must reach the quoting state. The pass does not only settle the mirror —

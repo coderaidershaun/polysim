@@ -674,7 +674,7 @@ impl FillPen {
     ///
     /// Re-dispatching a batch is a REDELIVERY, not a second fill: the totals it carries are the ones
     /// it carried the first time, so the engine's cumulative fold ignores it. That is the property
-    /// `a_redelivered_fill_moves_the_money_exactly_once` drives.
+    /// `a_fill_folds_before_its_callback_and_a_redelivery_moves_the_money_once` drives.
     pub fn fill(&mut self, side: Side, price: i64, qty: i64, when: i64) -> Vec<InboundMessage> {
         let mut messages = Vec::new();
         if let Some(adoption) = self.adopt(side, price, when) {

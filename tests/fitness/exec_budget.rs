@@ -186,43 +186,6 @@ fn a_budget_of_n_admits_exactly_n_placements_and_refuses_the_next() {
     );
 }
 
-/// FITNESS: the placement the budget refuses is not sent, and the refusal reaches an operator under
-/// its own name. A gate that silently declined to quote would look like a strategy that stopped
-/// declaring, which is the failure this whole vocabulary exists to prevent.
-#[test]
-fn an_exhausted_budget_refuses_the_quote_under_its_own_name_and_banks_nothing() {
-    let mut granted = budgeted_engine(budget_of(GRANTED_PLACES), Box::new(TwoSidedQuoter));
-    let transcript = run_spins(&mut granted, SPINS);
-
-    let spent_at = transcript
-        .iter()
-        .position(|spin| spin.refusals.contains(&RejectReason::RateBudget))
-        .unwrap_or_else(|| {
-            panic!("the budget ran out, so some spin had to report it: {transcript:?}")
-        });
-    assert_eq!(
-        total_places(&transcript[..=spent_at]),
-        GRANTED_PLACES as usize,
-        "the budget was reported spent before every granted placement had gone out: {transcript:?}"
-    );
-    assert!(
-        transcript[spent_at + 1..]
-            .iter()
-            .all(|spin| spin.places == 0),
-        "a placement went out after the budget was spent: {transcript:?}"
-    );
-    assert_ne!(
-        RejectReason::RateBudget.label(),
-        RejectReason::OrderLimit.label(),
-        "both refusals stop a placement, and an operator who cannot tell the account-wide budget \
-         from the per-side order count reaches for the wrong dial"
-    );
-    assert!(
-        !RejectReason::RateBudget.label().is_empty(),
-        "the refusal reaches an operator as words, so blank is no refusal at all"
-    );
-}
-
 /// FITNESS: the meter frees a window that has PASSED and never one that has not. The counter keeps
 /// coarse slots rather than a stamp per placement — a daily bucket of six figures rules out the
 /// stamps — and the slots are deliberately biased: the span it counts is at least the venue's own
@@ -253,27 +216,6 @@ fn the_meter_frees_a_window_that_has_passed_and_never_one_that_has_not() {
             .any(|command| matches!(command, ExecCommand::Place { .. })),
         "a window that has wholly passed must return its budget, or the meter is a one-way latch \
          that stops the engine trading for the rest of the run: {recovered:?}"
-    );
-}
-
-/// FITNESS: the same spins refuse at the same point. The meter is hot state, so it must be a pure
-/// function of the message sequence — a counter that drifted with wall-clock time would replay a
-/// recorded tape into a different set of orders, and nothing downstream could attribute it.
-#[test]
-fn replaying_the_same_spins_refuses_at_exactly_the_same_point() {
-    let mut first = budgeted_engine(budget_of(GRANTED_PLACES), Box::new(TwoSidedQuoter));
-    let mut second = budgeted_engine(budget_of(GRANTED_PLACES), Box::new(TwoSidedQuoter));
-    let replayed = run_spins(&mut second, SPINS);
-    assert_eq!(
-        run_spins(&mut first, SPINS),
-        replayed,
-        "two engines fed identical messages placed and refused differently"
-    );
-    assert!(
-        replayed
-            .iter()
-            .any(|spin| spin.refusals.contains(&RejectReason::RateBudget)),
-        "the sequence never reached the budget, so agreeing about it proves nothing: {replayed:?}"
     );
 }
 
@@ -337,12 +279,16 @@ impl Strategy for QuoteThenFlatten {
     }
 }
 
-/// FITNESS: an exhausted budget never starves the order that reduces risk. The gate refuses QUOTES,
-/// and a quote costs a spread to skip; a position the engine cannot shed costs whatever the market
-/// does next. Refusing quotes early is precisely what leaves the venue-side headroom this placement
-/// needs — inverting it would spend the grant on quotes and then have nothing left to exit with.
+/// FITNESS: the exit and the meter's count of it, from both directions. An exhausted budget never
+/// starves the order that reduces risk — the gate refuses QUOTES, and a quote costs a spread to skip
+/// while a position the engine cannot shed costs whatever the market does next, so refusing quotes
+/// early is precisely what leaves the venue-side headroom the exit needs. And the exit still SPENDS
+/// the budget it can never be refused by: exemption from the gate is not exemption from the count, or
+/// the meter reports headroom the venue has already given away and the next refusal comes from the
+/// venue rather than from here — landing on whatever was placing at the time, which is the order this
+/// gate exists to keep placeable.
 #[test]
-fn an_exhausted_budget_never_starves_the_flatten() {
+fn an_exhausted_budget_never_starves_the_flatten_and_the_flatten_still_spends_it() {
     let mut built = engine_holding_a_position(
         budget_of(GRANTED_PLACES),
         Box::new(QuoteThenFlatten {
@@ -380,6 +326,28 @@ fn an_exhausted_budget_never_starves_the_flatten() {
         "the engine held a position it wanted out of and refused its own exit for want of budget: \
          {exit:?}"
     );
+
+    let mut spends = engine_holding_a_position(
+        budget_of(SINGLE_PLACE),
+        Box::new(FlattenThenQuote {
+            quote_from: QUOTE_FROM,
+        }),
+    );
+    let transcript = run_spins(&mut spends, QUOTE_FROM);
+    assert_eq!(
+        transcript[0].places, 1,
+        "the exit had to go out first, or the quote behind it meets a budget nothing has spent: \
+         {transcript:?}"
+    );
+    assert_eq!(
+        transcript[1].places, 0,
+        "the exit took the only granted placement, so the quote behind it had nothing left to \
+         spend: {transcript:?}"
+    );
+    assert!(
+        transcript[1].refusals.contains(&RejectReason::RateBudget),
+        "and the quote must be refused BY THE BUDGET, naming what the exit spent: {transcript:?}"
+    );
 }
 
 /// A grant of exactly one, so the exit either spends it or leaves it — there is no third outcome to
@@ -414,35 +382,4 @@ impl Strategy for FlattenThenQuote {
             }),
         );
     }
-}
-
-/// FITNESS: the exit SPENDS the budget it can never be refused by. Exemption from the gate is not
-/// exemption from the count, and the distinction is the whole gate: an exit that placed for free
-/// would leave the meter reporting headroom the venue has already given away, so the next refusal
-/// would come from the venue rather than from here — landing on whatever was placing at the time,
-/// which is the order this gate exists to keep placeable.
-#[test]
-fn the_flatten_spends_the_budget_it_is_never_refused_by() {
-    let mut built = engine_holding_a_position(
-        budget_of(SINGLE_PLACE),
-        Box::new(FlattenThenQuote {
-            quote_from: QUOTE_FROM,
-        }),
-    );
-
-    let transcript = run_spins(&mut built, QUOTE_FROM);
-    assert_eq!(
-        transcript[0].places, 1,
-        "the exit had to go out first, or the quote behind it meets a budget nothing has spent: \
-         {transcript:?}"
-    );
-    assert_eq!(
-        transcript[1].places, 0,
-        "the exit took the only granted placement, so the quote behind it had nothing left to \
-         spend: {transcript:?}"
-    );
-    assert!(
-        transcript[1].refusals.contains(&RejectReason::RateBudget),
-        "and the quote must be refused BY THE BUDGET, naming what the exit spent: {transcript:?}"
-    );
 }

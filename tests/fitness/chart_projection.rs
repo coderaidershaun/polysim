@@ -39,7 +39,7 @@ fn chart_with_ticks(ticks: &[Option<Price>]) -> ChartModel {
     chart
 }
 
-fn chart(instruments: usize) -> ChartModel {
+fn chart_model(instruments: usize) -> ChartModel {
     chart_with_ticks(&vec![Some(TICK); instruments])
 }
 
@@ -119,40 +119,6 @@ fn buckets(chart: &ChartModel, instrument: u16) -> Vec<ChartBucket> {
     chart.buckets(InstrumentId(instrument)).copied().collect()
 }
 
-/// FITNESS: the instant a bucket opened folds back into that same bucket. The crosshair's time label
-/// is the inverse of the model's bucketing, and the two are separate functions, so nothing but this
-/// keeps them describing one axis — an anchor or offset added to the bucketing alone would leave the
-/// hairline naming the wrong instant, silently and over live data, in the one artifact nobody can
-/// check by eye. Driven through `apply_book` rather than against the bucketing directly, so what is
-/// pinned is the path the painter actually runs.
-#[test]
-fn a_bucket_open_time_folds_back_into_its_own_bucket() {
-    // Zero, the first few, a window edge, and epoch scale — ~1.75e9 at the shipped one-second spin.
-    for index in [0u64, 1, 7, CAPACITY - 1, 1_000_000, 1_750_000_000] {
-        let at = bucket_open_ts(index, SPIN).expect("the shipped cadence has an instant");
-        let mut chart = chart(1);
-        let mut snapshot = valid_book(0, 0, 100, 102);
-        snapshot.event_ts_us = at;
-        chart.apply_book(&snapshot, BookContinuity::Continuous);
-        assert_eq!(
-            indices(&chart, 0),
-            vec![index],
-            "bucket {index} opened at {}us and the model bucketed that instant elsewhere",
-            at.micros()
-        );
-    }
-    assert_eq!(
-        bucket_open_ts(1, DurationUs::ZERO),
-        None,
-        "a cadence the model never took has no instant to report rather than a fabricated one"
-    );
-    assert_eq!(
-        bucket_open_ts(u64::MAX, SPIN),
-        None,
-        "and an index whose instant leaves i64 reports none rather than wrapping"
-    );
-}
-
 fn fills(chart: &ChartModel, instrument: u16) -> Vec<ChartFill> {
     chart.fills(InstrumentId(instrument)).copied().collect()
 }
@@ -173,13 +139,41 @@ fn run_starts(chart: &ChartModel, instrument: u16) -> Vec<bool> {
         .collect()
 }
 
+/// FITNESS: the instant a bucket opened folds back into that same bucket, four same-spin commits fold
+/// into one open/high/low/close, and the next spin opens a fresh bucket flat on its first mid. Late
+/// event time for an already-settled bucket is dropped rather than folded backwards. The crosshair's
+/// time label is the inverse of the model's bucketing, and the two are separate functions, so nothing
+/// but the first case here keeps them describing one axis.
 #[test]
-fn commits_inside_one_spin_fold_into_one_open_high_low_close() {
-    let mut chart = chart(1);
+fn bucket_folding_and_boundary_invariants() {
+    for index in [0u64, 1, 7, CAPACITY - 1, 1_000_000, 1_750_000_000] {
+        let at = bucket_open_ts(index, SPIN).expect("the shipped cadence has an instant");
+        let mut chart = chart_model(1);
+        let mut snapshot = valid_book(0, 0, 100, 102);
+        snapshot.event_ts_us = at;
+        chart.apply_book(&snapshot, BookContinuity::Continuous);
+        assert_eq!(
+            indices(&chart, 0),
+            vec![index],
+            "bucket {index} opened at {}us and the model bucketed that instant elsewhere",
+            at.micros()
+        );
+    }
+    assert_eq!(
+        bucket_open_ts(1, DurationUs::ZERO),
+        None,
+        "a cadence the model never took has no instant to report rather than a fabricated one"
+    );
+    assert_eq!(
+        bucket_open_ts(u64::MAX, SPIN),
+        None,
+        "and an index whose instant leaves i64 reports none rather than wrapping"
+    );
+
+    let mut chart = chart_model(1);
     for (bid, ask) in [(100, 102), (105, 107), (95, 97), (101, 103)] {
         commit(&mut chart, 0, 1, bid, ask);
     }
-
     assert_eq!(
         buckets(&chart, 0),
         vec![ChartBucket {
@@ -192,12 +186,7 @@ fn commits_inside_one_spin_fold_into_one_open_high_low_close() {
         }],
         "four commits in one spin are one bucket: first mid opens, extremes bound it, last closes"
     );
-}
 
-#[test]
-fn the_next_spin_pushes_a_new_bucket() {
-    let mut chart = chart(1);
-    commit(&mut chart, 0, 1, 100, 102);
     // Still inside spin 1: 1_999_999 µs floors to bucket 1, not 2.
     chart.apply_book(
         &UiBookSnapshot {
@@ -207,7 +196,6 @@ fn the_next_spin_pushes_a_new_bucket() {
         BookContinuity::Continuous,
     );
     commit(&mut chart, 0, 2, 110, 112);
-
     let banked = buckets(&chart, 0);
     assert_eq!(indices(&chart, 0), vec![1, 2]);
     assert_eq!(
@@ -225,45 +213,138 @@ fn the_next_spin_pushes_a_new_bucket() {
         (222, 222, 222, 222),
         "a fresh bucket opens flat on its first mid"
     );
-}
 
-#[test]
-fn out_of_order_event_time_never_rewrites_a_settled_bucket() {
-    let mut chart = chart(1);
-    commit(&mut chart, 0, 2, 100, 102);
-    commit(&mut chart, 0, 3, 149, 151);
-    let settled = buckets(&chart, 0);
-
+    let mut late_chart = chart_model(1);
+    commit(&mut late_chart, 0, 2, 100, 102);
+    commit(&mut late_chart, 0, 3, 149, 151);
+    let settled = buckets(&late_chart, 0);
     // A snapshot stamped back inside bucket 2, with an extreme mid that would be visible if folded.
-    commit(&mut chart, 0, 2, 500, 500);
-
+    commit(&mut late_chart, 0, 2, 500, 500);
     assert_eq!(
-        buckets(&chart, 0),
+        buckets(&late_chart, 0),
         settled,
         "a late snapshot for a settled bucket is dropped, never folded backwards"
     );
 }
 
+struct DiscontinuityCase {
+    name: &'static str,
+    setup: fn(&mut ChartModel),
+    expect_indices: Vec<u64>,
+    expect_gap_flags: Vec<bool>,
+    expect_run_starts: Vec<bool>,
+}
+
+fn missing_spin_case(chart: &mut ChartModel) {
+    commit(chart, 0, 1, 100, 102);
+    commit(chart, 0, 2, 101, 103);
+    // Spin 3 commits, but the book is awaiting its snapshot: nothing is banked for it.
+    chart.apply_book(
+        &book(0, 3, UiBookState::AwaitingSnapshot, &[], &[]),
+        BookContinuity::Continuous,
+    );
+    commit(chart, 0, 4, 105, 107);
+}
+
+fn lost_snapshot_run_case(chart: &mut ChartModel) {
+    commit(chart, 0, 1, 100, 102);
+    commit(chart, 0, 2, 101, 103);
+    // The lane dropped snapshots, revealed on a one-sided commit that banks nothing itself.
+    chart.apply_book(
+        &book(0, 3, UiBookState::Valid, &[100], &[]),
+        BookContinuity::GapBefore,
+    );
+    commit(chart, 0, 3, 104, 106);
+}
+
+fn loss_inside_open_bucket_case(chart: &mut ChartModel) {
+    commit(chart, 0, 1, 100, 102);
+    commit(chart, 0, 2, 101, 103);
+    // The ordinary case: the book commits many times per spin, so the commit that reveals the loss
+    // folds into the already-open bucket instead of pushing a new one.
+    chart.apply_book(&valid_book(0, 2, 104, 106), BookContinuity::GapBefore);
+    commit(chart, 0, 3, 105, 107);
+}
+
+/// FITNESS: a missing spin, a lost-snapshot run revealed on the next bucket, and a loss revealed
+/// inside the still-open bucket all split the painted line at the boundary of what was actually lost —
+/// never before it, never after it.
 #[test]
-fn a_bucket_past_the_window_is_still_retained_but_leaves_the_domain() {
-    let mut chart = chart(1);
+fn line_breaks_across_discontinuities() {
+    let cases = [
+        DiscontinuityCase {
+            name: "a spin without a trustworthy mid stays a hole",
+            setup: missing_spin_case,
+            expect_indices: vec![1, 2, 4],
+            expect_gap_flags: vec![false, false, false],
+            expect_run_starts: vec![true, false, true],
+        },
+        DiscontinuityCase {
+            name: "a lost snapshot run splits the line at the next bucket",
+            setup: lost_snapshot_run_case,
+            expect_indices: vec![1, 2, 3],
+            expect_gap_flags: vec![false, false, true],
+            expect_run_starts: vec![true, false, true],
+        },
+        DiscontinuityCase {
+            name: "a loss inside the open bucket splits the line before that bucket",
+            setup: loss_inside_open_bucket_case,
+            expect_indices: vec![1, 2, 3],
+            expect_gap_flags: vec![false, true, false],
+            expect_run_starts: vec![true, true, false],
+        },
+    ];
+    for case in cases {
+        let mut chart = chart_model(1);
+        (case.setup)(&mut chart);
+        assert_eq!(
+            indices(&chart, 0),
+            case.expect_indices,
+            "{}: bucket indices",
+            case.name
+        );
+        let gap_flags: Vec<bool> = buckets(&chart, 0)
+            .iter()
+            .map(|b| b.has_gap_before)
+            .collect();
+        assert_eq!(
+            gap_flags, case.expect_gap_flags,
+            "{}: has_gap_before flags",
+            case.name
+        );
+        assert_eq!(
+            run_starts(&chart, 0),
+            case.expect_run_starts,
+            "{}: run_starts",
+            case.name
+        );
+    }
+}
+
+/// Buckets retained past the visible window stay in the series (eviction is by capacity, visibility by
+/// the five-minute domain); a rotation clears only its own instrument; only a valid two-sided,
+/// on-grid book banks a mid, and an instrument with no tick grid at all charts nothing; the domain
+/// grows left → right while filling then slides once full; and the whole projection is replay
+/// deterministic.
+#[test]
+fn domain_retention_rotation_grid_and_replay_determinism() {
+    let mut chart = chart_model(1);
     commit(&mut chart, 0, 0, 100, 102);
     commit(&mut chart, 0, 5_000, 110, 112);
-
     assert_eq!(
         indices(&chart, 0),
         vec![0, 5_000],
         "two buckets is far under capacity, so nothing was evicted"
     );
-    let domain = domain(&chart, InstrumentId(0)).expect("a series to project");
+    let domain_far = domain(&chart, InstrumentId(0)).expect("a series to project");
     assert_eq!(
-        domain,
+        domain_far,
         ChartDomain {
             first: 5_000 - CAPACITY + 1,
             last: 5_000
         }
     );
-    let visible: Vec<u64> = segment_points(&chart, InstrumentId(0), domain)
+    let visible: Vec<u64> = segment_points(&chart, InstrumentId(0), domain_far)
         .map(|point| point.bucket.index)
         .collect();
     assert_eq!(
@@ -272,119 +353,43 @@ fn a_bucket_past_the_window_is_still_retained_but_leaves_the_domain() {
         "eviction is by capacity, visibility by the five-minute window — the old bucket falls out of \
          the second, not the first"
     );
-}
 
-#[test]
-fn a_spin_without_a_trustworthy_mid_stays_a_hole() {
-    let mut chart = chart(1);
-    commit(&mut chart, 0, 1, 100, 102);
-    commit(&mut chart, 0, 2, 101, 103);
-    // Spin 3 commits, but the book is awaiting its snapshot: nothing is banked for it.
-    chart.apply_book(
-        &book(0, 3, UiBookState::AwaitingSnapshot, &[], &[]),
-        BookContinuity::Continuous,
-    );
-    commit(&mut chart, 0, 4, 105, 107);
-
-    assert_eq!(
-        indices(&chart, 0),
-        vec![1, 2, 4],
-        "the missing spin is absent, never interpolated or carried forward"
-    );
-    assert_eq!(
-        run_starts(&chart, 0),
-        vec![true, false, true],
-        "the line breaks across the hole"
-    );
-}
-
-#[test]
-fn a_lost_snapshot_run_splits_the_line_at_the_next_bucket() {
-    let mut chart = chart(1);
-    commit(&mut chart, 0, 1, 100, 102);
-    commit(&mut chart, 0, 2, 101, 103);
-    // The lane dropped snapshots, revealed on a one-sided commit that banks nothing itself.
-    chart.apply_book(
-        &book(0, 3, UiBookState::Valid, &[100], &[]),
-        BookContinuity::GapBefore,
-    );
-    commit(&mut chart, 0, 3, 104, 106);
-
-    let banked = buckets(&chart, 0);
-    assert!(!banked[1].has_gap_before);
+    let mut rotation_chart = chart_model(2);
+    commit(&mut rotation_chart, 0, 1, 100, 102);
+    commit(&mut rotation_chart, 1, 1, 300, 302);
+    rotation_chart.apply_event(&fill_event(0, 1, Side::Buy, 101));
+    rotation_chart.apply_event(&fill_event(1, 1, Side::Buy, 301));
+    rotation_chart.apply_event(&rotation_event(0, 2));
     assert!(
-        banked[2].has_gap_before,
-        "the loss latches until the next bucket is actually pushed"
-    );
-    assert_eq!(
-        run_starts(&chart, 0),
-        vec![true, false, true],
-        "bucket 3 follows bucket 2 in index, yet the flag still splits the run"
-    );
-}
-
-#[test]
-fn a_loss_inside_the_open_bucket_splits_the_line_before_that_bucket() {
-    let mut chart = chart(1);
-    commit(&mut chart, 0, 1, 100, 102);
-    commit(&mut chart, 0, 2, 101, 103);
-    // The ordinary case: the book commits many times per spin, so the commit that reveals the loss
-    // folds into the already-open bucket instead of pushing a new one.
-    chart.apply_book(&valid_book(0, 2, 104, 106), BookContinuity::GapBefore);
-    commit(&mut chart, 0, 3, 105, 107);
-
-    let banked = buckets(&chart, 0);
-    assert!(
-        banked[1].has_gap_before,
-        "the samples lost were bucket 2's own, so bucket 2 is the incomplete one"
-    );
-    assert!(
-        !banked[2].has_gap_before,
-        "and the loss does not ride onto a bucket that lost nothing"
-    );
-    assert_eq!(
-        run_starts(&chart, 0),
-        vec![true, true, false],
-        "the break lands at the boundary before the incomplete bucket, not after it"
-    );
-}
-
-#[test]
-fn a_rotation_clears_that_instrument_and_leaves_its_neighbour() {
-    let mut chart = chart(2);
-    commit(&mut chart, 0, 1, 100, 102);
-    commit(&mut chart, 1, 1, 300, 302);
-    chart.apply_event(&fill_event(0, 1, Side::Buy, 101));
-    chart.apply_event(&fill_event(1, 1, Side::Buy, 301));
-
-    chart.apply_event(&rotation_event(0, 2));
-
-    assert!(
-        buckets(&chart, 0).is_empty(),
+        buckets(&rotation_chart, 0).is_empty(),
         "a new window is a new distribution"
     );
-    assert!(fills(&chart, 0).is_empty(), "its markers go with it");
-    assert_eq!(indices(&chart, 1), vec![1], "the neighbour is untouched");
-    assert_eq!(fills(&chart, 1).len(), 1);
-}
+    assert!(
+        fills(&rotation_chart, 0).is_empty(),
+        "its markers go with it"
+    );
+    assert_eq!(
+        indices(&rotation_chart, 1),
+        vec![1],
+        "the neighbour is untouched"
+    );
+    assert_eq!(fills(&rotation_chart, 1).len(), 1);
 
-#[test]
-fn only_a_valid_two_sided_on_grid_book_banks_a_mid() {
-    let mut chart = chart(1);
-    chart.apply_book(
+    let mut grid_chart = chart_model(1);
+    grid_chart.apply_book(
         &book(0, 1, UiBookState::AwaitingSnapshot, &[100], &[102]),
         BookContinuity::Continuous,
     );
-    chart.apply_book(
+    grid_chart.apply_book(
         &book(0, 2, UiBookState::Valid, &[100], &[]),
         BookContinuity::Continuous,
     );
-    chart.apply_book(
+    grid_chart.apply_book(
         &book(0, 3, UiBookState::Valid, &[], &[102]),
         BookContinuity::Continuous,
     );
     assert!(
-        buckets(&chart, 0).is_empty(),
+        buckets(&grid_chart, 0).is_empty(),
         "an awaiting or one-sided book has no mid to bank"
     );
 
@@ -401,106 +406,24 @@ fn only_a_valid_two_sided_on_grid_book_banks_a_mid() {
         21,
         "on-grid, the mid is the exact sum of the two tick indices"
     );
-}
 
-#[test]
-fn a_fill_marks_its_own_price_never_the_mid() {
-    let mut chart = chart(1);
-    commit(&mut chart, 0, 1, 100, 102);
-    chart.apply_event(&fill_event(0, 1, Side::Sell, 150));
-
+    let mut no_grid = chart_with_ticks(&[None]);
+    commit(&mut no_grid, 0, 1, 100, 102);
+    no_grid.apply_event(&fill_event(0, 1, Side::Buy, 101));
+    assert!(buckets(&no_grid, 0).is_empty());
+    assert!(fills(&no_grid, 0).is_empty());
     assert_eq!(
-        fills(&chart, 0),
-        vec![ChartFill {
-            index: 1,
-            half_ticks: 300,
-            side: Side::Sell,
-        }],
-        "the marker sits at the fill's own price in half-ticks, in its own bucket"
-    );
-    assert_eq!(
-        buckets(&chart, 0)[0].close_half_ticks,
-        202,
-        "and the fill leaves the mid series alone"
-    );
-}
-
-#[test]
-fn a_whole_window_of_fills_keeps_the_marker_under_the_oldest_drawn_bucket() {
-    // The 100 ms spin `MAX_BUCKETS_PER_INSTRUMENT` is sized for — the cadence at which a fill ring
-    // unrelated to the bucket ring starts evicting markers from under a line that is still drawn.
-    const FAST_SPIN: DurationUs = DurationUs::from_micros(100_000);
-    let mut chart = ChartModel::with_capacity(1, FAST_SPIN);
-    chart.configure(&[Some(TICK)], FAST_SPIN);
-    let at = |bucket: u64| TsUs::from_micros(bucket as i64 * FAST_SPIN.micros());
-
-    // Two fills per bucket is the run's real ceiling: the recorder arms one quote per side per spin
-    // and a markout side disarms itself on fill.
-    let window = chart.capacity() as u64;
-    for bucket in 0..window {
-        chart.apply_book(
-            &UiBookSnapshot {
-                event_ts_us: at(bucket),
-                ..valid_book(0, 0, 100, 102)
-            },
-            BookContinuity::Continuous,
-        );
-        for side in [Side::Buy, Side::Sell] {
-            chart.apply_event(&UiEvent::Fill {
-                instrument: InstrumentId(0),
-                seq: 0,
-                event_ts_us: at(bucket),
-                quote_level: None,
-                side,
-                price: Price(101),
-                qty: Qty(1),
-                commission: 0,
-                commission_asset: AssetId(0),
-                liquidity: Some(Liquidity::Maker),
-            });
-        }
-    }
-
-    let domain = domain(&chart, InstrumentId(0)).expect("a series to project");
-    let visible: Vec<ChartFill> = visible_fills(&chart, InstrumentId(0), domain)
-        .copied()
-        .collect();
-    assert_eq!(
-        visible.len() as u64,
-        2 * window,
-        "a whole window of fills at the run's real rate, none of them evicted"
-    );
-    assert_eq!(
-        visible[0].index,
-        buckets(&chart, 0)[0].index,
-        "so no bucket is ever drawn with its own markers already gone — which would read as a \
-         strategy that did not trade"
-    );
-}
-
-#[test]
-fn an_instrument_without_a_tick_grid_charts_nothing() {
-    let mut chart = chart_with_ticks(&[None]);
-    commit(&mut chart, 0, 1, 100, 102);
-    chart.apply_event(&fill_event(0, 1, Side::Buy, 101));
-
-    assert!(buckets(&chart, 0).is_empty());
-    assert!(fills(&chart, 0).is_empty());
-    assert_eq!(
-        domain(&chart, InstrumentId(0)),
+        domain(&no_grid, InstrumentId(0)),
         None,
         "no grid, no series — an honest empty, never a fabricated one"
     );
-}
 
-#[test]
-fn the_domain_grows_from_the_left_then_slides_as_the_series_evicts() {
-    let mut chart = chart(1);
-    assert_eq!(chart.capacity() as u64, CAPACITY);
+    let mut capacity_chart = chart_model(1);
+    assert_eq!(capacity_chart.capacity() as u64, CAPACITY);
     for bucket in 1..=3 {
-        commit(&mut chart, 0, bucket, 100, 102);
+        commit(&mut capacity_chart, 0, bucket, 100, 102);
     }
-    let growing = domain(&chart, InstrumentId(0)).expect("a series to project");
+    let growing = domain(&capacity_chart, InstrumentId(0)).expect("a series to project");
     assert_eq!(
         growing,
         ChartDomain {
@@ -512,9 +435,9 @@ fn the_domain_grows_from_the_left_then_slides_as_the_series_evicts() {
     assert_eq!(growing.width(), CAPACITY);
 
     for bucket in 4..=CAPACITY + OVERRUN {
-        commit(&mut chart, 0, bucket, 100, 102);
+        commit(&mut capacity_chart, 0, bucket, 100, 102);
     }
-    let sliding = domain(&chart, InstrumentId(0)).expect("a series to project");
+    let sliding = domain(&capacity_chart, InstrumentId(0)).expect("a series to project");
     assert_eq!(
         sliding,
         ChartDomain {
@@ -525,97 +448,16 @@ fn the_domain_grows_from_the_left_then_slides_as_the_series_evicts() {
     );
     assert_eq!(sliding.width(), CAPACITY);
 
-    let banked = buckets(&chart, 0);
+    let banked = buckets(&capacity_chart, 0);
     assert_eq!(banked.len(), CAPACITY as usize);
     assert_eq!(
         (banked[0].index, banked[banked.len() - 1].index),
         (OVERRUN + 1, CAPACITY + OVERRUN),
         "the series retains exactly its capacity, oldest evicted first, iterated oldest → newest"
     );
-}
 
-#[test]
-fn bounds_span_the_extremes_and_swallow_the_fills() {
-    let mut chart = chart(1);
-    for (bid, ask) in [(100, 102), (109, 111), (89, 91), (99, 101)] {
-        commit(&mut chart, 0, 1, bid, ask);
-    }
-    chart.apply_event(&fill_event(0, 1, Side::Sell, 150));
-
-    let domain = domain(&chart, InstrumentId(0)).expect("a series to project");
-    let bounds = bounds(&chart, InstrumentId(0), domain).expect("visible data to bound");
-    assert_eq!(
-        bounds,
-        ChartBounds {
-            low: 174,
-            high: 306
-        },
-        "low 180 / high 300 (the fill above every mid), then 5% air each side"
-    );
-    assert!(
-        bounds.low < 200 && bounds.high > 220,
-        "extremes bound the axis, never the closes — so switching Line ↔ Candles cannot rescale y"
-    );
-}
-
-#[test]
-fn a_flat_series_keeps_a_finite_non_zero_range() {
-    let mut chart = chart(1);
-    commit(&mut chart, 0, 1, 100, 102);
-
-    let domain = domain(&chart, InstrumentId(0)).expect("a series to project");
-    let bounds = bounds(&chart, InstrumentId(0), domain).expect("visible data to bound");
-    assert_eq!(
-        bounds,
-        ChartBounds {
-            low: 201,
-            high: 203
-        },
-        "an equal min and max expand by one whole tick, so the transform is never zero-height"
-    );
-    assert_eq!(
-        y_fraction(202, bounds),
-        0.5,
-        "the constant line sits mid-plot"
-    );
-}
-
-#[test]
-fn fractions_stay_in_range_and_move_monotonically() {
-    let domain = ChartDomain {
-        first: 100,
-        last: 700,
-    };
-    assert_eq!(x_fraction(100, domain), 0.0);
-    assert_eq!(x_fraction(700, domain), 1.0);
-    assert_eq!(x_fraction(400, domain), 0.5);
-    assert_eq!(
-        x_fraction(50, domain),
-        0.0,
-        "an index below the window clamps"
-    );
-    assert_eq!(x_fraction(9_999, domain), 1.0, "and above it clamps too");
-
-    let bounds = ChartBounds {
-        low: 100,
-        high: 200,
-    };
-    assert_eq!(y_fraction(100, bounds), 0.0, "0.0 is the low bound");
-    assert_eq!(y_fraction(200, bounds), 1.0);
-    assert_eq!(y_fraction(150, bounds), 0.5);
-    assert_eq!(y_fraction(-5_000, bounds), 0.0);
-    assert_eq!(y_fraction(5_000, bounds), 1.0);
-    assert_eq!(
-        y_fraction(5, ChartBounds { low: 5, high: 5 }),
-        0.5,
-        "a zero-height window reads as its own centre rather than dividing by zero"
-    );
-}
-
-#[test]
-fn the_projection_is_replay_deterministic() {
     let run = || {
-        let mut chart = chart(2);
+        let mut chart = chart_model(2);
         commit(&mut chart, 0, 1, 100, 102);
         commit(&mut chart, 1, 1, 300, 302);
         commit(&mut chart, 0, 1, 105, 107);
@@ -648,6 +490,149 @@ fn the_projection_is_replay_deterministic() {
     );
 }
 
+/// A fill marks its own price, never the mid, and a whole window of fills at the run's real rate is
+/// never evicted out from under a still-drawn bucket (the cadence at which a fill ring unrelated to
+/// the bucket ring used to start doing exactly that). Bounds span the data's extremes with 5% air —
+/// swallowing fills as well as mids, and never collapsing to zero height on a flat series — and the
+/// x/y fractions built over those bounds stay in `0.0..=1.0`, clamping outside the window and reading
+/// as their own centre on a zero-height range.
+#[test]
+fn chart_view_fills_bounds_and_fractions() {
+    let mut chart = chart_model(1);
+    commit(&mut chart, 0, 1, 100, 102);
+    chart.apply_event(&fill_event(0, 1, Side::Sell, 150));
+    assert_eq!(
+        fills(&chart, 0),
+        vec![ChartFill {
+            index: 1,
+            half_ticks: 300,
+            side: Side::Sell,
+        }],
+        "the marker sits at the fill's own price in half-ticks, in its own bucket"
+    );
+    assert_eq!(
+        buckets(&chart, 0)[0].close_half_ticks,
+        202,
+        "and the fill leaves the mid series alone"
+    );
+
+    // The 100 ms spin `MAX_BUCKETS_PER_INSTRUMENT` is sized for — the cadence at which a fill ring
+    // unrelated to the bucket ring starts evicting markers from under a line that is still drawn.
+    const FAST_SPIN: DurationUs = DurationUs::from_micros(100_000);
+    let mut fast = ChartModel::with_capacity(1, FAST_SPIN);
+    fast.configure(&[Some(TICK)], FAST_SPIN);
+    let at = |bucket: u64| TsUs::from_micros(bucket as i64 * FAST_SPIN.micros());
+    // Two fills per bucket is the run's real ceiling: the recorder arms one quote per side per spin
+    // and a markout side disarms itself on fill.
+    let window = fast.capacity() as u64;
+    for bucket in 0..window {
+        fast.apply_book(
+            &UiBookSnapshot {
+                event_ts_us: at(bucket),
+                ..valid_book(0, 0, 100, 102)
+            },
+            BookContinuity::Continuous,
+        );
+        for side in [Side::Buy, Side::Sell] {
+            fast.apply_event(&UiEvent::Fill {
+                instrument: InstrumentId(0),
+                seq: 0,
+                event_ts_us: at(bucket),
+                quote_level: None,
+                side,
+                price: Price(101),
+                qty: Qty(1),
+                commission: 0,
+                commission_asset: AssetId(0),
+                liquidity: Some(Liquidity::Maker),
+            });
+        }
+    }
+    let fast_domain = domain(&fast, InstrumentId(0)).expect("a series to project");
+    let visible_fast: Vec<ChartFill> = visible_fills(&fast, InstrumentId(0), fast_domain)
+        .copied()
+        .collect();
+    assert_eq!(
+        visible_fast.len() as u64,
+        2 * window,
+        "a whole window of fills at the run's real rate, none of them evicted"
+    );
+    assert_eq!(
+        visible_fast[0].index,
+        buckets(&fast, 0)[0].index,
+        "so no bucket is ever drawn with its own markers already gone — which would read as a \
+         strategy that did not trade"
+    );
+
+    let mut extremes_chart = chart_model(1);
+    for (bid, ask) in [(100, 102), (109, 111), (89, 91), (99, 101)] {
+        commit(&mut extremes_chart, 0, 1, bid, ask);
+    }
+    extremes_chart.apply_event(&fill_event(0, 1, Side::Sell, 150));
+    let extremes_domain = domain(&extremes_chart, InstrumentId(0)).expect("a series to project");
+    let extremes =
+        bounds(&extremes_chart, InstrumentId(0), extremes_domain).expect("visible data to bound");
+    assert_eq!(
+        extremes,
+        ChartBounds {
+            low: 174,
+            high: 306
+        },
+        "low 180 / high 300 (the fill above every mid), then 5% air each side"
+    );
+    assert!(
+        extremes.low < 200 && extremes.high > 220,
+        "extremes bound the axis, never the closes — so switching Line ↔ Candles cannot rescale y"
+    );
+
+    let mut flat_chart = chart_model(1);
+    commit(&mut flat_chart, 0, 1, 100, 102);
+    let flat_domain = domain(&flat_chart, InstrumentId(0)).expect("a series to project");
+    let flat = bounds(&flat_chart, InstrumentId(0), flat_domain).expect("visible data to bound");
+    assert_eq!(
+        flat,
+        ChartBounds {
+            low: 201,
+            high: 203
+        },
+        "an equal min and max expand by one whole tick, so the transform is never zero-height"
+    );
+    assert_eq!(
+        y_fraction(202, flat),
+        0.5,
+        "the constant line sits mid-plot"
+    );
+
+    let wide = ChartDomain {
+        first: 100,
+        last: 700,
+    };
+    assert_eq!(x_fraction(100, wide), 0.0);
+    assert_eq!(x_fraction(700, wide), 1.0);
+    assert_eq!(x_fraction(400, wide), 0.5);
+    assert_eq!(
+        x_fraction(50, wide),
+        0.0,
+        "an index below the window clamps"
+    );
+    assert_eq!(x_fraction(9_999, wide), 1.0, "and above it clamps too");
+
+    let range = ChartBounds {
+        low: 100,
+        high: 200,
+    };
+    assert_eq!(y_fraction(100, range), 0.0, "0.0 is the low bound");
+    assert_eq!(y_fraction(200, range), 1.0);
+    assert_eq!(y_fraction(150, range), 0.5);
+    assert_eq!(y_fraction(-5_000, range), 0.0);
+    assert_eq!(y_fraction(5_000, range), 1.0);
+    assert_eq!(
+        y_fraction(5, ChartBounds { low: 5, high: 5 }),
+        0.5,
+        "a zero-height window reads as its own centre rather than dividing by zero"
+    );
+}
+
 proptest! {
     /// A series that projects always bounds. The painter reads the two together, so a domain without
     /// bounds paints "no mid samples yet" over live data — the chart's own honest-empty state turned
@@ -656,7 +641,7 @@ proptest! {
     fn a_series_with_a_domain_always_has_bounds(
         steps in prop::collection::vec(0u64..2_000, 1..40),
     ) {
-        let mut chart = chart(1);
+        let mut chart = chart_model(1);
         let mut bucket = 0u64;
         for step in steps {
             bucket += step;

@@ -40,53 +40,174 @@ fn is_nice_step(step: i64) -> bool {
     matches!(value, 1 | 2 | 5)
 }
 
-/// The generator climbs the {1,2,5}·10^k ladder and stops at the FIRST step whose multiples fit under
-/// the ceiling, so the axis is as dense as the ceiling allows rather than merely legal. Ticks land on
-/// step multiples, never on the range's own ends — the two charts' gutters line up only because both
-/// snap to the same grid.
-#[test]
-fn the_finest_nice_step_under_the_ceiling_wins() {
-    let ticks = axis_ticks(0, 100, 6);
-    assert_eq!(ticks.step(), 20, "a step of 10 would ask for 11 ticks");
-    assert_eq!(ticks.collect::<Vec<_>>(), vec![0, 20, 40, 60, 80, 100]);
+/// The shipped axis font, and the two pitches the painter derives from it: 2.0 font heights is the
+/// spacing the gutter AIMS for, 1.2 the tightest it stays readable at. Both here so the bands this
+/// crosses are the bands the real gutter crosses.
+const AXIS_FONT: f32 = 11.0;
+const IDEAL_PITCH: f32 = AXIS_FONT * 2.0;
+const MINIMUM_PITCH: f32 = AXIS_FONT * 1.2;
 
-    let across_zero = axis_ticks(-7, 23, 5);
-    assert_eq!(across_zero.step(), 10, "a step of 5 would ask for 6 ticks");
-    assert_eq!(
-        across_zero.collect::<Vec<_>>(),
-        vec![0, 10, 20],
-        "the grid ignores the range's ends; only multiples of the step are drawn"
-    );
+/// The lower chart's plot in the default window: 30% of a ~400pt left-panel body, less the 30pt
+/// sub-header. Shaun asked for a y-axis on this chart specifically, so the geometry it actually ships
+/// at is pinned rather than left to follow from the arithmetic.
+const EXPOSURE_PLOT_HEIGHT: f32 = 90.0;
+
+struct TickCase {
+    name: &'static str,
+    low: i64,
+    high: i64,
+    ceiling: usize,
+    expect_step: Option<i64>,
+    expect_ticks: Vec<i64>,
 }
 
-/// A degenerate range is a display state, not a bug — an instrument whose series holds one sample, a
-/// gutter measured before any data arrived — and a panicked paint takes the whole window with it.
+/// FITNESS: the generator climbs the {1,2,5}·10^k ladder to the finest step under the ceiling and
+/// stays safe on degenerate ranges (inverted, zero-ceiling, single-value, and past i64's own width);
+/// the axis never hands a painter more labels than a plot can show legibly nor withholds one it could
+/// show, pinned both generally and at the exposure chart's own shipped height (asked for by Shaun —
+/// raise the plot or lower the legibility pitch before ever deleting that assertion); the label
+/// writers render exact strings from the step's own chosen decimals; and the crosshair's fraction →
+/// bucket inverse clamps to an edge for a pointer that has left the plot.
 #[test]
-fn a_degenerate_range_yields_an_empty_axis_with_a_usable_step() {
-    let inverted = axis_ticks(100, 0, 8);
-    assert_eq!(inverted.step(), 1, "a step stays safe to divide by");
-    assert_eq!(inverted.count(), 0);
+fn axis_tick_generation_legibility_and_label_rendering() {
+    let cases = [
+        TickCase {
+            name: "finest step under a 6-tick ceiling",
+            low: 0,
+            high: 100,
+            ceiling: 6,
+            expect_step: Some(20),
+            expect_ticks: vec![0, 20, 40, 60, 80, 100],
+        },
+        TickCase {
+            name: "finest step across zero at a 5-tick ceiling",
+            low: -7,
+            high: 23,
+            ceiling: 5,
+            expect_step: Some(10),
+            expect_ticks: vec![0, 10, 20],
+        },
+        TickCase {
+            name: "an inverted range yields an empty axis with a safe step",
+            low: 100,
+            high: 0,
+            ceiling: 8,
+            expect_step: Some(1),
+            expect_ticks: vec![],
+        },
+        TickCase {
+            name: "a zero ceiling draws nothing but keeps a safe step",
+            low: 0,
+            high: 100,
+            ceiling: 0,
+            expect_step: Some(1),
+            expect_ticks: vec![],
+        },
+        TickCase {
+            name: "a range holding one value gets one tick, at it",
+            low: 42,
+            high: 42,
+            ceiling: 8,
+            expect_step: None,
+            expect_ticks: vec![42],
+        },
+        TickCase {
+            name: "no rung divides the whole of i64, so the axis gives up",
+            low: i64::MIN,
+            high: i64::MAX,
+            ceiling: 8,
+            expect_step: None,
+            expect_ticks: vec![],
+        },
+    ];
+    for case in cases {
+        let ticks = axis_ticks(case.low, case.high, case.ceiling);
+        if let Some(step) = case.expect_step {
+            assert_eq!(ticks.step(), step, "{}: step", case.name);
+        }
+        assert_eq!(
+            ticks.collect::<Vec<_>>(),
+            case.expect_ticks,
+            "{}: ticks",
+            case.name
+        );
+    }
 
-    let zero_ceiling = axis_ticks(0, 100, 0);
-    assert_eq!(zero_ceiling.count(), 0, "a zero ceiling draws nothing");
-    assert_eq!(
-        zero_ceiling.step(),
-        1,
-        "and still reports a step safe to divide by — this path is live production behaviour, \
-         because a short plot's height formula asks for zero ticks"
+    // an_axis_is_drawn_exactly_when_its_labels_would_be_legible: the axis never hands a painter more
+    // labels than the plot can show them legibly, and never withholds one a plot could show. 0..400pt
+    // at a 13.2pt minimum pitch spans room for 0 through 30 labels, so the 66pt boundary and the
+    // broken 22-55pt band are both swept rather than straddled.
+    for tenths in 0..4_000u32 {
+        let height = tenths as f32 / 10.0;
+        let legible = (height / MINIMUM_PITCH) as usize;
+        let ceiling = legible_tick_ceiling(height, IDEAL_PITCH, MINIMUM_PITCH);
+        let count = axis_ticks(0, 100_000, ceiling).count();
+        assert!(
+            count <= legible,
+            "a {height}pt plot fits {legible} legible label(s) and was handed {count}"
+        );
+        match legible >= MIN_TICK_CEILING {
+            true => assert!(
+                count >= 2,
+                "a {height}pt plot fits {legible} legible label(s) and must still get an axis"
+            ),
+            false => assert_eq!(
+                count, 0,
+                "a {height}pt plot cannot show the floor's five legibly and must get a bare gutter"
+            ),
+        }
+    }
+
+    // the_exposure_chart_shows_an_axis_at_its_default_height: the exposure chart at its shipped size
+    // carries the axis it was asked for.
+    let ceiling = legible_tick_ceiling(EXPOSURE_PLOT_HEIGHT, IDEAL_PITCH, MINIMUM_PITCH);
+    let ticks: Vec<i64> = axis_ticks(-5_000_000, 5_000_000, ceiling).collect();
+    assert!(
+        ticks.len() >= 3,
+        "a {EXPOSURE_PLOT_HEIGHT}pt exposure plot drew {} label(s). This axis was ASKED FOR — \
+         \"the y axis for this should show, along with the latest number\" — so reddening this is \
+         removing a requested feature, not adjusting a constant. Raise the plot or lower the \
+         legibility pitch; do not delete the assertion.",
+        ticks.len()
+    );
+    assert!(
+        EXPOSURE_PLOT_HEIGHT / ticks.len() as f32 >= MINIMUM_PITCH,
+        "and they are {}pt apart, under the {MINIMUM_PITCH}pt they need to be read",
+        EXPOSURE_PLOT_HEIGHT / ticks.len() as f32
     );
 
-    assert_eq!(
-        axis_ticks(42, 42, 8).collect::<Vec<_>>(),
-        vec![42],
-        "a range holding one value gets one tick, at it"
-    );
+    // axis_labels_render_their_ticks_exactly: the generator's step chooses the decimals and the
+    // writer renders the tick at them. An exposure axis from -2.5 to +7.5 quote units.
+    let label_ticks = axis_ticks(-250_000_000, 750_000_000, 6);
+    assert_eq!(label_ticks.step(), 200_000_000, "two whole quote units");
+    let decimals = quote_axis_decimals(label_ticks.step());
+    assert_eq!(decimals, 0, "a whole-unit step needs no fractional digit");
+    let mut label = String::new();
+    let mut labels = Vec::new();
+    for tick in label_ticks {
+        write_quote_amount(&mut label, tick, decimals);
+        labels.push(label.clone());
+    }
+    assert_eq!(labels, ["-2", "0", "2", "4", "6"]);
 
+    // a_fraction_outside_the_plot_clamps_to_an_edge_bucket: the pointer leaves the plot rect
+    // constantly — the operator drags across the panel edge, or hovers the gutter — and the crosshair
+    // must answer with a bucket the chart actually holds.
+    let plot = ChartDomain {
+        first: 100,
+        last: 400,
+    };
+    assert_eq!(bucket_at_fraction(-3.0, plot), 100);
+    assert_eq!(bucket_at_fraction(4.0, plot), 400);
     assert_eq!(
-        axis_ticks(i64::MIN, i64::MAX, 8).count(),
-        0,
-        "no rung of the ladder divides the whole of i64, so the axis gives up rather than \
-         overflowing or breaking its own ceiling"
+        bucket_at_fraction(f32::NAN, plot),
+        100,
+        "a pointer with no position reads as the window's start, never a panic"
+    );
+    assert_eq!(
+        bucket_at_fraction(0.5, ChartDomain { first: 7, last: 7 }),
+        7,
+        "a one-slot window is its own answer"
     );
 }
 
@@ -109,139 +230,6 @@ fn a_ceiling_below_the_floor_still_draws_a_real_axis() {
             );
         }
     }
-}
-
-/// The shipped axis font, and the two pitches the painter derives from it: 2.0 font heights is the
-/// spacing the gutter AIMS for, 1.2 the tightest it stays readable at. Both here so the bands this
-/// crosses are the bands the real gutter crosses.
-const AXIS_FONT: f32 = 11.0;
-const IDEAL_PITCH: f32 = AXIS_FONT * 2.0;
-const MINIMUM_PITCH: f32 = AXIS_FONT * 1.2;
-
-/// The lower chart's plot in the default window: 30% of a ~400pt left-panel body, less the 30pt
-/// sub-header. Shaun asked for a y-axis on this chart specifically, so the geometry it actually ships
-/// at is pinned rather than left to follow from the arithmetic.
-const EXPOSURE_PLOT_HEIGHT: f32 = 90.0;
-
-/// FITNESS: the axis never hands a painter more labels than the plot can show them legibly, and never
-/// withholds one a plot could show. Both halves are load-bearing and each covers a failure the other
-/// misses — deriving the ceiling from height alone crowds five labels into space for two (4.4pt apart
-/// at 22pt), while treating the AIMED-at pitch as the minimum strips the axis off every plot under
-/// 110pt, which is most of the exposure chart's working range. Untestable in the painter, which is how
-/// the first of those shipped; the arithmetic lives in `legible_tick_ceiling` so it can be pinned.
-#[test]
-fn an_axis_is_drawn_exactly_when_its_labels_would_be_legible() {
-    // 0..400pt at a 13.2pt minimum pitch spans room for 0 through 30 labels, so the 66pt boundary and
-    // the broken 22-55pt band are both swept rather than straddled.
-    for tenths in 0..4_000u32 {
-        let height = tenths as f32 / 10.0;
-        let legible = (height / MINIMUM_PITCH) as usize;
-        let ceiling = legible_tick_ceiling(height, IDEAL_PITCH, MINIMUM_PITCH);
-        let count = axis_ticks(0, 100_000, ceiling).count();
-        assert!(
-            count <= legible,
-            "a {height}pt plot fits {legible} legible label(s) and was handed {count}"
-        );
-        match legible >= MIN_TICK_CEILING {
-            true => assert!(
-                count >= 2,
-                "a {height}pt plot fits {legible} legible label(s) and must still get an axis"
-            ),
-            false => assert_eq!(
-                count, 0,
-                "a {height}pt plot cannot show the floor's five legibly and must get a bare gutter"
-            ),
-        }
-    }
-}
-
-/// FITNESS: the exposure chart at its shipped size carries the axis it was asked for. The general
-/// property above would be satisfied by a threshold anywhere — this pins the one number the
-/// requirement actually turns on, so a future pitch or split change that silently blanks this gutter
-/// fails here rather than in front of Shaun.
-#[test]
-fn the_exposure_chart_shows_an_axis_at_its_default_height() {
-    let ceiling = legible_tick_ceiling(EXPOSURE_PLOT_HEIGHT, IDEAL_PITCH, MINIMUM_PITCH);
-    let ticks: Vec<i64> = axis_ticks(-5_000_000, 5_000_000, ceiling).collect();
-    assert!(
-        ticks.len() >= 3,
-        "a {EXPOSURE_PLOT_HEIGHT}pt exposure plot drew {} label(s). This axis was ASKED FOR — \
-         \"the y axis for this should show, along with the latest number\" — so reddening this is \
-         removing a requested feature, not adjusting a constant. Raise the plot or lower the \
-         legibility pitch; do not delete the assertion.",
-        ticks.len()
-    );
-    assert!(
-        EXPOSURE_PLOT_HEIGHT / ticks.len() as f32 >= MINIMUM_PITCH,
-        "and they are {}pt apart, under the {MINIMUM_PITCH}pt they need to be read",
-        EXPOSURE_PLOT_HEIGHT / ticks.len() as f32
-    );
-}
-
-/// The label family end to end: the generator's step chooses the decimals and the writer renders the
-/// tick at them. Real expected strings — the whole point of integer ticks is that no label rounds.
-#[test]
-fn axis_labels_render_their_ticks_exactly() {
-    // An exposure axis from -2.5 to +7.5 quote units.
-    let ticks = axis_ticks(-250_000_000, 750_000_000, 6);
-    assert_eq!(ticks.step(), 200_000_000, "two whole quote units");
-    let decimals = quote_axis_decimals(ticks.step());
-    assert_eq!(decimals, 0, "a whole-unit step needs no fractional digit");
-
-    let mut label = String::new();
-    let mut labels = Vec::new();
-    for tick in ticks {
-        write_quote_amount(&mut label, tick, decimals);
-        labels.push(label.clone());
-    }
-    assert_eq!(labels, ["-2", "0", "2", "4", "6"]);
-}
-
-/// The two writers the crosshair pill and the axis gutter share, pinned on exact strings rather than
-/// round-trips through the code under test.
-#[test]
-fn the_quote_and_mid_writers_render_exact_strings() {
-    let mut buf = String::new();
-
-    write_quote_amount(&mut buf, 123_456_789, 2);
-    assert_eq!(buf, "1.23", "truncated toward zero, never rounded up");
-    write_quote_amount(&mut buf, -50_000_000, 2);
-    assert_eq!(
-        buf, "-0.50",
-        "a sub-unit loss keeps the sign its integer part lost"
-    );
-    write_quote_amount(&mut buf, 0, 2);
-    assert_eq!(buf, "0.00", "a real zero is a number, not a missing value");
-
-    assert_eq!(
-        quote_axis_decimals(50_000_000),
-        1,
-        "a half-unit step shows one place"
-    );
-    write_quote_amount(&mut buf, 150_000_000, quote_axis_decimals(50_000_000));
-    assert_eq!(buf, "1.5");
-}
-
-/// The pointer leaves the plot rect constantly — the operator drags across the panel edge, or hovers
-/// the gutter — and the crosshair must answer with a bucket the chart actually holds.
-#[test]
-fn a_fraction_outside_the_plot_clamps_to_an_edge_bucket() {
-    let domain = ChartDomain {
-        first: 100,
-        last: 400,
-    };
-    assert_eq!(bucket_at_fraction(-3.0, domain), 100);
-    assert_eq!(bucket_at_fraction(4.0, domain), 400);
-    assert_eq!(
-        bucket_at_fraction(f32::NAN, domain),
-        100,
-        "a pointer with no position reads as the window's start, never a panic"
-    );
-    assert_eq!(
-        bucket_at_fraction(0.5, ChartDomain { first: 7, last: 7 }),
-        7,
-        "a one-slot window is its own answer"
-    );
 }
 
 proptest! {

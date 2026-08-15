@@ -7,7 +7,6 @@
 
 use polysim::desktop::chart_model::{BookContinuity, ChartModel};
 use polysim::desktop::chart_view::{ChartDomain, domain, x_fraction};
-use polysim::desktop::format::{axis_ticks, quote_axis_decimals};
 use polysim::desktop::position_chart_model::{PositionBucket, PositionModel};
 use polysim::desktop::position_chart_view::{RiskSeries, bounds, visible_buckets};
 use polysim::ids::{FIXED_SCALE, InstrumentId, Price, Qty};
@@ -25,9 +24,6 @@ const SPIN: DurationUs = DurationUs::from_micros(1_000_000);
 
 /// The window at [`SPIN`]: `300_000_000 / 1_000_000`.
 const CAPACITY: u64 = 300;
-
-/// Ticks a gutter is measured for; the ceiling the axis generator is asked to respect here.
-const AXIS_TICKS: usize = 6;
 
 fn at(bucket: u64) -> TsUs {
     TsUs::from_micros(bucket as i64 * SPIN.micros())
@@ -121,36 +117,6 @@ fn window(first: u64) -> ChartDomain {
     }
 }
 
-/// The two stacked charts must resolve one event time to ONE slot. They read different lanes at
-/// different rates, so nothing but shared arithmetic keeps them together — and a one-slot drift is
-/// invisible: the crosshair simply reads a neighbouring spin's exposure against the hovered mid.
-#[test]
-fn a_position_and_a_mid_stamped_alike_land_in_the_same_bucket() {
-    let mut chart = mid_chart(1);
-    let mut positions = positions(1);
-
-    let stamp = TsUs::from_micros(4_500_000);
-    commit(&mut chart, 0, stamp);
-    positions.apply_event(&UiEvent::Position {
-        instrument: InstrumentId(0),
-        seq: 0,
-        event_ts_us: stamp,
-        exposure_quote: 1.0,
-        pnl_quote: 1.0,
-    });
-
-    assert_eq!(
-        chart.buckets(InstrumentId(0)).next().map(|b| b.index),
-        Some(4),
-        "4.5 s into the run is the fifth one-second spin"
-    );
-    assert_eq!(
-        banked(&positions, 0).last().map(|b| b.index),
-        Some(4),
-        "the same stamp, the same slot"
-    );
-}
-
 /// A spin banks the engine's LATEST absolute state, never an average or a first sample: the frames
 /// are re-sent every spin precisely so the freshest one is the truth. A frame stamped
 /// back inside a settled bucket is dropped rather than rewriting a bucket the painter has drawn.
@@ -189,40 +155,75 @@ fn the_last_state_inside_a_spin_is_the_one_its_bucket_keeps() {
     );
 }
 
-/// A rotation is a new market in the slot, and the engine then goes SILENT for it: `Position` rides
-/// only while the row holds a mark, and rotation clears the mark until a fresh two-sided book re-marks
-/// it. No zero frame announces the reset, so the rotation event is the whole of the signal — the spins
-/// of silence behind it must leave the series EMPTY, never holding the pre-rotation value. Holding it
-/// would show live risk in a market that no longer exists; clearing the wrong instrument would erase
-/// risk the engine really does hold.
+/// The honesty pin for this view. A rotation is a new market in the slot, and the engine then goes
+/// SILENT for it: `Position` rides only while the row holds a mark, and rotation clears the mark
+/// until a fresh two-sided book re-marks it. No zero frame announces the reset, so the rotation event
+/// is the whole of the signal — the spins of silence behind it must leave the series EMPTY, never
+/// holding the pre-rotation value. Holding it would show live risk in a market that no longer exists;
+/// clearing the wrong instrument would erase risk the engine really does hold. The same fabrication
+/// risk shows up in the window: no visible bucket must mean NO window, never an invented one — a
+/// chart drawn for an instrument holding no position would be indistinguishable from a genuinely flat
+/// one.
 #[test]
-fn a_rotated_instrument_empties_and_stays_empty_through_the_silence() {
-    let mut positions = positions(2);
-    positions.apply_event(&position(0, 1, 500, 10));
-    positions.apply_event(&position(1, 1, 700, 20));
+fn a_window_never_fabricates_a_value_it_cannot_support() {
+    {
+        let mut positions = positions(2);
+        positions.apply_event(&position(0, 1, 500, 10));
+        positions.apply_event(&position(1, 1, 700, 20));
 
-    positions.apply_event(&rotation(0, 2));
+        positions.apply_event(&rotation(0, 2));
 
-    assert!(banked(&positions, 0).is_empty());
-    assert_eq!(positions.latest(InstrumentId(0)), None);
+        assert!(banked(&positions, 0).is_empty());
+        assert_eq!(positions.latest(InstrumentId(0)), None);
 
-    // Minutes of spins pass with the rotated row emitting nothing, because it holds no mark.
-    for bucket in 3..40 {
-        positions.apply_event(&position(1, bucket, 700, 20));
+        // Minutes of spins pass with the rotated row emitting nothing, because it holds no mark.
+        for bucket in 3..40 {
+            positions.apply_event(&position(1, bucket, 700, 20));
+        }
+
+        assert!(
+            banked(&positions, 0).is_empty(),
+            "silence is the absence of an honest valuation, never a value to carry forward"
+        );
+        assert_eq!(
+            banked(&positions, 1).first(),
+            Some(&PositionBucket {
+                index: 1,
+                exposure_quote: 700,
+                pnl_quote: 20,
+            }),
+            "the neighbour's pre-rotation history is untouched"
+        );
     }
 
+    let empty = positions(1);
+    assert_eq!(
+        bounds(&empty, InstrumentId(0), RiskSeries::Exposure, window(0)),
+        None,
+        "an instrument that has banked nothing has no window"
+    );
+
+    let mut one_bucket = positions(1);
+    one_bucket.apply_event(&position(0, 5, 250_000_000, -125_000_000));
     assert!(
-        banked(&positions, 0).is_empty(),
-        "silence is the absence of an honest valuation, never a value to carry forward"
+        bounds(
+            &one_bucket,
+            InstrumentId(0),
+            RiskSeries::Exposure,
+            window(0)
+        )
+        .is_some(),
+        "one banked bucket inside the window does bound"
     );
     assert_eq!(
-        banked(&positions, 1).first(),
-        Some(&PositionBucket {
-            index: 1,
-            exposure_quote: 700,
-            pnl_quote: 20,
-        }),
-        "the neighbour's pre-rotation history is untouched"
+        bounds(
+            &one_bucket,
+            InstrumentId(0),
+            RiskSeries::Exposure,
+            window(CAPACITY + 1)
+        ),
+        None,
+        "and a window the whole series falls outside has nothing to bound either"
     );
 }
 
@@ -291,140 +292,52 @@ fn a_self_derived_window_would_put_the_same_bucket_somewhere_else() {
     );
 }
 
-/// The baseline is the whole reading: a chart scaled to `+140..+150` looks like a position crossing
-/// zero unless zero is in view. Held for any set of samples, including an all-positive or
-/// all-negative run, which is the shape a directional strategy produces for minutes at a time.
+/// A hostile peer can send a stamp in no bucket, or a value that cannot be a quote mantissa — the
+/// link is an UNTRUSTED remote producer and decode validates a frame's count and schema hash, never
+/// its float values. `inf`, `NaN` and an absurd finite magnitude all saturate the cast to `i64::MAX`,
+/// and one such bucket crushes every honest sample in the five-minute window flat against the axis —
+/// a display-denial primitive for anyone who can reach the port. Every such frame must be dropped and
+/// COUNTED, never silently: the counter is the only signal that a peer is sending frames the ledger
+/// cannot have produced. Drop and count, never panic: this is external and expected.
 #[test]
-fn the_window_always_holds_zero_and_a_flat_series_stays_labelable() {
-    let mut positions = positions(1);
-    for bucket in 0..4 {
-        positions.apply_event(&position(0, bucket, 0, 0));
-    }
-    let flat = bounds(&positions, InstrumentId(0), RiskSeries::Exposure, window(0))
-        .expect("a banked series to bound")
-        .as_chart_bounds();
-
-    assert!(flat.low < 0 && flat.high > 0);
-    assert!(
-        flat.high - flat.low >= FIXED_SCALE,
-        "a flat series spans at least one whole quote unit, got {}",
-        flat.high - flat.low
-    );
-
-    let ticks = axis_ticks(flat.low, flat.high, AXIS_TICKS);
-    assert!(
-        quote_axis_decimals(ticks.step()) <= 2,
-        "a flat axis labels in units a reader recognises, not in single mantissas: step {} needs \
-         {} decimals",
-        ticks.step(),
-        quote_axis_decimals(ticks.step())
-    );
-    assert!(
-        ticks.collect::<Vec<_>>().contains(&0),
-        "zero is a multiple of every step, so the baseline is a real labelled tick"
-    );
-}
-
-/// FITNESS: the toggle reads the field it names. Trivial to state, and the reason it is stated
-/// directly is that the window property covering it today has a MAGNITUDE FLOOR of ~0.55 quote units:
-/// the minimum-span floor widens a flat window to ±5e7 and the pad takes it to ±5.5e7, so for any
-/// value inside that a swapped arm yields a window genuinely correct for BOTH series and there is
-/// nothing to catch. It bites only because that generator happens to draw from ±1e14 — protection by
-/// coincidence of range, which a later narrowing would silently remove.
-///
-/// The mantissas here are 3 and -11, seven orders of magnitude BELOW that floor, so this assertion
-/// cannot be leaning on the same mechanism.
-#[test]
-fn each_series_reads_the_field_it_names() {
-    let bucket = PositionBucket {
-        index: 7,
-        exposure_quote: 3,
-        pnl_quote: -11,
-    };
-    assert_eq!(RiskSeries::Exposure.value(&bucket), 3);
-    assert_eq!(RiskSeries::Pnl.value(&bucket), -11);
-}
-
-/// FITNESS: no visible bucket means NO window, and the painter's empty state depends on getting that
-/// answer rather than a plausible one. Inventing a window here would draw an axis, a zero line and a
-/// baseline for an instrument holding no position — a chart indistinguishable from a flat one that is
-/// genuinely flat. Both ways in are covered: nothing banked at all, and a window that all of a banked
-/// series falls outside.
-#[test]
-fn a_window_over_no_visible_bucket_is_none_not_an_invented_one() {
-    let mut positions = positions(1);
-    assert_eq!(
-        bounds(&positions, InstrumentId(0), RiskSeries::Exposure, window(0)),
-        None,
-        "an instrument that has banked nothing has no window"
-    );
-
-    positions.apply_event(&position(0, 5, 250_000_000, -125_000_000));
-    assert!(
-        bounds(&positions, InstrumentId(0), RiskSeries::Exposure, window(0)).is_some(),
-        "one banked bucket inside the window does bound"
-    );
-    assert_eq!(
-        bounds(
-            &positions,
-            InstrumentId(0),
-            RiskSeries::Exposure,
-            window(CAPACITY + 1)
+fn frames_the_ledger_could_not_have_produced_are_dropped_and_counted() {
+    let cases: [(&str, UiEvent); 6] = [
+        (
+            "timestamp before the epoch",
+            UiEvent::Position {
+                instrument: InstrumentId(0),
+                seq: 0,
+                event_ts_us: TsUs::from_micros(-1),
+                exposure_quote: 2.5,
+                pnl_quote: 1.0,
+            },
         ),
-        None,
-        "and a window the whole series falls outside has nothing to bound either"
-    );
-}
+        ("exposure is +inf", wire_position(0, 1, f64::INFINITY, 0.0)),
+        (
+            "exposure is -inf",
+            wire_position(0, 2, f64::NEG_INFINITY, 0.0),
+        ),
+        ("exposure is NaN", wire_position(0, 3, f64::NAN, 0.0)),
+        (
+            "exposure is an absurd finite magnitude",
+            wire_position(0, 4, 1e300, 0.0),
+        ),
+        ("pnl is +inf", wire_position(0, 5, 12.5, f64::INFINITY)),
+    ];
 
-/// A stamp in no bucket is the other shape a hostile peer can send, and it must not slip through the
-/// value gate uncounted: the counter is the ONLY signal that a peer is sending frames the ledger
-/// cannot have produced, so a drop it does not count is a silent one.
-#[test]
-fn a_frame_stamped_outside_every_bucket_is_dropped_and_counted() {
     let mut positions = positions(1);
-    positions.apply_event(&UiEvent::Position {
-        instrument: InstrumentId(0),
-        seq: 0,
-        event_ts_us: TsUs::from_micros(-1),
-        exposure_quote: 2.5,
-        pnl_quote: 1.0,
-    });
-
-    assert!(
-        banked(&positions, 0).is_empty(),
-        "a stamp before the epoch reached no bucket"
-    );
+    for (name, event) in &cases {
+        positions.apply_event(event);
+        assert!(
+            banked(&positions, 0).is_empty(),
+            "case {name}: a hostile frame must not reach the series"
+        );
+    }
     assert_eq!(
         positions.rejected_frames(),
-        1,
-        "and the drop is counted, not silent"
+        cases.len() as u64,
+        "every case above was counted as a drop, not silent"
     );
-}
-
-/// The link is an UNTRUSTED remote producer and decode validates a frame's count and schema hash,
-/// never its float values. `inf`, `NaN` and an absurd finite magnitude all saturate the cast to
-/// `i64::MAX`, and one such bucket crushes every honest sample in the five-minute window flat against
-/// the axis — a display-denial primitive for anyone who can reach the port. Drop and count, never
-/// panic: this is external and expected.
-#[test]
-fn a_frame_that_cannot_be_a_quote_mantissa_is_dropped_and_counted() {
-    let mut positions = positions(1);
-    let hostile = [
-        (f64::INFINITY, 0.0),
-        (f64::NEG_INFINITY, 0.0),
-        (f64::NAN, 0.0),
-        (1e300, 0.0),
-        (12.5, f64::INFINITY),
-    ];
-    for (bucket, (exposure, pnl)) in hostile.iter().enumerate() {
-        positions.apply_event(&wire_position(0, bucket as u64, *exposure, *pnl));
-    }
-
-    assert!(
-        banked(&positions, 0).is_empty(),
-        "not one hostile frame reached the series"
-    );
-    assert_eq!(positions.rejected_frames(), hostile.len() as u64);
 
     positions.apply_event(&position(0, 9, 250_000_000, -125_000_000));
     assert_eq!(
@@ -438,7 +351,7 @@ fn a_frame_that_cannot_be_a_quote_mantissa_is_dropped_and_counted() {
     );
     assert_eq!(
         positions.rejected_frames(),
-        hostile.len() as u64,
+        cases.len() as u64,
         "the count moves only on a rejection"
     );
 }

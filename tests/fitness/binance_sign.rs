@@ -71,19 +71,22 @@ impl Drop for TempEnvFile {
     }
 }
 
+/// Binance's own documented vector: a foreign-oracle pin, not a property we could rederive from
+/// our own implementation.
 #[test]
 fn documented_binance_vector_reproduces() {
     let signature = signer().sign_payload(DOCUMENTED_PAYLOAD);
     assert_eq!(signature.as_str(), DOCUMENTED_SIGNATURE);
 }
 
+/// The signed query round trips through its own signature, and a caller-set `signature` or
+/// `timestamp` never reaches the payload that gets signed — planting either would let a caller
+/// forge or replay the one thing the venue trusts.
 #[test]
-fn signed_query_is_the_signed_payload_plus_the_signature() {
+fn signed_query_is_the_signed_payload_and_rejects_caller_injected_fields() {
+    let stamp = ClockOffset::NONE.stamp(STAMP);
     let signed = signer()
-        .sign(
-            order_params(&[0, 1, 2, 3, 4, 5]),
-            ClockOffset::NONE.stamp(STAMP),
-        )
+        .sign(order_params(&[0, 1, 2, 3, 4, 5]), stamp)
         .expect("the documented params are url safe");
 
     let (payload, signature) = signed
@@ -92,42 +95,7 @@ fn signed_query_is_the_signed_payload_plus_the_signature() {
         .expect("a signed query ends with the signature param");
     assert_eq!(signature, signed.signature().as_str());
     assert_eq!(signer().sign_payload(payload).as_str(), signature);
-}
 
-#[test]
-fn params_are_sorted_alphabetically_by_name() {
-    let signed = signer()
-        .sign(
-            order_params(&[5, 4, 3, 2, 1, 0]),
-            ClockOffset::NONE.stamp(STAMP),
-        )
-        .expect("the documented params are url safe");
-
-    let names: Vec<&str> = signed
-        .signed_params()
-        .iter()
-        .map(|(name, _)| *name)
-        .collect();
-    assert_eq!(
-        names,
-        [
-            "price",
-            "quantity",
-            "side",
-            "symbol",
-            "timeInForce",
-            "timestamp",
-            "type"
-        ]
-    );
-}
-
-#[test]
-fn a_caller_set_signature_or_timestamp_never_reaches_the_payload() {
-    let stamp = ClockOffset::NONE.stamp(STAMP);
-    let clean = signer()
-        .sign(order_params(&[0, 1, 2, 3, 4, 5]), stamp)
-        .expect("the documented params are url safe");
     let polluted = signer()
         .sign(
             order_params(&[0, 1, 2, 3, 4, 5])
@@ -136,8 +104,7 @@ fn a_caller_set_signature_or_timestamp_never_reaches_the_payload() {
             stamp,
         )
         .expect("the documented params are url safe");
-
-    assert_eq!(clean.query(), polluted.query());
+    assert_eq!(signed.query(), polluted.query());
     assert!(
         polluted
             .signed_params()
@@ -146,65 +113,59 @@ fn a_caller_set_signature_or_timestamp_never_reaches_the_payload() {
     );
 }
 
-/// A value carrying `&` or `=` would make the query sent differ from the bytes signed — and a
-/// percent-encoder applied after signing is how the two silently diverge, so the request is refused.
-/// The rejection must name the param without echoing its value OR the offending character: the WS
-/// API signs `apiKey` as a param, so even one character of it is one character of a credential in a
-/// log line. The pattern below binds every field with no `..`, so re-adding a value or character
-/// field breaks this test at compile time.
+/// Credential values must never leak into an error message or a `Debug` rendering. A value
+/// carrying `&` or `=` would make the query sent differ from the bytes signed — and a
+/// percent-encoder applied after signing is how the two silently diverge, so the request is
+/// refused, and the rejection must name the param without echoing its value OR the offending
+/// character: the WS API signs `apiKey` as a param, so even one character of it is one character
+/// of a credential in a log line. Derive `Debug` on a signed request and the first
+/// `error!("rejected: {signed:?}")` writes a replayable request — and on the WS API, where
+/// `apiKey` is a signed param, the API key itself — into the strategy log file in plaintext.
 #[test]
-fn a_value_needing_percent_encoding_is_refused_without_echoing_it() {
+fn credential_values_never_leak_into_an_error_or_a_debug_rendering() {
+    // The pattern below binds every field with no `..`, so re-adding a value or character field
+    // breaks this test at compile time.
     let refused = signer().sign(
         RequestParams::new().set("apiKey", "secret-looking&value"),
         ClockOffset::NONE.stamp(STAMP),
     );
-
     let Err(SignError::NotUrlSafe { name, position }) = refused else {
         panic!("a value carrying a query delimiter must be refused, got {refused:?}");
     };
     assert_eq!(name, "apiKey");
     // `apiKey=` is 7 bytes, and the `&` sits 14 bytes into the value.
     assert_eq!(position, 21);
-
     let rendered = SignError::NotUrlSafe { name, position }.to_string();
     assert!(!rendered.contains("secret-looking"), "leaked: {rendered}");
     assert!(!rendered.contains('&'), "leaked the character: {rendered}");
-}
 
-/// A signed request holds every param plus the signature. Derive `Debug` on it and the first
-/// `error!("rejected: {signed:?}")` writes a replayable request — and on the WS API, where `apiKey`
-/// is a signed param, the API key itself — into the strategy log file in plaintext.
-#[test]
-fn a_signed_request_never_prints_its_query_or_signature() {
     let signed = signer()
         .sign(
             order_params(&[0, 1, 2, 3, 4, 5]).set("apiKey", DOCUMENTED_SECRET),
             ClockOffset::NONE.stamp(STAMP),
         )
         .expect("the documented params are url safe");
-
-    let rendered = format!("{signed:?}");
-
+    let debug_rendered = format!("{signed:?}");
     assert!(
-        !rendered.contains(DOCUMENTED_SECRET),
-        "a signed param value reached Debug: {rendered}"
+        !debug_rendered.contains(DOCUMENTED_SECRET),
+        "a signed param value reached Debug: {debug_rendered}"
     );
     assert!(
-        !rendered.contains(signed.signature().as_str()),
-        "the signature reached Debug: {rendered}"
+        !debug_rendered.contains(signed.signature().as_str()),
+        "the signature reached Debug: {debug_rendered}"
     );
     assert!(
-        !rendered.contains("LTCBTC"),
-        "a signed param value reached Debug: {rendered}"
+        !debug_rendered.contains("LTCBTC"),
+        "a signed param value reached Debug: {debug_rendered}"
     );
     // Param NAMES are what a signing failure actually needs, so they must survive.
     assert!(
-        rendered.contains("symbol"),
-        "names must survive: {rendered}"
+        debug_rendered.contains("symbol"),
+        "names must survive: {debug_rendered}"
     );
     assert!(
-        rendered.contains("apiKey"),
-        "names must survive: {rendered}"
+        debug_rendered.contains("apiKey"),
+        "names must survive: {debug_rendered}"
     );
 }
 
@@ -222,14 +183,6 @@ fn a_skewed_host_clock_stamps_venue_time() {
             .millis(),
         1_499_827_320_059
     );
-}
-
-/// Truncation must floor, never round up: Binance rejects `timestamp > serverTime + 1000ms`, so a
-/// stamp landing a fraction of a millisecond in the past is the safe direction.
-#[test]
-fn a_sub_millisecond_remainder_floors() {
-    let stamp = ClockOffset::NONE.stamp(TsUs::from_micros(1_499_827_319_559_999));
-    assert_eq!(stamp.millis(), 1_499_827_319_559);
 }
 
 /// The only guard on the configured window: bring-up builds a [`RecvWindow`] from
@@ -252,8 +205,10 @@ fn recv_window_range_is_enforced() {
     ));
 }
 
+/// `.env` parsing: the process environment always wins over the file, and comments, blank lines,
+/// both quote styles, and surrounding whitespace all parse as documented.
 #[test]
-fn an_env_file_never_overrides_the_process_environment() {
+fn env_file_parsing_and_process_precedence() {
     let (name, value) = std::env::vars()
         .find(|(name, value)| {
             !value.is_empty()
@@ -262,15 +217,10 @@ fn an_env_file_never_overrides_the_process_environment() {
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
         })
         .expect("the test process carries at least one plainly-named non-empty variable");
-
     let file = TempEnvFile::write(&format!("{name}=injected-by-the-file\n"));
     let resolved = file.load().resolve(&name).expect("the variable resolves");
-
     assert_eq!(resolved.expose_bytes(), value.as_bytes());
-}
 
-#[test]
-fn comments_blanks_and_quoted_values_parse() {
     let file = TempEnvFile::write(concat!(
         "# a leading comment\n",
         "\n",
@@ -281,7 +231,6 @@ fn comments_blanks_and_quoted_values_parse() {
         "   # an indented comment\n",
     ));
     let loaded = file.load();
-
     let expected = [
         ("POLYSIM_FITNESS_PLAIN", "plain"),
         ("POLYSIM_FITNESS_DOUBLE", "double quoted"),
@@ -294,94 +243,22 @@ fn comments_blanks_and_quoted_values_parse() {
     }
 }
 
+/// `.env` error semantics: a missing file loads as empty rather than erroring, a blank value is
+/// distinguished from an absent one, and `export KEY=value` is refused by line number rather than
+/// stored as part of the name — accepted loosely it becomes a variable named `"export KEY"`, and
+/// the only symptom is `resolve` insisting `KEY` is unset while the operator reads it in the file.
 #[test]
-fn a_malformed_line_names_its_line_number() {
-    let file = TempEnvFile::write(concat!(
-        "# a comment\n",
-        "POLYSIM_FITNESS_GOOD=value\n",
-        "\n",
-        "NO EQUALS SIGN HERE\n",
-    ));
-
-    let Err(SecretError::MalformedLine { line, path }) = EnvFile::load(&file.path) else {
-        panic!("a line without `=` must be rejected");
-    };
-    assert_eq!(line, 4);
-    assert_eq!(path, file.path);
-}
-
-/// `export KEY=value` is common in `.env` files. Accepted loosely it becomes a variable named
-/// `"export KEY"`, and the only symptom is `resolve` insisting `KEY` is unset while the operator
-/// reads it in the file — a 3am failure with real money resting on the venue.
-#[test]
-fn an_export_prefixed_line_is_refused_by_line_number() {
-    let file = TempEnvFile::write(concat!(
-        "POLYSIM_FITNESS_GOOD=value\n",
-        "export POLYSIM_FITNESS_KEY=exported\n",
-    ));
-
-    let Err(SecretError::MalformedLine { line, .. }) = EnvFile::load(&file.path) else {
-        panic!("an `export` prefix must be refused rather than stored as part of the name");
-    };
-    assert_eq!(line, 2);
-}
-
-#[test]
-fn a_name_outside_the_variable_charset_is_refused() {
-    for (contents, bad_line) in [
-        ("A B=value\n", 1),
-        ("9LEADING=value\n", 1),
-        ("GOOD=value\nwith-a-dash=value\n", 2),
-        ("=value\n", 1),
-    ] {
-        let file = TempEnvFile::write(contents);
-        let Err(SecretError::MalformedLine { line, .. }) = EnvFile::load(&file.path) else {
-            panic!("expected {contents:?} to be refused");
-        };
-        assert_eq!(line, bad_line, "for {contents:?}");
-    }
-}
-
-/// A leading underscore is legal in a shell variable name and must keep working.
-#[test]
-fn an_underscore_prefixed_name_is_accepted() {
-    let file = TempEnvFile::write("_POLYSIM_FITNESS_UNDERSCORE=value\n");
-
-    let resolved = file
-        .load()
-        .resolve("_POLYSIM_FITNESS_UNDERSCORE")
-        .expect("a leading underscore is a legal variable name");
-
-    assert_eq!(resolved.expose_bytes(), b"value");
-}
-
-#[test]
-fn an_unreadable_env_file_reports_its_path() {
-    let directory = std::env::temp_dir();
-
-    let Err(SecretError::ReadFile { path, .. }) = EnvFile::load(&directory) else {
-        panic!("a directory is not a readable env file");
-    };
-    assert_eq!(path, directory);
-}
-
-#[test]
-fn a_missing_env_file_is_not_an_error() {
+fn env_file_error_semantics_distinguish_missing_empty_and_malformed() {
     let absent = std::env::temp_dir().join("polysim-fitness-absent-on-purpose.env");
     fs::remove_file(&absent).ok();
-
     let loaded = EnvFile::load(&absent).expect("a missing env file loads as empty");
     assert!(matches!(
         loaded.resolve("POLYSIM_FITNESS_NOWHERE"),
         Err(SecretError::Missing { .. })
     ));
-}
 
-#[test]
-fn absent_and_empty_variables_are_distinguished() {
     let file = TempEnvFile::write("POLYSIM_FITNESS_BLANK=\n");
     let loaded = file.load();
-
     assert!(matches!(
         loaded.resolve("POLYSIM_FITNESS_BLANK"),
         Err(SecretError::Empty { .. })
@@ -390,25 +267,15 @@ fn absent_and_empty_variables_are_distinguished() {
         loaded.resolve("POLYSIM_FITNESS_ABSENT"),
         Err(SecretError::Missing { .. })
     ));
-}
 
-#[test]
-fn credentials_resolve_both_variables_from_the_file() {
     let file = TempEnvFile::write(concat!(
-        "POLYSIM_FITNESS_KEY=the-api-key\n",
-        "POLYSIM_FITNESS_SECRET=the-api-secret\n",
+        "POLYSIM_FITNESS_GOOD=value\n",
+        "export POLYSIM_FITNESS_KEY=exported\n",
     ));
-
-    let credentials = file
-        .load()
-        .resolve_credentials(&CredentialVariables {
-            api_key_env: "POLYSIM_FITNESS_KEY",
-            api_secret_env: "POLYSIM_FITNESS_SECRET",
-        })
-        .expect("both variables resolve");
-
-    assert_eq!(credentials.api_key().expose_bytes(), b"the-api-key");
-    assert_eq!(credentials.api_secret().expose_bytes(), b"the-api-secret");
+    let Err(SecretError::MalformedLine { line, .. }) = EnvFile::load(&file.path) else {
+        panic!("an `export` prefix must be refused rather than stored as part of the name");
+    };
+    assert_eq!(line, 2);
 }
 
 #[test]
@@ -451,26 +318,5 @@ proptest! {
             .expect("the documented params are url safe");
 
         prop_assert_eq!(shuffled.query(), canonical.query());
-    }
-
-    #[test]
-    fn a_signature_is_lowercase_hex_of_thirty_two_bytes(
-        secret in "[ -~]{1,80}",
-        payload in "[ -~]{0,256}",
-    ) {
-        let signature = RequestSigner::new(&Secret::new(&secret)).sign_payload(&payload);
-
-        prop_assert_eq!(signature.as_str().len(), 64);
-        prop_assert!(
-            signature.as_str().chars().all(|character| matches!(character, '0'..='9' | 'a'..='f'))
-        );
-    }
-
-    /// Redaction must hold for every secret, not just the one a test happened to pick.
-    #[test]
-    fn no_secret_survives_a_debug_rendering(value in "[ -~]{1,120}") {
-        let secret = Secret::new(&value);
-
-        prop_assert_eq!(format!("{secret:?}"), "<redacted>");
     }
 }

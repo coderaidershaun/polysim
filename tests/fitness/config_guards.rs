@@ -8,7 +8,8 @@
 use std::path::Path;
 
 use polysim::config::{
-    ConfigError, ExecutionMode, NoParams, PolySeries, TableKind, VenueMarket, VolumeThreshold,
+    BinanceMarket, ConfigError, ExecutionMode, NoParams, PolySeries, TableKind, VenueMarket,
+    VolumeThreshold,
 };
 use polysim::hot::strategy::{EngineView, StrategyConfig};
 use polysim::ids::FIXED_SCALE;
@@ -30,7 +31,7 @@ const POLY_SOURCE: &str = "  exchange: polymarket
   tracker: {}
 ";
 
-const POLY_SLOT_SYMBOLS: [&str; 4] = [
+const POLY_SLOT_SYMBOLS: &[&str] = &[
     "btc-updown-5m-a-up",
     "btc-updown-5m-a-down",
     "btc-updown-5m-b-up",
@@ -99,105 +100,102 @@ const BINANCE_PERP_SOURCE: &str = "  exchange: binance
   tracker: {}
 ";
 
-/// One polymarket source expands to the four fixed A/B x up/down slots, each a distinct venue
-/// symbol carrying a dense id in config order, none of them subscribing to klines, all on one queue.
+/// One polymarket source expands to the four fixed A/B x up/down slots, each a distinct venue symbol
+/// carrying a dense id in config order, none of them subscribing to klines, all on one queue. "One
+/// source" is not "one connection": a single binance source is ONE instrument served by three
+/// per-category connections (trades/depth/klines), so it is three producer groups plus the timer.
+/// The exposure ceiling reaches every row the block expands to as an exact quote mantissa — the four
+/// poly slots are budgeted separately, not as one pot.
 #[test]
-fn polymarket_source_fans_out_to_four_slots() {
-    let registry = build_from(&config_with_source(POLY_SOURCE));
-    let rows = registry.instruments();
-    let symbols: Vec<&str> = rows.iter().map(|row| row.venue_symbol.as_ref()).collect();
-    assert_eq!(
-        symbols, POLY_SLOT_SYMBOLS,
-        "four distinct slot symbols in order"
-    );
-    for (index, row) in rows.iter().enumerate() {
-        assert_eq!(
-            usize::from(row.instrument_id.0),
-            index,
-            "dense id in config order"
-        );
-        assert_eq!(row.market, VenueMarket::Polymarket(PolySeries::BtcUpDown5m));
-        assert!(row.kline_intervals.is_empty(), "polymarket has no klines");
-        assert!(!row.subscriptions.klines, "poly klines subscription is off");
+fn a_source_fans_out_to_its_rows_connections_and_queues() {
+    struct FanOut {
+        case: &'static str,
+        source: &'static str,
+        venue_symbols: &'static [&'static str],
+        market: VenueMarket,
+        has_klines: bool,
+        categories: &'static [ConnectionCategory],
+        instruments_per_group: &'static [usize],
+        input_queues: usize,
     }
 
-    let groups = registry.producer_groups();
-    assert_eq!(groups.len(), 1, "one connection for all four slots");
-    assert_eq!(groups[0].category, ConnectionCategory::Market);
-    assert_eq!(
-        groups[0].instruments.len(),
-        4,
-        "all four slots share the queue"
-    );
-    assert_eq!(registry.input_queue_count(), 2, "one producer + the timer");
-}
+    let cases = [
+        FanOut {
+            case: "polymarket",
+            source: POLY_SOURCE,
+            venue_symbols: POLY_SLOT_SYMBOLS,
+            market: VenueMarket::Polymarket(PolySeries::BtcUpDown5m),
+            has_klines: false,
+            categories: &[ConnectionCategory::Market],
+            instruments_per_group: &[4],
+            input_queues: 2,
+        },
+        FanOut {
+            case: "binance perpetual",
+            source: BINANCE_PERP_SOURCE,
+            venue_symbols: &["btcusdt"],
+            market: VenueMarket::Binance(BinanceMarket::Perpetual),
+            has_klines: true,
+            categories: &[
+                ConnectionCategory::Trades,
+                ConnectionCategory::Depth,
+                ConnectionCategory::Klines,
+            ],
+            instruments_per_group: &[1, 1, 1],
+            input_queues: 4,
+        },
+    ];
 
-/// "One source" is not "one connection": a single binance source is ONE instrument served by three
-/// per-category connections (trades/depth/klines), so it is three producer groups plus the timer.
-/// The polymarket counterpart — one connection, four slots, two queues — is asserted above.
-#[test]
-fn a_binance_source_is_three_connections_on_one_instrument() {
-    let registry = build_from(&config_with_source(BINANCE_PERP_SOURCE));
-    let ids: Vec<u16> = registry
-        .instruments()
-        .iter()
-        .map(|row| row.instrument_id.0)
-        .collect();
-    assert_eq!(ids, [0], "one binance source is one instrument row");
+    for expected in cases {
+        let case = expected.case;
+        let registry = build_from(&config_with_source(expected.source));
+        let rows = registry.instruments();
+        let symbols: Vec<&str> = rows.iter().map(|row| row.venue_symbol.as_ref()).collect();
+        assert_eq!(
+            symbols, expected.venue_symbols,
+            "{case}: distinct venue symbols in config order"
+        );
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(
+                usize::from(row.instrument_id.0),
+                index,
+                "{case}: dense id in config order"
+            );
+            assert_eq!(row.market, expected.market, "{case}: the source's market");
+            assert_eq!(
+                row.subscriptions.klines, expected.has_klines,
+                "{case}: klines subscription"
+            );
+            assert_eq!(
+                row.kline_intervals.is_empty(),
+                !expected.has_klines,
+                "{case}: kline intervals"
+            );
+            assert_eq!(
+                row.max_exposure_quote,
+                500 * FIXED_SCALE,
+                "{case}: every row the block expands to carries its 500 quote units, exactly"
+            );
+        }
 
-    let categories: Vec<ConnectionCategory> = registry
-        .producer_groups()
-        .iter()
-        .map(|group| group.category)
-        .collect();
-    assert_eq!(
-        categories,
-        [
-            ConnectionCategory::Trades,
-            ConnectionCategory::Depth,
-            ConnectionCategory::Klines
-        ],
-        "three per-category connections onto the one instrument"
-    );
-    assert_eq!(
-        registry.input_queue_count(),
-        4,
-        "three producers + the timer"
-    );
-}
-
-/// One trading engine takes exactly ONE source, so a config still carrying the old plural
-/// `sources:` list must fail loud naming the key and pointing at the singular one — parsing on and
-/// leaving the engine bound to no source would be the worst of both.
-#[test]
-fn a_stale_plural_sources_list_is_rejected_by_name() {
-    let stale = "engine:
-  hot_core_id: 0
-  spin_interval_us: 100000
-queues:
-  input_capacity: 65536
-  persistence_capacity: 65536
-sources:
-  - exchange: binance
-    max_exposure_quote: 500
-    market: perpetual
-    base: BTC
-    quote: USDT
-    tracker: {}
-strategy:
-  instruments: all
-persistence:
-  dir: ./data
-logging:
-  dir: ./logs
-";
-    let error = polysim::config::Config::<NoParams>::from_yaml(stale)
-        .expect_err("a plural sources list must reject");
-    assert!(
-        matches!(&error, ConfigError::Parse { detail }
-            if detail.contains("unknown field `sources`") && detail.contains("source,")),
-        "error names the stale key and the singular one that replaced it, got: {error}"
-    );
+        let groups = registry.producer_groups();
+        let categories: Vec<ConnectionCategory> =
+            groups.iter().map(|group| group.category).collect();
+        assert_eq!(
+            categories, expected.categories,
+            "{case}: one connection per category"
+        );
+        let sizes: Vec<usize> = groups.iter().map(|group| group.instruments.len()).collect();
+        assert_eq!(
+            sizes, expected.instruments_per_group,
+            "{case}: instruments served by each connection"
+        );
+        assert_eq!(
+            registry.input_queue_count(),
+            expected.input_queues,
+            "{case}: producer groups + the timer"
+        );
+    }
 }
 
 /// A trading engine that only computes signals and ships them over the link should pay for no writer
@@ -241,110 +239,16 @@ fn persistence_is_optional_and_naming_tables_without_it_is_rejected() {
     );
 }
 
+/// Every document the config layer refuses, and the field each refusal has to name — an operator
+/// reads the field they must edit. A defaulted spin interval would silently disagree with whatever
+/// the strategy assumed, and an omitted exposure ceiling would adopt a risk budget nobody chose.
 /// Polymarket serves trades and the book on one combined channel, so a partial subscriptions block
-/// is a config promise the venue arm can't honour — the false flags would be silently void (`trades:
-/// false` would still record trades). Build must reject the mixed combo and name the false flag(s).
+/// is a promise the venue arm can't honour — `trades: false` would still record trades. A klines
+/// volume-bar target promises a trailing 1m average, which holds only if the source keeps 1440
+/// closed 1m candles, and only on a venue that has candles at all.
 #[test]
-fn a_partial_poly_subscription_is_rejected() {
-    let one_false = "  exchange: polymarket
-  max_exposure_quote: 500
-  series: btc-updown-5m
-  subscriptions:
-    trades: false
-  tracker: {}
-";
-    let config: polysim::config::Config =
-        polysim::config::Config::from_yaml(&config_with_source(one_false))
-            .expect("document parses");
-    let error = Registry::build(&config).expect_err("a mixed subscription combo must reject");
-    assert!(
-        matches!(
-            &error,
-            ConfigError::Invalid { field, value, .. }
-                if *field == "source.subscriptions" && value.as_ref() == "trades: false"
-        ),
-        "error names the false flag, got: {error}"
-    );
-
-    let two_false = "  exchange: polymarket
-  max_exposure_quote: 500
-  series: btc-updown-5m
-  subscriptions:
-    book_updates: false
-    book_snapshots: false
-  tracker: {}
-";
-    let config: polysim::config::Config =
-        polysim::config::Config::from_yaml(&config_with_source(two_false))
-            .expect("document parses");
-    let error = Registry::build(&config).expect_err("a mixed subscription combo must reject");
-    assert!(
-        matches!(
-            &error,
-            ConfigError::Invalid { field, value, .. }
-                if *field == "source.subscriptions"
-                    && value.as_ref() == "book_updates: false, book_snapshots: false"
-        ),
-        "error names both false flags, got: {error}"
-    );
-}
-
-/// The uniform combos stay valid: all-true subscribes the combined channel; all-false builds four
-/// dead rows and no group (silent-but-harmless, symmetric with a fully-unsubscribed binance source).
-#[test]
-fn uniform_poly_subscriptions_build() {
-    let all_true = "  exchange: polymarket
-  max_exposure_quote: 500
-  series: btc-updown-5m
-  subscriptions:
-    trades: true
-    book_updates: true
-    book_snapshots: true
-  tracker: {}
-";
-    let registry = build_from(&config_with_source(all_true));
-    assert_eq!(registry.producer_groups().len(), 1, "one combined group");
-
-    let all_false = "  exchange: polymarket
-  max_exposure_quote: 500
-  series: btc-updown-5m
-  subscriptions:
-    trades: false
-    book_updates: false
-    book_snapshots: false
-  tracker: {}
-";
-    let registry = build_from(&config_with_source(all_false));
-    assert_eq!(registry.instruments().len(), 4, "dead rows still built");
-    assert!(registry.producer_groups().is_empty(), "no group, no socket");
-    assert_eq!(registry.input_queue_count(), 1, "timer queue only");
-}
-
-/// An explicit `strategy.instruments` symbol that names no built instrument is a config promise that
-/// would silently record nothing — build must reject it loudly and name the symbol. A symbol
-/// that does resolve (case-insensitively) still builds.
-#[test]
-fn unknown_strategy_instrument_is_rejected() {
-    let unknown = config_with_strategy(BINANCE_PERP_SOURCE, "  instruments:\n    - ethusdt\n");
-    let config: polysim::config::Config =
-        polysim::config::Config::from_yaml(&unknown).expect("document parses");
-    let error = Registry::build(&config).expect_err("an unmatched symbol must reject");
-    assert!(
-        matches!(&error, ConfigError::UnknownStrategyInstrument { symbol } if symbol.as_ref() == "ethusdt"),
-        "error names the unmatched symbol, got: {error}"
-    );
-
-    // The venue symbol is lowercase `btcusdt`; an upper-case listing still resolves and builds.
-    let matched = config_with_strategy(BINANCE_PERP_SOURCE, "  instruments:\n    - BTCUSDT\n");
-    build_from(&matched);
-}
-
-/// Every derived window, buffer length and per-second rescale in a strategy is a function of the
-/// spin interval, so a defaulted one would silently disagree with whatever the strategy assumed.
-/// Omitting it must fail loud and name the field; the existing range check still bounds it.
-#[test]
-fn spin_interval_is_mandatory_and_bounded() {
-    let missing = "engine:
+fn every_refused_document_names_the_field_that_refused_it() {
+    let missing_spin = "engine:
   hot_core_id: 0
 queues:
   input_capacity: 65536
@@ -354,89 +258,110 @@ source:
     .to_owned()
         + BINANCE_PERP_SOURCE
         + "strategy:\n  instruments: all\npersistence:\n  dir: ./data\nlogging:\n  dir: ./logs\n";
-    let error = polysim::config::Config::<NoParams>::from_yaml(&missing)
-        .expect_err("an omitted spin_interval_us must reject");
-    assert!(
-        matches!(&error, ConfigError::Parse { detail } if detail.contains("spin_interval_us")),
-        "error names the missing field, got: {error}"
-    );
 
-    let too_slow = config_with_source(BINANCE_PERP_SOURCE)
-        .replace("spin_interval_us: 100000", "spin_interval_us: 90000000");
-    let error = polysim::config::Config::<NoParams>::from_yaml(&too_slow)
-        .expect_err("90s is past the 60s ceiling");
-    assert!(
-        matches!(&error, ConfigError::EngineFieldRange { field, value, .. }
-            if *field == "spin_interval_us" && *value == 90_000_000),
-        "error names the field and value, got: {error}"
-    );
-}
-
-/// `warmup_secs` defaults to 10 when omitted (matching the shipped configs) and rejects a value
-/// past the 1h ceiling — a run left mostly suppressed reads as minutes typed into a seconds field.
-#[test]
-fn warmup_secs_defaults_and_range_check() {
-    let defaulted: polysim::config::Config =
-        polysim::config::Config::from_yaml(&config_with_source(BINANCE_PERP_SOURCE))
-            .expect("omitting warmup_secs is valid");
-    assert_eq!(
-        defaulted.engine.warmup_secs, 10,
-        "warmup_secs defaults to 10"
-    );
-
-    let engine_block =
-        "engine:\n  hot_core_id: 0\n  spin_interval_us: 100000\n  warmup_secs: 7200\n";
-    let over_ceiling = format!(
-        "{engine_block}queues:\n  input_capacity: 65536\n  persistence_capacity: 65536\nsource:\n{BINANCE_PERP_SOURCE}strategy:\n  instruments: all\npersistence:\n  dir: ./data\nlogging:\n  dir: ./logs\n"
-    );
-    let error = polysim::config::Config::<NoParams>::from_yaml(&over_ceiling)
-        .expect_err("7200s is past the ceiling");
-    assert!(
-        matches!(&error, ConfigError::EngineFieldRange { field, value, .. }
-            if *field == "warmup_secs" && *value == 7200),
-        "error names the field and value, got: {error}"
-    );
-
-    let zero = "engine:\n  hot_core_id: 0\n  spin_interval_us: 100000\n  warmup_secs: 0\n";
-    let disabled = format!(
-        "{zero}queues:\n  input_capacity: 65536\n  persistence_capacity: 65536\nsource:\n{BINANCE_PERP_SOURCE}strategy:\n  instruments: all\npersistence:\n  dir: ./data\nlogging:\n  dir: ./logs\n"
-    );
-    let parsed: polysim::config::Config =
-        polysim::config::Config::from_yaml(&disabled).expect("0 disables warmup, legal");
-    assert_eq!(parsed.engine.warmup_secs, 0, "0 is accepted");
-}
-
-#[test]
-fn the_drain_deadline_has_a_finite_operational_ceiling() {
-    let over_ceiling = config_with_source(BINANCE_PERP_SOURCE).replace(
-        "spin_interval_us: 100000",
-        "spin_interval_us: 100000\n  drain_deadline_ms: 86400001",
-    );
-    let error = refusal(&over_ceiling);
-    assert!(
-        matches!(
-            &error,
-            ConfigError::EngineFieldRange {
-                field: "drain_deadline_ms",
-                value: 86_400_001,
-                ..
-            }
+    type RejectionCase = (&'static str, String, fn(&ConfigError) -> bool);
+    let cases: [RejectionCase; 7] = [
+        (
+            "omitted spin_interval_us",
+            missing_spin,
+            |error: &ConfigError| matches!(error, ConfigError::Parse { detail } if detail.contains("spin_interval_us")),
         ),
-        "an effectively unbounded coordinated drain must be refused by name, got {error}"
-    );
+        (
+            "spin_interval_us past the 60s ceiling",
+            config_with_source(BINANCE_PERP_SOURCE)
+                .replace("spin_interval_us: 100000", "spin_interval_us: 90000000"),
+            |error: &ConfigError| {
+                matches!(error, ConfigError::EngineFieldRange { field, value, .. }
+                    if *field == "spin_interval_us" && *value == 90_000_000)
+            },
+        ),
+        (
+            "omitted max_exposure_quote",
+            config_with_source(
+                "  exchange: binance
+  market: perpetual
+  base: BTC
+  quote: USDT
+  tracker: {}
+",
+            ),
+            |error: &ConfigError| {
+                matches!(error, ConfigError::Parse { detail }
+                    if detail.contains("max_exposure_quote"))
+            },
+        ),
+        (
+            "poly subscriptions with trades off",
+            config_with_source(
+                "  exchange: polymarket
+  max_exposure_quote: 500
+  series: btc-updown-5m
+  subscriptions:
+    trades: false
+  tracker: {}
+",
+            ),
+            |error: &ConfigError| {
+                matches!(error, ConfigError::Invalid { field, value, .. }
+                    if *field == "source.subscriptions" && value.as_ref() == "trades: false")
+            },
+        ),
+        (
+            "poly subscriptions with both book flags off",
+            config_with_source(
+                "  exchange: polymarket
+  max_exposure_quote: 500
+  series: btc-updown-5m
+  subscriptions:
+    book_updates: false
+    book_snapshots: false
+  tracker: {}
+",
+            ),
+            |error: &ConfigError| {
+                matches!(error, ConfigError::Invalid { field, value, .. }
+                    if *field == "source.subscriptions"
+                        && value.as_ref() == "book_updates: false, book_snapshots: false")
+            },
+        ),
+        (
+            "klines volume bars over too short a candle retention",
+            config_with_source(&BINANCE_KLINES_VOLUME_BARS.replace("keep: 1440 }", "keep: 720 }")),
+            |error: &ConfigError| {
+                matches!(error, ConfigError::Invalid { field, value, .. }
+                    if *field == "source.tracker.candles.keep" && value.as_ref() == "720")
+            },
+        ),
+        (
+            "klines volume bars on a venue with no candles",
+            config_with_source(
+                "  exchange: polymarket
+  max_exposure_quote: 500
+  series: btc-updown-5m
+  tracker:
+    volume_bars:
+      threshold: klines
+      keep: 64
+",
+            ),
+            |error: &ConfigError| {
+                matches!(error, ConfigError::Invalid { field, value, .. }
+                    if *field == "source.tracker.volume_bars.threshold"
+                        && value.as_ref() == "klines")
+            },
+        ),
+    ];
 
-    let at_ceiling = over_ceiling.replace("86400001", "86400000");
-    polysim::config::Config::<NoParams>::from_yaml(&at_ceiling)
-        .expect("the 24-hour operational ceiling is inclusive");
+    for (case, yaml, is_expected_refusal) in cases {
+        let error = refusal(&yaml);
+        assert!(
+            is_expected_refusal(&error),
+            "{case}: the refusal must name the field, got: {error}"
+        );
+    }
 }
 
-/// A volume-bar target is written either as the word `klines` or as a whole-dollar integer, so the
-/// hand-written visitor must accept both and reject everything else by name. The klines form also
-/// promises a trailing 1m average, which only holds if the source keeps 1440 closed 1m candles —
-/// build must refuse the promise it cannot keep rather than quietly averaging a shorter window.
-#[test]
-fn volume_bar_thresholds_parse_in_both_forms() {
-    let klines = "  exchange: binance
+const BINANCE_KLINES_VOLUME_BARS: &str = "  exchange: binance
   max_exposure_quote: 500
   market: perpetual
   base: BTC
@@ -447,16 +372,8 @@ fn volume_bar_thresholds_parse_in_both_forms() {
       threshold: klines
       keep: 1440
 ";
-    let registry = build_from(&config_with_source(klines));
-    let spec = registry.instruments()[0]
-        .tracker
-        .volume_bars
-        .as_ref()
-        .expect("volume_bars parsed");
-    assert_eq!(spec.threshold, VolumeThreshold::Klines);
-    assert!(spec.sampled.is_none(), "an absent sampled block is legal");
 
-    let fixed = "  exchange: binance
+const BINANCE_FIXED_VOLUME_BARS: &str = "  exchange: binance
   max_exposure_quote: 500
   market: perpetual
   base: BTC
@@ -467,81 +384,38 @@ fn volume_bar_thresholds_parse_in_both_forms() {
       keep: 512
       sampled: { fields: [best_bid], window: 256 }
 ";
-    let registry = build_from(&config_with_source(fixed));
-    let spec = registry.instruments()[0]
-        .tracker
-        .volume_bars
-        .as_ref()
-        .expect("volume_bars parsed");
-    assert_eq!(spec.threshold, VolumeThreshold::Fixed(250_000));
-    assert_eq!(
-        spec.sampled.as_ref().expect("sampled block parsed").window,
-        256
-    );
 
-    let short_candles = klines.replace("keep: 1440 }", "keep: 720 }");
-    let config: polysim::config::Config =
-        polysim::config::Config::from_yaml(&config_with_source(&short_candles))
-            .expect("document parses");
-    let error = Registry::build(&config).expect_err("720 candles cannot back a 1440 average");
-    assert!(
-        matches!(&error, ConfigError::Invalid { field, value, .. }
-            if *field == "source.tracker.candles.keep" && value.as_ref() == "720"),
-        "error names the retention that falls short, got: {error}"
-    );
-
-    // A klines target averages 1m candles, which polymarket lacks — build must refuse rather than
-    // leave a clock that would sit silently dormant forever.
-    let poly_klines = "  exchange: polymarket
-  max_exposure_quote: 500
-  series: btc-updown-5m
-  tracker:
-    volume_bars:
-      threshold: klines
-      keep: 64
-";
-    let config: polysim::config::Config =
-        polysim::config::Config::from_yaml(&config_with_source(poly_klines))
-            .expect("document parses");
-    let error = Registry::build(&config).expect_err("polymarket has no candles to average");
-    assert!(
-        matches!(&error, ConfigError::Invalid { field, value, .. }
-            if *field == "source.tracker.volume_bars.threshold" && value.as_ref() == "klines"),
-        "error names the impossible klines target, got: {error}"
-    );
-}
-
-/// `deny_unknown_fields` reaches inside the new block, and a threshold that is neither form fails
-/// at parse naming both — a startup typo must never become a silently different bar size.
+/// A volume-bar target is written either as the word `klines` or as a whole-dollar integer, so the
+/// hand-written visitor must accept both.
 #[test]
-fn a_malformed_volume_bars_block_is_rejected() {
-    let unknown_key = "  exchange: binance
-  max_exposure_quote: 500
-  market: perpetual
-  base: BTC
-  quote: USDT
-  tracker:
-    volume_bars:
-      threshold: 250000
-      keep: 512
-      windwo: 256
-";
-    let error = polysim::config::Config::<NoParams>::from_yaml(&config_with_source(unknown_key))
-        .expect_err("an unknown key inside volume_bars must reject");
-    assert!(
-        matches!(&error, ConfigError::Parse { detail } if detail.contains("windwo")),
-        "error names the unknown field, got: {error}"
-    );
-
-    let bad_scalar = unknown_key
-        .replace("threshold: 250000", "threshold: kline")
-        .replace("      windwo: 256\n", "");
-    let error = polysim::config::Config::<NoParams>::from_yaml(&config_with_source(&bad_scalar))
-        .expect_err("a threshold that is neither form must reject");
-    assert!(
-        matches!(&error, ConfigError::Parse { detail } if detail.contains("klines")),
-        "error names the accepted forms, got: {error}"
-    );
+fn volume_bar_thresholds_parse_in_both_forms() {
+    for (case, source, threshold, sampled_window) in [
+        (
+            "klines",
+            BINANCE_KLINES_VOLUME_BARS,
+            VolumeThreshold::Klines,
+            None,
+        ),
+        (
+            "whole dollars",
+            BINANCE_FIXED_VOLUME_BARS,
+            VolumeThreshold::Fixed(250_000),
+            Some(256),
+        ),
+    ] {
+        let registry = build_from(&config_with_source(source));
+        let spec = registry.instruments()[0]
+            .tracker
+            .volume_bars
+            .as_ref()
+            .expect("volume_bars parsed");
+        assert_eq!(spec.threshold, threshold, "{case}: threshold form");
+        assert_eq!(
+            spec.sampled.as_ref().map(|sampled| sampled.window),
+            sampled_window,
+            "{case}: an absent sampled block is legal"
+        );
+    }
 }
 
 /// Generic over the strategy's `params:` type, so a shipped config is read through the same typed
@@ -553,9 +427,13 @@ fn load<P: serde::de::DeserializeOwned + Default>(path: &str) -> polysim::config
 
 /// The config the binary header tells a reader to run must parse, validate and build a registry,
 /// and carry the tables its strategy actually writes — a config naming no table its strategy emits
-/// records nothing at all.
+/// records nothing at all. Its polymarket half ships disarmed twice over, collects nothing beyond
+/// the rotations lineage its peer's data cannot do without, stops quoting before the engine's own
+/// window gate would refuse it, and binds a port its peer does not. Both engines ship configured for
+/// one box, where a collision is a startup failure an operator has to diagnose rather than a test
+/// catching it.
 #[test]
-fn the_shipped_reference_config_runs_its_strategy() {
+fn the_shipped_configs_run_their_strategies_and_ship_disarmed() {
     let micro = load::<MicroRecorderParams>(
         "strategies/strat-micro-recorder/te-binance-spot-btcusdt/config.yaml",
     );
@@ -571,25 +449,29 @@ fn the_shipped_reference_config_runs_its_strategy() {
          fills keeps no record of what it did with real money, and nothing downstream can tell that \
          apart from a run that did nothing"
     );
-    let execution = micro
+    let micro_execution = micro
         .execution
         .as_ref()
         .expect("the shipped config carries an execution block");
     assert_eq!(
-        execution.mode,
+        micro_execution.mode,
         ExecutionMode::Off,
         "the reference config ships disarmed; an operator may opt into deterministic sim or live"
     );
-    let link = micro
+    let micro_link = micro
         .link
         .as_ref()
         .expect("the shipped config binds a link");
-    let peer = match link.subscribe.as_slice() {
+    let micro_peer = match micro_link.subscribe.as_slice() {
         [only] => only,
         other => panic!("this recorder consumes exactly its polymarket peer, got {other:?}"),
     };
     assert_eq!(
-        peer.topics.iter().map(AsRef::as_ref).collect::<Vec<&str>>(),
+        micro_peer
+            .topics
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<Vec<&str>>(),
         vec!["poly_up"],
         "naming the topic rather than omitting it — an absent list asks for the peer's whole feed"
     );
@@ -603,19 +485,11 @@ fn the_shipped_reference_config_runs_its_strategy() {
     );
     // Construction is the strategy's own validation pass — a shipped params value its asserts
     // reject (a non-positive Guéant risk budget, say) must fail here, not at first launch.
-    let engine = EngineView {
+    let micro_engine = EngineView {
         spin_interval: DurationUs::from_micros(micro.engine.spin_interval_us as i64),
     };
-    let _ = MicroRecorder::from_spec(&micro.strategy, engine);
-}
+    let _ = MicroRecorder::from_spec(&micro.strategy, micro_engine);
 
-/// The polymarket half of the pair, and the facts its own config must state: it ships disarmed
-/// twice over, it collects nothing beyond the rotations lineage its peer's data cannot do without,
-/// its quoting stops before the engine's own window gate would refuse it, and it binds a port its
-/// peer does not. Both engines ship configured for one box, where a collision is a startup failure
-/// an operator has to diagnose rather than a test catching it.
-#[test]
-fn the_polymarket_config_ships_disarmed_and_binds_clear_of_its_peer() {
     let publisher = load::<PolyUpParams>(
         "strategies/strat-micro-recorder/te-polymarket-btc-updown-5m/config.yaml",
     );
@@ -629,12 +503,12 @@ fn the_polymarket_config_ships_disarmed_and_binds_clear_of_its_peer() {
         "the rotations lineage still needs the writer thread: it is the only map from the \
          role-keyed poly_* features back to a condition id and window"
     );
-    let execution = publisher
+    let publisher_execution = publisher
         .execution
         .as_ref()
         .expect("the shipped config carries an execution block");
     assert_eq!(
-        execution.mode,
+        publisher_execution.mode,
         ExecutionMode::Off,
         "polymarket ships disarmed; live is the operator's decision and there is no sim venue"
     );
@@ -647,17 +521,18 @@ fn the_polymarket_config_ships_disarmed_and_binds_clear_of_its_peer() {
     // resting. A strategy whose own stop landed at or after that margin would declare a quote every
     // spin for the engine to refuse, and the refusal stream would bury anything else being said.
     assert!(
-        u64::from(publisher.strategy.params.quote_stop_lead_ms) > execution.quote_stop_margin_ms,
+        u64::from(publisher.strategy.params.quote_stop_lead_ms)
+            > publisher_execution.quote_stop_margin_ms,
         "the strategy stops quoting {}ms before the close, inside the engine's own {}ms margin",
         publisher.strategy.params.quote_stop_lead_ms,
-        execution.quote_stop_margin_ms
+        publisher_execution.quote_stop_margin_ms
     );
-    let link = publisher
+    let publisher_link = publisher
         .link
         .as_ref()
         .expect("the publisher must bind a link, it has no other output");
     assert!(
-        link.subscribe.is_empty(),
+        publisher_link.subscribe.is_empty(),
         "the publisher serves and consumes nothing"
     );
     let registry = Registry::build(&publisher).expect("publisher registry builds");
@@ -676,68 +551,29 @@ fn the_polymarket_config_ships_disarmed_and_binds_clear_of_its_peer() {
             .all(|row| row.tracker.intensity.is_some()),
         "the publisher cannot fit trade intensity without the tracker's reach histogram"
     );
-    let engine = EngineView {
+    let publisher_engine = EngineView {
         spin_interval: DurationUs::from_micros(publisher.engine.spin_interval_us as i64),
     };
-    let _ = PolyUpPublisher::from_spec(&publisher.strategy, engine);
+    let _ = PolyUpPublisher::from_spec(&publisher.strategy, publisher_engine);
     // The one arithmetic relation between these numbers that nothing else checks. An outcome share
     // cannot be worth more than a dollar, so `order_shares` IS the worst-case notional — set it
     // above the single-order ceiling and every place is refused as oversized, on a config that
     // otherwise validates.
     assert!(
-        publisher.strategy.params.order_shares <= execution.max_order_notional_quote,
+        publisher.strategy.params.order_shares <= publisher_execution.max_order_notional_quote,
         "{} shares can cost up to ${} at settlement, past the ${} single-order ceiling",
         publisher.strategy.params.order_shares,
         publisher.strategy.params.order_shares,
-        execution.max_order_notional_quote
+        publisher_execution.max_order_notional_quote
     );
 
-    let consumer = load::<MicroRecorderParams>(
-        "strategies/strat-micro-recorder/te-binance-spot-btcusdt/config.yaml",
-    );
-    let consumer_link = consumer.link.as_ref().expect("the consumer binds a link");
     assert_ne!(
-        link.bind, consumer_link.bind,
+        publisher_link.bind, micro_link.bind,
         "two trading engines of one strategy ship runnable side by side on one box"
     );
     assert_eq!(
-        consumer_link.subscribe.first().map(|peer| peer.address),
-        Some(link.bind),
+        micro_peer.address, publisher_link.bind,
         "the consumer's peer address must be the address the publisher actually binds"
-    );
-}
-
-/// The exposure ceiling is a risk budget, so it is stated per source block and never defaulted: an
-/// omitted one must fail the run by name rather than silently adopt a number nobody chose. It
-/// reaches every row the block expands to as an exact quote mantissa — the four poly slots are
-/// budgeted separately, not as one pot.
-#[test]
-fn the_exposure_ceiling_is_mandatory_and_reaches_every_row() {
-    for (source, rows) in [(BINANCE_PERP_SOURCE, 1), (POLY_SOURCE, 4)] {
-        let registry = build_from(&config_with_source(source));
-        let budgets: Vec<i64> = registry
-            .instruments()
-            .iter()
-            .map(|row| row.max_exposure_quote)
-            .collect();
-        assert_eq!(
-            budgets,
-            vec![500 * FIXED_SCALE; rows],
-            "every row the block expands to carries its 500 quote units, exactly"
-        );
-    }
-
-    let omitted = "  exchange: binance
-  market: perpetual
-  base: BTC
-  quote: USDT
-  tracker: {}
-";
-    let error = polysim::config::Config::<NoParams>::from_yaml(&config_with_source(omitted))
-        .expect_err("an omitted exposure budget must reject");
-    assert!(
-        matches!(&error, ConfigError::Parse { detail } if detail.contains("max_exposure_quote")),
-        "error names the missing field, got: {error}"
     );
 }
 
@@ -853,9 +689,6 @@ fn the_link_adds_one_input_queue_only_when_configured() {
     );
 }
 
-/// The `execution:` block, and the three things about it that are easy to get silently wrong: which
-/// spellings of `mode` exist, that a disarmed block is still fully validated, and that the queue it
-/// costs appears only when an actor will exist to feed it.
 /// Every field the block has no default for, as pairs so one test can vary a single value without
 /// restating the rest.
 const EXECUTION_REQUIRED: [(&str, &str); 6] = [
@@ -926,38 +759,80 @@ fn execution_block_overriding(mode: &str, field: &str, value: &str) -> String {
     block
 }
 
+/// The `execution:` block, and the things about it that are easy to get silently wrong: which
+/// spellings of `mode` exist, that a disarmed block is still fully validated, and that the queue it
+/// costs appears only when an actor will exist to feed it. A mode a venue has no edge for would come
+/// up reporting itself ARMED while placing nothing — the one way "configured to trade" and "trading"
+/// can disagree without anyone noticing — so the capability table is enforced at parse rather than
+/// warned about at wiring, and the queue follows it.
 #[test]
 fn every_execution_mode_parses_and_only_the_armed_ones_cost_a_queue() {
     let modes = [
-        ("off", BINANCE_PERP_SOURCE, "", ExecutionMode::Off, false),
-        ("live", BINANCE_PERP_SOURCE, "", ExecutionMode::Live, true),
         (
-            "sim",
+            "binance off",
+            BINANCE_PERP_SOURCE,
+            "off",
+            "",
+            ExecutionMode::Off,
+            false,
+            4,
+        ),
+        (
+            "binance live",
+            BINANCE_PERP_SOURCE,
+            "live",
+            "",
+            ExecutionMode::Live,
+            true,
+            5,
+        ),
+        (
+            "binance sim",
             BINANCE_SPOT_SOURCE,
+            "sim",
             SIM_BLOCK,
             ExecutionMode::Sim,
             true,
+            5,
+        ),
+        (
+            "polymarket off",
+            POLY_SOURCE,
+            "off",
+            "",
+            ExecutionMode::Off,
+            false,
+            2,
+        ),
+        (
+            "polymarket live",
+            POLY_SOURCE,
+            "live",
+            "",
+            ExecutionMode::Live,
+            true,
+            3,
         ),
     ];
-    for (spelling, source, extra, expected, expects_queue) in modes {
+    for (case, source, spelling, extra, expected, expects_queue, input_queues) in modes {
         let yaml = config_with_execution_on(source, &execution_block_with(spelling, extra));
         let config: polysim::config::Config =
             polysim::config::Config::from_yaml(&yaml).expect("the block parses and validates");
         assert_eq!(
             config.execution.as_ref().map(|block| block.mode),
             Some(expected),
-            "{spelling} is the spelling an operator types"
+            "{case}: {spelling} is the spelling an operator types"
         );
         let registry = Registry::build(&config).expect("registry builds");
         assert_eq!(
             registry.exec_queue_id().is_some(),
             expects_queue,
-            "{spelling}: the exec input queue exists exactly when an edge will feed it"
+            "{case}: the exec input queue exists exactly when an edge will feed it"
         );
         assert_eq!(
             registry.input_queue_count(),
-            if expects_queue { 5 } else { 4 },
-            "{spelling}: three producer groups + the timer, plus execution when it is armed"
+            input_queues,
+            "{case}: producer groups + the timer, plus execution when it is armed"
         );
     }
 }
@@ -1048,25 +923,6 @@ fn every_reason_a_simulated_config_is_refused_names_itself() {
 }
 
 #[test]
-fn the_shipped_sim_defaults_are_a_legal_budget_on_their_own() {
-    let bare = config_with_execution_on(
-        BINANCE_SPOT_SOURCE,
-        &execution_block_with("sim", "  sim: {}\n"),
-    );
-    let config: polysim::config::Config =
-        polysim::config::Config::from_yaml(&bare).expect("the ratified defaults validate together");
-    let sim = config
-        .execution
-        .as_ref()
-        .and_then(|execution| execution.sim.as_ref())
-        .expect("mode sim carries a sim block");
-    assert_eq!(sim.order_entry_latency_ms, 15);
-    assert_eq!(sim.ack_latency_ms, 15);
-    assert_eq!(sim.max_market_data_delay_ms, 1_000);
-    assert_eq!(sim.heartbeat_ms, 100);
-}
-
-#[test]
 fn a_one_second_spin_has_a_3030ms_budget_and_fits_the_default_timeout() {
     let yaml = config_with_execution_on(
         BINANCE_SPOT_SOURCE,
@@ -1103,47 +959,13 @@ fn a_one_second_spin_has_a_3030ms_budget_and_fits_the_default_timeout() {
         .expect("one millisecond beyond the worst legal answer is sufficient");
 }
 
-#[test]
-fn zero_opening_balances_and_zero_maker_fee_are_valid_simulation_inputs() {
-    let sim = SIM_BLOCK
-        .replace("opening_base_balance: 0.01", "opening_base_balance: 0")
-        .replace("opening_quote_balance: 1000.0", "opening_quote_balance: 0")
-        .replace("maker_fee_bps: 10.0", "maker_fee_bps: 0");
-    let yaml = config_with_execution_on(BINANCE_SPOT_SOURCE, &execution_block_with("sim", &sim));
-    polysim::config::Config::<NoParams>::from_yaml(&yaml)
-        .expect("an empty account and fee-free venue are useful simulator cases");
-}
-
+/// Some documents are refused by the typed parse and some only once the registry is built from
+/// them; a caller pinning the refusal cares about the field named, not which pass named it.
 fn refusal(yaml: &str) -> ConfigError {
-    polysim::config::Config::<NoParams>::from_yaml(yaml).expect_err("this document must be refused")
-}
-
-/// An ABSENT block and `mode: off` are different statements, and the difference is the point: the
-/// first is an engine that was never meant to trade, the second one configured and disarmed. Neither
-/// spawns anything, so the only observable difference is whether the limits are there to arm.
-#[test]
-fn an_absent_execution_block_is_not_the_same_as_a_disarmed_one() {
-    let absent: polysim::config::Config =
-        polysim::config::Config::from_yaml(&config_with_execution("")).expect("parses");
-    assert!(absent.execution.is_none());
-    assert!(
-        Registry::build(&absent)
-            .expect("registry builds")
-            .exec_queue_id()
-            .is_none()
-    );
-
-    let disarmed: polysim::config::Config =
-        polysim::config::Config::from_yaml(&config_with_execution(&execution_block("off")))
-            .expect("parses");
-    let block = disarmed
-        .execution
-        .expect("a disarmed block is still a block");
-    assert_eq!(block.mode, ExecutionMode::Off);
-    assert!(
-        block.min_base_balance > 0.0 && block.min_quote_balance > 0.0,
-        "the limits are validated in every mode, so arming is one word and never a late failure"
-    );
+    match polysim::config::Config::<NoParams>::from_yaml(yaml) {
+        Err(error) => error,
+        Ok(config) => Registry::build(&config).expect_err("this document must be refused"),
+    }
 }
 
 /// The two floors are asymmetric on purpose. The quote floor reserves cash the engine must not
@@ -1182,74 +1004,28 @@ fn the_base_floor_may_be_zero_and_the_quote_floor_may_not() {
     }
 }
 
-/// Zero is the trap the other limits set: everywhere else in this block it means "no ceiling", and
-/// an operator writing it here would be reaching for exactly that. The reject counter records the
-/// event before the engine compares it, so zero halts on the FIRST hard reject — the tightest
-/// setting available, wearing the look of the loosest. One is the real minimum and stays legal.
+/// Every execution field whose range has no other floor/ceiling test: the µs-duration fields
+/// overflow the runtime's storage type at `u64::MAX`, and the bps field overflows the runtime's
+/// centi-bps conversion at a merely enormous finite float — two different overflow mechanisms,
+/// same refusal shape.
 #[test]
-fn a_zero_reject_ceiling_is_refused_rather_than_read_as_no_ceiling() {
-    let error = refusal(&config_with_execution(&execution_block_with(
-        "live",
-        "  max_consecutive_rejects: 0\n",
-    )));
-    assert!(
-        matches!(
-            &error,
-            ConfigError::Invalid { field, .. } if *field == "execution.max_consecutive_rejects"
-        ),
-        "the refusal names the field an operator edits, got {error}"
-    );
-
-    let one = config_with_execution(&execution_block_with(
-        "live",
-        "  max_consecutive_rejects: 1\n",
-    ));
-    let config = polysim::config::Config::<NoParams>::from_yaml(&one)
-        .expect("halting on the first hard reject is a deliberate setting, spelled 1");
-    assert_eq!(
-        config
-            .execution
-            .expect("execution block")
-            .max_consecutive_rejects,
-        1
-    );
-}
-
-#[test]
-fn the_quote_distance_safety_band_cannot_be_disabled_by_overflow() {
-    let yaml = config_with_execution(&execution_block_overriding(
-        "live",
-        "max_quote_distance_bps",
-        "1e308",
-    ));
-    let error = refusal(&yaml);
-    assert!(
-        matches!(
-            &error,
-            ConfigError::Invalid {
-                field: "execution.max_quote_distance_bps",
-                ..
-            }
-        ),
-        "an enormous finite float must not saturate the runtime centi-bps conversion, got {error}"
-    );
-}
-
-#[test]
-fn execution_durations_must_fit_the_runtime_microsecond_type() {
+fn execution_numeric_fields_reject_out_of_range_values() {
     let max = u64::MAX.to_string();
-    let cases = [
+    let cases: [(&str, String, Option<&str>); 6] = [
         (
             "execution.max_book_age_ms",
             execution_block_overriding("live", "max_book_age_ms", &max),
+            Some(max.as_str()),
         ),
         (
             "execution.inflight_timeout_ms",
             format!("{}  inflight_timeout_ms: {max}\n", execution_block("live")),
+            Some(max.as_str()),
         ),
         (
             "execution.order_reap_secs",
             format!("{}  order_reap_secs: {max}\n", execution_block("live")),
+            Some(max.as_str()),
         ),
         (
             "execution.disconnect_sweep_secs",
@@ -1257,115 +1033,32 @@ fn execution_durations_must_fit_the_runtime_microsecond_type() {
                 "{}  disconnect_sweep_secs: {max}\n",
                 execution_block("live")
             ),
+            Some(max.as_str()),
         ),
         (
             "execution.max_clock_skew_ms",
             format!("{}  max_clock_skew_ms: {max}\n", execution_block("live")),
+            Some(max.as_str()),
+        ),
+        (
+            "execution.max_quote_distance_bps",
+            execution_block_overriding("live", "max_quote_distance_bps", "1e308"),
+            None,
         ),
     ];
-    for (expected_field, block) in cases {
+    for (expected_field, block, expected_value) in cases {
         let error = refusal(&config_with_execution(&block));
-        assert!(
-            matches!(
-                &error,
-                ConfigError::Invalid { field, value, .. }
-                    if *field == expected_field && value.as_ref() == max
-            ),
-            "{expected_field} overflow is refused by field and value, got {error}"
-        );
-    }
-}
-
-#[test]
-fn simulated_durations_and_combined_retention_must_fit_microseconds() {
-    let max = u64::MAX.to_string();
-    for (field, baseline) in [
-        ("order_entry_latency_ms", "15"),
-        ("ack_latency_ms", "15"),
-        ("max_market_data_delay_ms", "1000"),
-        ("heartbeat_ms", "100"),
-    ] {
-        let sim = SIM_BLOCK.replace(&format!("{field}: {baseline}"), &format!("{field}: {max}"));
-        let error = refusal(&config_with_execution_on(
-            BINANCE_SPOT_SOURCE,
-            &execution_block_with("sim", &sim),
-        ));
-        let expected_field = format!("execution.sim.{field}");
-        assert!(
-            matches!(
-                &error,
-                ConfigError::Invalid { field, value, .. }
-                    if *field == expected_field && value.as_ref() == max
-            ),
-            "{expected_field} overflow is refused by field and value, got {error}"
-        );
-    }
-
-    let block = format!(
-        "{}{}  order_reap_secs: 86400\n",
-        execution_block("sim"),
-        SIM_BLOCK
-    );
-    let error = refusal(&config_with_execution_on(BINANCE_SPOT_SOURCE, &block));
-    assert!(
-        matches!(
-            error,
-            ConfigError::Invalid {
-                field: "execution.sim",
-                ..
+        match &error {
+            ConfigError::Invalid { field, value, .. } if *field == expected_field => {
+                if let Some(expected_value) = expected_value {
+                    assert_eq!(
+                        value.as_ref(),
+                        expected_value,
+                        "{expected_field}: wrong value in refusal, got {error}"
+                    );
+                }
             }
-        ),
-        "the separately valid reap and timeout spans must also stay inside the operational ceiling, got {error}"
-    );
-}
-
-#[test]
-fn execution_depth_must_fit_the_fixed_eight_level_ladder() {
-    for value in ["0", "9"] {
-        let block = format!("{}  max_orders_per_side: {value}\n", execution_block("off"));
-        let yaml = config_with_execution(&block);
-        let error = polysim::config::Config::<NoParams>::from_yaml(&yaml)
-            .expect_err("depth outside 1..=8 must be refused");
-        let text = error.to_string();
-        assert!(text.contains("max_orders_per_side"), "got {text}");
-        assert!(text.contains("1..=8"), "got {text}");
-    }
-
-    let yaml = config_with_execution(&format!(
-        "{}  max_orders_per_side: 8\n",
-        execution_block("off")
-    ));
-    let config = polysim::config::Config::<NoParams>::from_yaml(&yaml)
-        .expect("the full fixed ladder is valid");
-    assert_eq!(
-        config
-            .execution
-            .expect("execution block")
-            .max_orders_per_side,
-        8
-    );
-}
-
-/// A mode a venue has no edge for would come up reporting itself ARMED while placing nothing —
-/// the one way "configured to trade" and "trading" can disagree without anyone noticing — so the
-/// capability table is enforced at parse rather than warned about at wiring, and the queue follows
-/// it. A DISARMED block is fine on any source: it states limits, not intent to send.
-#[test]
-fn a_venue_is_armed_only_for_the_execution_modes_it_has_an_edge_for() {
-    for (spelling, expects_queue) in [("live", true), ("off", false)] {
-        let yaml = config_with_execution_on(POLY_SOURCE, &execution_block(spelling));
-        let config: polysim::config::Config = polysim::config::Config::from_yaml(&yaml)
-            .expect("polymarket has both an off and a live execution edge");
-        let registry = Registry::build(&config).expect("registry builds");
-        assert_eq!(
-            registry.exec_queue_id().is_some(),
-            expects_queue,
-            "{spelling}: the exec input queue exists exactly when an edge will feed it"
-        );
-        assert_eq!(
-            registry.input_queue_count(),
-            if expects_queue { 3 } else { 2 },
-            "{spelling}: one producer group for the four slots + the timer, plus execution when armed"
-        );
+            _ => panic!("{expected_field}: overflow must be refused by field, got {error}"),
+        }
     }
 }

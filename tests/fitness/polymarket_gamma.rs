@@ -51,28 +51,29 @@ fn double_parses_token_ids_and_window_from_slug() {
 }
 
 #[test]
-fn empty_events_array_is_market_not_found() {
-    let error =
-        parse_events(SERIES, "[]", window(1_784_439_600)).expect_err("empty array rejected");
-    assert!(matches!(error, GammaError::MarketNotFound { .. }));
-}
-
-#[test]
-fn single_element_token_ids_rejected() {
-    let bad = r#"[{"slug":"btc-updown-5m-1784439600","markets":[{"conditionId":"0xabc","clobTokenIds":"[\"111\"]","orderPriceMinTickSize":0.01,"orderMinSize":5}]}]"#;
-    let error = parse_events(SERIES, bad, window(1_784_439_600))
-        .expect_err("one-element token array rejected");
-    assert!(matches!(error, GammaError::TokenIds { .. }));
-}
-
-#[test]
-fn inverted_outcomes_are_rejected() {
-    // Same market, but the venue orders outcomes ["Down","Up"] — assigning tokens by index would
-    // silently invert every downstream row, so discovery must reject it.
-    let inverted = r#"[{"slug":"btc-updown-5m-1784439600","markets":[{"conditionId":"0xabc","clobTokenIds":"[\"111\",\"222\"]","outcomes":"[\"Down\", \"Up\"]","orderPriceMinTickSize":0.01,"orderMinSize":5}]}]"#;
-    let error = parse_events(SERIES, inverted, window(1_784_439_600))
-        .expect_err("inverted outcomes rejected");
-    assert!(matches!(error, GammaError::InvalidOutcomes { .. }));
+fn parse_events_rejects_malformed_input() {
+    type RejectCase = (&'static str, &'static str, fn(&GammaError) -> bool);
+    let cases: &[RejectCase] = &[
+        ("empty_events_array", "[]", |e| {
+            matches!(e, GammaError::MarketNotFound { .. })
+        }),
+        (
+            "single_element_token_ids",
+            r#"[{"slug":"btc-updown-5m-1784439600","markets":[{"conditionId":"0xabc","clobTokenIds":"[\"111\"]","orderPriceMinTickSize":0.01,"orderMinSize":5}]}]"#,
+            |e| matches!(e, GammaError::TokenIds { .. }),
+        ),
+        (
+            // Same market, but the venue orders outcomes ["Down","Up"] — assigning tokens by index
+            // would silently invert every downstream row, so discovery must reject it.
+            "inverted_outcomes",
+            r#"[{"slug":"btc-updown-5m-1784439600","markets":[{"conditionId":"0xabc","clobTokenIds":"[\"111\",\"222\"]","outcomes":"[\"Down\", \"Up\"]","orderPriceMinTickSize":0.01,"orderMinSize":5}]}]"#,
+            |e| matches!(e, GammaError::InvalidOutcomes { .. }),
+        ),
+    ];
+    for (name, raw, expect) in cases {
+        let error = parse_events(SERIES, raw, window(1_784_439_600)).expect_err(name);
+        assert!(expect(&error), "{name}: got {error:?}");
+    }
 }
 
 #[test]
@@ -109,21 +110,27 @@ fn fallback_resolves_current_and_next_windows() {
 }
 
 #[test]
-fn fallback_skips_unparseable_rows_and_reports_shortfall() {
-    // First row's slug is not a BTC 5-min window (filter_map skips it); only one valid window is
-    // left, so the pair can't be formed.
-    let raw = r#"[
-      {"slug":"not-a-btc-window","markets":[{"conditionId":"0xa","clobTokenIds":"[\"1\",\"2\"]","outcomes":"[\"Up\", \"Down\"]","orderPriceMinTickSize":0.01,"orderMinSize":5}]},
-      {"slug":"btc-updown-5m-1784449200","markets":[{"conditionId":"0xb","clobTokenIds":"[\"1\",\"2\"]","outcomes":"[\"Up\", \"Down\"]","orderPriceMinTickSize":0.01,"orderMinSize":5}]}
-    ]"#;
-    let error = parse_fallback(SERIES, raw).expect_err("only one usable window");
-    assert!(matches!(error, GammaError::FallbackTooFew { found: 1 }));
-}
-
-#[test]
-fn empty_fallback_reports_zero_windows() {
-    let error = parse_fallback(SERIES, "[]").expect_err("no windows");
-    assert!(matches!(error, GammaError::FallbackTooFew { found: 0 }));
+fn parse_fallback_reports_the_shortfall() {
+    let cases: &[(&str, &str, usize)] = &[
+        (
+            // First row's slug is not a BTC 5-min window (filter_map skips it); only one valid
+            // window is left, so the pair can't be formed.
+            "one_unparseable_row",
+            r#"[
+              {"slug":"not-a-btc-window","markets":[{"conditionId":"0xa","clobTokenIds":"[\"1\",\"2\"]","outcomes":"[\"Up\", \"Down\"]","orderPriceMinTickSize":0.01,"orderMinSize":5}]},
+              {"slug":"btc-updown-5m-1784449200","markets":[{"conditionId":"0xb","clobTokenIds":"[\"1\",\"2\"]","outcomes":"[\"Up\", \"Down\"]","orderPriceMinTickSize":0.01,"orderMinSize":5}]}
+            ]"#,
+            1,
+        ),
+        ("empty_array", "[]", 0),
+    ];
+    for (name, raw, found) in cases {
+        let error = parse_fallback(SERIES, raw).expect_err(name);
+        assert!(
+            matches!(error, GammaError::FallbackTooFew { found: f } if f == *found),
+            "{name}: got {error:?}"
+        );
+    }
 }
 
 #[test]

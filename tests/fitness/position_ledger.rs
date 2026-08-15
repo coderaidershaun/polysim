@@ -294,105 +294,104 @@ proptest! {
     }
 }
 
-/// FITNESS: a venue fill is folded BEFORE the `on_fill` that reports it, so a strategy reading its
-/// position from that callback sees the fill counted exactly once — and adding it again is the
-/// double count. This is the inverse of the boundary this file used to pin, and the inversion is the
-/// milestone: a fill is no longer something a strategy banks mid-message and the engine folds at the
-/// drain, it is its own message that the engine has already applied by the time anyone is told.
-#[test]
-fn a_fill_is_folded_before_the_callback_that_reports_it() {
-    let instruments = [bare_row(0)];
-    let (mut engine, readings) = probe_engine(&instruments);
-    // Mid of 100 and 102 is 101 — every number below is exact against it.
-    dispatch_all(&mut engine, &reseat_book(0, 100 * ONE, 102 * ONE, 0));
-    let mut pen = FillPen::new(0);
-
-    dispatch_all(&mut engine, &pen.fill(Side::Buy, 101 * ONE, ONE, 10));
-    engine.dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(0, 20)));
-
-    let recorded = take_readings(&readings);
-    let in_fill = recorded
-        .iter()
-        .find(|reading| reading.phase == Phase::InFill)
-        .expect("the fill earned an on_fill, and the probe read the ledger inside it");
-    assert_eq!(
-        in_fill.position_base,
-        Qty(ONE),
-        "on_fill ran against a ledger that had not yet folded the fill it was reporting"
-    );
-    assert_eq!(
-        in_fill.pnl_quote, 0,
-        "bought at the mark, so nothing is made or lost yet"
-    );
-
-    let on_spin = recorded
-        .iter()
-        .find(|reading| reading.phase == Phase::OnSpin(0))
-        .expect("the probe read the ledger on the following spin");
-    assert_eq!(
-        on_spin.position_base,
-        Qty(ONE),
-        "the fill moved the position a second time between its callback and the next spin"
-    );
-    assert_eq!(on_spin.exposure_quote, 101 * ONE, "one unit marked at 101");
-    assert_eq!(on_spin.pnl_quote, 0);
-
-    dispatch_all(&mut engine, &pen.fill(Side::Buy, 100 * ONE, ONE, 30));
-    engine.dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(1, 40)));
-
-    let after = spin_reading(&readings, 0, 1);
-    assert_eq!(after.position_base, Qty(2 * ONE));
-    assert_eq!(after.exposure_quote, 202 * ONE);
-    assert_eq!(
-        after.pnl_quote, ONE,
-        "cost 201 for two units now worth 202 — the one unit bought under the mark"
-    );
-}
-
-/// FITNESS: a report the venue redelivers moves the MONEY exactly once, whatever order the copies
-/// arrive in. `exec_order.rs` pins the same idempotence on the slot's own totals; this pins it where
-/// it costs, on position and cash through the whole engine, because a fold that is idempotent about
-/// quantities and not about cash would still bank a profit that never happened.
+/// FITNESS: a venue fill is folded BEFORE the `on_fill` that reports it, and a report the venue
+/// redelivers moves the MONEY exactly once, whatever order the copies arrive in.
 ///
-/// Binance really does redeliver, so the second copy is not a hypothetical: it is ordinary traffic
-/// that looks exactly like a real fill, and the only thing separating them is that the totals it
-/// carries are ones already folded.
+/// A strategy reading its position from `on_fill` must see the fill counted exactly once — adding it
+/// again is the double count. This is the inverse of the boundary this file used to pin, and the
+/// inversion is the milestone: a fill is no longer something a strategy banks mid-message and the
+/// engine folds at the drain, it is its own message the engine has already applied by the time anyone
+/// is told. Redelivery is not a hypothetical either — Binance really does it, and the second copy is
+/// ordinary traffic that looks exactly like a real fill, with only its already-folded totals to tell
+/// it apart; `exec_order.rs` pins the same idempotence on the slot's own totals, this pins it where it
+/// costs, on position and cash through the whole engine, because a fold idempotent about quantities
+/// and not about cash would still bank a profit that never happened.
 #[test]
-fn a_redelivered_fill_moves_the_money_exactly_once() {
-    let instruments = [bare_row(0)];
-    let (mut engine, readings) = probe_engine(&instruments);
-    dispatch_all(&mut engine, &reseat_book(0, 100 * ONE, 102 * ONE, 0));
+fn a_fill_folds_before_its_callback_and_a_redelivery_moves_the_money_once() {
+    {
+        let instruments = [bare_row(0)];
+        let (mut engine, readings) = probe_engine(&instruments);
+        // Mid of 100 and 102 is 101 — every number below is exact against it.
+        dispatch_all(&mut engine, &reseat_book(0, 100 * ONE, 102 * ONE, 0));
+        let mut pen = FillPen::new(0);
 
-    let mut pen = FillPen::new(0);
-    let first = pen.fill(Side::Buy, 100 * ONE, ONE, 10);
-    let second = pen.fill(Side::Buy, 102 * ONE, 2 * ONE, 20);
-    // The first copy of each, then both again out of order, then the earlier one a third time.
-    for batch in [&first, &second, &second, &first, &first] {
-        dispatch_all(&mut engine, batch);
+        dispatch_all(&mut engine, &pen.fill(Side::Buy, 101 * ONE, ONE, 10));
+        engine.dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(0, 20)));
+
+        let recorded = take_readings(&readings);
+        let in_fill = recorded
+            .iter()
+            .find(|reading| reading.phase == Phase::InFill)
+            .expect("the fill earned an on_fill, and the probe read the ledger inside it");
+        assert_eq!(
+            in_fill.position_base,
+            Qty(ONE),
+            "on_fill ran against a ledger that had not yet folded the fill it was reporting"
+        );
+        assert_eq!(
+            in_fill.pnl_quote, 0,
+            "bought at the mark, so nothing is made or lost yet"
+        );
+
+        let on_spin = recorded
+            .iter()
+            .find(|reading| reading.phase == Phase::OnSpin(0))
+            .expect("the probe read the ledger on the following spin");
+        assert_eq!(
+            on_spin.position_base,
+            Qty(ONE),
+            "the fill moved the position a second time between its callback and the next spin"
+        );
+        assert_eq!(on_spin.exposure_quote, 101 * ONE, "one unit marked at 101");
+        assert_eq!(on_spin.pnl_quote, 0);
+
+        dispatch_all(&mut engine, &pen.fill(Side::Buy, 100 * ONE, ONE, 30));
+        engine.dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(1, 40)));
+
+        let after = spin_reading(&readings, 0, 1);
+        assert_eq!(after.position_base, Qty(2 * ONE));
+        assert_eq!(after.exposure_quote, 202 * ONE);
+        assert_eq!(
+            after.pnl_quote, ONE,
+            "cost 201 for two units now worth 202 — the one unit bought under the mark"
+        );
     }
-    engine.dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(0, 30)));
+    {
+        let instruments = [bare_row(0)];
+        let (mut engine, readings) = probe_engine(&instruments);
+        dispatch_all(&mut engine, &reseat_book(0, 100 * ONE, 102 * ONE, 0));
 
-    let after = spin_reading(&readings, 0, 0);
-    let fills = take_readings(&readings)
-        .iter()
-        .filter(|reading| reading.phase == Phase::InFill)
-        .count();
-    assert_eq!(
-        fills, 2,
-        "a redelivered report earned its own on_fill, so a strategy counting fills counts ghosts"
-    );
+        let mut pen = FillPen::new(0);
+        let first = pen.fill(Side::Buy, 100 * ONE, ONE, 10);
+        let second = pen.fill(Side::Buy, 102 * ONE, 2 * ONE, 20);
+        // The first copy of each, then both again out of order, then the earlier one a third time.
+        for batch in [&first, &second, &second, &first, &first] {
+            dispatch_all(&mut engine, batch);
+        }
+        engine.dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(0, 30)));
 
-    assert_eq!(
-        after.position_base,
-        Qty(3 * ONE),
-        "the redeliveries moved the position again"
-    );
-    // Paid 100 for one unit and 204 for two; three units marked at 101 are worth 303.
-    assert_eq!(after.exposure_quote, 303 * ONE);
-    assert_eq!(
-        after.pnl_quote, -ONE,
-        "the redeliveries moved cash — a fold idempotent about size and not about money"
-    );
+        let after = spin_reading(&readings, 0, 0);
+        let fills = take_readings(&readings)
+            .iter()
+            .filter(|reading| reading.phase == Phase::InFill)
+            .count();
+        assert_eq!(
+            fills, 2,
+            "a redelivered report earned its own on_fill, so a strategy counting fills counts ghosts"
+        );
+
+        assert_eq!(
+            after.position_base,
+            Qty(3 * ONE),
+            "the redeliveries moved the position again"
+        );
+        // Paid 100 for one unit and 204 for two; three units marked at 101 are worth 303.
+        assert_eq!(after.exposure_quote, 303 * ONE);
+        assert_eq!(
+            after.pnl_quote, -ONE,
+            "the redeliveries moved cash — a fold idempotent about size and not about money"
+        );
+    }
 }
 
 /// FITNESS: a rotation flattens the slot it rotated and clears its mark, leaving every other slot

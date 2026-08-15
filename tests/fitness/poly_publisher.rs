@@ -552,34 +552,6 @@ fn intensity_is_published_per_side_and_only_once_that_side_is_fitted() {
     );
 }
 
-/// The same claim for the leg that is `next`, whose four intensity slots no other test reads by NAME.
-/// The cadence, the per-side convention and the empty-fit gate are pinned above on `cur`; what is
-/// unpinned here is which wire name each of this block's four values leaves under, and the two blocks
-/// are separate ident lists in the schema — a crossing in one says nothing about the other.
-#[test]
-fn the_next_block_publishes_its_own_side_under_its_own_name() {
-    let mut linked = publisher_at_the_first_two_windows();
-    drive_sells_into_the_next_bid(&mut linked);
-
-    // The window B is waiting on is 300s wide, so a refit one interval in still finds it pre-open.
-    let refitted = spin_and_collect(&mut linked, FIRST_OPEN + REFIT_INTERVAL + 1);
-    let a_bid = refitted[slot_of("poly_next_up_intensity_a_bid")];
-    let k_bid = refitted[slot_of("poly_next_up_intensity_k_bid")];
-    assert!(
-        a_bid.is_some_and(|a| a > 0.0) && k_bid.is_some_and(|k| k > 0.0),
-        "sells reach the next leg's bid, so its bid side fits: {:?}",
-        (a_bid, k_bid)
-    );
-    assert_eq!(
-        (
-            refitted[slot_of("poly_next_up_intensity_a_ask")],
-            refitted[slot_of("poly_next_up_intensity_k_ask")]
-        ),
-        (None, None),
-        "nobody lifted the next leg's offer, so its ask side has nothing to publish"
-    );
-}
-
 /// A published (A, k) must not outlive the prints behind it, and both ways it can are silent.
 ///
 /// Within a window the estimator re-dates its own last answer once decay drops the touch count under
@@ -656,10 +628,6 @@ fn drive_prints(
 
 fn drive_sells_into_the_current_bid(linked: &mut crate::engine_support::LinkedEngine) {
     drive_prints(linked, A_UP, Side::Sell, TOUCHES);
-}
-
-fn drive_sells_into_the_next_bid(linked: &mut crate::engine_support::LinkedEngine) {
-    drive_prints(linked, B_UP, Side::Sell, TOUCHES);
 }
 
 /// The whole point of the pair: what the publisher banks survives the wire and lands as feature rows

@@ -113,14 +113,22 @@ fn resurrected_slot(orders: &mut OrderTable, recon_seq: u64) -> usize {
     index
 }
 
+/// FITNESS: a later pass retires an unknown slot it does not name, and a pass on one instrument never
+/// retires another instrument's orders — the same reconciliation identity rule read from two edges:
+/// what makes a slot eligible for retirement, and what scopes retirement in the first place.
 #[test]
-fn a_later_pass_retires_an_unknown_slot_it_does_not_name() {
+fn a_later_pass_retires_an_unknown_slot_it_does_not_name_and_stays_within_its_instrument() {
     let mut orders = OrderTable::new(0);
     let index = resurrected_slot(&mut orders, 5);
     assert_eq!(orders.slot(index).state, OrderState::Unknown);
     assert_eq!(sweep(&mut orders, INSTRUMENT, 5), 0);
     assert_eq!(sweep(&mut orders, INSTRUMENT, 6), 1);
     assert!(!orders.slot(index).state.is_working());
+
+    let elsewhere = claim_at(&mut orders, InstrumentId(1), QuoteLevel::ZERO, 0);
+    assert_eq!(sweep(&mut orders, InstrumentId(0), 9), 0);
+    assert!(orders.slot(elsewhere).state.is_working());
+    assert_eq!(sweep(&mut orders, InstrumentId(1), 9), 1);
 }
 
 #[test]
@@ -163,15 +171,6 @@ fn a_probe_refused_at_the_gateway_leaves_the_doubt_standing() {
         );
         assert_eq!(orders.slot(other).state, OrderState::Live);
     }
-}
-
-#[test]
-fn a_pass_on_one_instrument_retires_no_other_instruments_orders() {
-    let mut orders = OrderTable::new(0);
-    let elsewhere = claim_at(&mut orders, InstrumentId(1), QuoteLevel::ZERO, 0);
-    assert_eq!(sweep(&mut orders, InstrumentId(0), 9), 0);
-    assert!(orders.slot(elsewhere).state.is_working());
-    assert_eq!(sweep(&mut orders, InstrumentId(1), 9), 1);
 }
 
 fn adopt_live(engine: &mut HotEngine, generation_offset: usize, side: Side, when: i64) {

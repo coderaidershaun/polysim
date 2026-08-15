@@ -49,7 +49,9 @@ fn assignment(open: i64, close: i64) -> WindowAssignment {
     }
 }
 
-fn ready(step: BindingStep) -> Vec<polysim::adapters::polymarket::exec::binding::ReadyBinding> {
+fn ready_bindings(
+    step: BindingStep,
+) -> Vec<polysim::adapters::polymarket::exec::binding::ReadyBinding> {
     match step {
         BindingStep::Ready(ready) => ready,
         other => panic!("expected a completed binding, got {other:?}"),
@@ -58,7 +60,8 @@ fn ready(step: BindingStep) -> Vec<polysim::adapters::polymarket::exec::binding:
 
 /// A window is not tradeable when it arrives. Tick size and the neg-risk flag are separate reads,
 /// and the flag picks the exchange contract the signature is checked against — binding early would
-/// sign every order for the wrong one.
+/// sign every order for the wrong one. The venue is the authority on this per-token flag, so it
+/// must reach the binding unchanged for both polarities.
 #[test]
 fn a_binding_is_incomplete_until_the_tick_and_both_neg_risk_flags_land() {
     let mut bindings = Bindings::default();
@@ -85,45 +88,33 @@ fn a_binding_is_incomplete_until_the_tick_and_both_neg_risk_flags_land() {
         "one leg's flag is not enough — the other leg is a separate order"
     );
 
-    let ready = ready(bindings.on_neg_risk(CONDITION, DOWN, false));
+    let ready = ready_bindings(bindings.on_neg_risk(CONDITION, DOWN, false));
     assert_eq!(ready.len(), 2);
     assert!(ready.iter().all(|entry| entry.tick == Price(1_000_000)));
-    assert!(ready.iter().all(|entry| !entry.is_neg_risk));
-}
-
-/// The venue is the authority on this flag and it is per token, so a `true` answer must survive to
-/// the binding: it is the difference between the standard and the neg-risk exchange contract.
-#[test]
-fn the_neg_risk_flag_reaches_the_binding_unchanged() {
-    let mut bindings = Bindings::default();
-    bindings.on_assignment(&assignment(0, 300_000_000));
-    bindings.on_market(CONDITION, Price(1_000_000));
-    bindings.on_neg_risk(CONDITION, UP, true);
-    let ready = ready(bindings.on_neg_risk(CONDITION, DOWN, true));
-    assert!(ready.iter().all(|entry| entry.is_neg_risk));
-}
-
-/// An answer for a window that has already been displaced must not resurrect it. Enrichment reads
-/// are slower than a rotation is wide, so late answers are ordinary.
-#[test]
-fn an_answer_for_an_unknown_window_settles_nothing() {
-    let mut bindings = Bindings::default();
-    assert_eq!(
-        bindings.on_market("0xsomeoneelses", Price(1_000_000)),
-        BindingStep::Wait
+    assert!(
+        ready.iter().all(|entry| !entry.is_neg_risk),
+        "a false answer must reach the binding unchanged"
     );
-    assert_eq!(
-        bindings.on_neg_risk("0xsomeoneelses", UP, false),
-        BindingStep::Wait
+
+    let mut true_flag = Bindings::default();
+    true_flag.on_assignment(&assignment(0, 300_000_000));
+    true_flag.on_market(CONDITION, Price(1_000_000));
+    true_flag.on_neg_risk(CONDITION, UP, true);
+    let ready_true = ready_bindings(true_flag.on_neg_risk(CONDITION, DOWN, true));
+    assert!(
+        ready_true.iter().all(|entry| entry.is_neg_risk),
+        "a true answer must reach the binding unchanged too"
     );
 }
 
 /// The two enrichment reads leave on the assignment, but a single transient failure of either would
 /// leave the instrument unbound for the whole five-minute window — every placement refused
 /// `UnboundInstrument`. The retry re-issues only the read still outstanding, so a failed market read
-/// followed by a success still yields a usable binding.
+/// followed by a success still yields a usable binding. It is bounded: a market that never answers
+/// is given up rather than re-read for the rest of the window, which would only burn the read
+/// budget.
 #[test]
-fn a_transient_enrichment_read_failure_does_not_forfeit_the_window() {
+fn an_enrichment_read_is_retried_alone_then_given_up_when_it_never_answers() {
     let mut bindings = Bindings::default();
     let start = at(0);
     let step = bindings.on_assignment(&assignment(0, 300_000_000));
@@ -152,18 +143,13 @@ fn a_transient_enrichment_read_failure_does_not_forfeit_the_window() {
     );
 
     // The retry succeeds and the binding completes.
-    let ready = ready(bindings.on_market(CONDITION, Price(1_000_000)));
+    let ready = ready_bindings(bindings.on_market(CONDITION, Price(1_000_000)));
     assert_eq!(
         ready.len(),
         2,
         "the window is usable after a transient blip"
     );
-}
 
-/// The retry is bounded: a market that never answers is given up rather than re-read for the rest of
-/// the window, which would only burn the read budget.
-#[test]
-fn a_persistently_unreadable_binding_is_given_up_not_retried_forever() {
     let mut bindings = Bindings::default();
     bindings.on_assignment(&assignment(0, 300_000_000));
 
@@ -188,9 +174,10 @@ fn a_persistently_unreadable_binding_is_given_up_not_retried_forever() {
 }
 
 /// The edge sweep is a backstop, and a backstop that fires every housekeeping tick would spend the
-/// venue's cancel bucket on an empty book.
+/// venue's cancel bucket on an empty book. The next window re-arms it: it is a different market
+/// with a different close.
 #[test]
-fn the_close_margin_backstop_fires_once_per_window() {
+fn the_close_margin_backstop_fires_once_per_window_and_rearms_for_the_next() {
     let close = 300_000_000;
     let margin = DurationUs::from_micros(3_000_000);
     let mut bindings = Bindings::default();
@@ -212,21 +199,6 @@ fn the_close_margin_backstop_fires_once_per_window() {
         bindings.close_margin_reached(at(close), margin).is_empty(),
         "the same window must not be swept twice"
     );
-}
-
-/// The next window re-arms the backstop: it is a different market with a different close.
-#[test]
-fn a_fresh_window_re_arms_the_backstop() {
-    let margin = DurationUs::from_micros(3_000_000);
-    let mut bindings = Bindings::default();
-    bindings.on_assignment(&assignment(0, 300_000_000));
-    bindings.on_market(CONDITION, Price(1_000_000));
-    bindings.on_neg_risk(CONDITION, UP, false);
-    bindings.on_neg_risk(CONDITION, DOWN, false);
-    assert_eq!(
-        bindings.close_margin_reached(at(299_000_000), margin).len(),
-        2
-    );
 
     let next = WindowAssignment {
         condition_id: std::sync::Arc::from("0xnext"),
@@ -244,25 +216,15 @@ fn a_fresh_window_re_arms_the_backstop() {
 }
 
 /// A sell against a token whose CLOB allowance cache is cold is refused as an empty wallet however
-/// approved the chain is, so the edge tracks warmth per token rather than per account.
+/// approved the chain is, so the edge tracks warmth per token rather than per account. The refresh
+/// endpoint allows 50 calls per ten seconds and a withheld sell is re-decided every spin, so asking
+/// again while an answer is outstanding would spend that budget on one question. A claim only ever
+/// clears on an answer, so a refresh that never reached the venue would hold the token marked
+/// in-flight forever — and every sell on it is withheld waiting for an answer nobody asked for.
 #[test]
-fn allowance_warmth_is_tracked_per_token() {
+fn allowance_warmth_and_refresh_claims_are_tracked_per_token() {
     let mut bindings = Bindings::default();
     assert!(!bindings.is_allowance_warm(UP_TOKEN));
-    bindings.claim_allowance_refresh(UP_TOKEN);
-    bindings.on_allowance_answered(UP_TOKEN, true);
-    assert!(bindings.is_allowance_warm(UP_TOKEN));
-    assert!(
-        !bindings.is_allowance_warm(DOWN_TOKEN),
-        "the other outcome is a different token with its own cache entry"
-    );
-}
-
-/// The refresh endpoint allows 50 calls per ten seconds and a withheld sell is re-decided every
-/// spin. Asking again while an answer is outstanding would spend that budget on one question.
-#[test]
-fn one_allowance_refresh_is_outstanding_per_token_at_a_time() {
-    let mut bindings = Bindings::default();
     assert!(
         bindings.claim_allowance_refresh(UP_TOKEN),
         "the first ask is sent"
@@ -283,17 +245,17 @@ fn one_allowance_refresh_is_outstanding_per_token_at_a_time() {
     assert!(bindings.claim_allowance_refresh(UP_TOKEN));
 
     bindings.on_allowance_answered(UP_TOKEN, true);
+    assert!(bindings.is_allowance_warm(UP_TOKEN));
+    assert!(
+        !bindings.is_allowance_warm(DOWN_TOKEN),
+        "the other outcome is a different token with its own cache entry"
+    );
     assert!(
         !bindings.claim_allowance_refresh(UP_TOKEN),
         "a warm cache is asked about no further"
     );
-}
 
-/// A claim only ever clears on an answer, so a refresh that never reached the venue would hold the
-/// token marked in-flight forever — and every sell on it is withheld waiting for an answer nobody
-/// asked for. The driver hands the claim back when the request is dropped.
-#[test]
-fn a_refresh_that_never_left_leaves_the_token_askable() {
+    // The driver hands the claim back when the request is dropped.
     let mut bindings = Bindings::default();
     assert!(bindings.claim_allowance_refresh(UP_TOKEN));
     bindings.release_allowance_refresh(UP_TOKEN);
@@ -308,9 +270,13 @@ fn held(frames: &mut PendingFrames, text: &str, now: i64) {
 }
 
 /// The window between a placement's bytes leaving and its answer landing is one in which the venue
-/// can already be reporting fills on it. Dropping those frames loses a fill.
+/// can already be reporting fills on it. Dropping those frames loses a fill, so a frame naming an
+/// order nobody can map is held and handed back intact. The buffer is bounded by design: the oldest
+/// goes because a newer frame describes a more recent state. And a frame no mapping ever explains
+/// describes a fill the ledger has not seen — it leaves on a deadline so the driver can force a
+/// re-read instead of waiting forever. Both losses are counted rather than silent.
 #[test]
-fn a_frame_naming_an_unmapped_order_is_held_and_handed_back_intact() {
+fn a_held_frame_is_handed_back_intact_dropped_oldest_first_and_expired_on_its_deadline() {
     let mut frames = PendingFrames::new();
     held(&mut frames, "{\"event_type\":\"order\"}", 0);
     assert_eq!(frames.len(), 1);
@@ -327,12 +293,7 @@ fn a_frame_naming_an_unmapped_order_is_held_and_handed_back_intact() {
     // Still unattributable: the caller hands it back rather than losing it.
     frames.re_hold(drained[0].clone());
     assert_eq!(frames.len(), 1);
-}
 
-/// Bounded by design. The oldest goes because a newer frame describes a more recent state, and
-/// the loss is counted rather than silent.
-#[test]
-fn the_held_buffer_drops_the_oldest_and_counts_it() {
     let mut frames = PendingFrames::new();
     for index in 0..PENDING_CAPACITY {
         held(&mut frames, &format!("frame-{index}"), index as i64);
@@ -356,12 +317,7 @@ fn the_held_buffer_drops_the_oldest_and_counts_it() {
         remaining.last().map(|frame| frame.text.as_str()),
         Some("frame-overflow")
     );
-}
 
-/// A frame no mapping ever explains describes a fill the ledger has not seen. It leaves on a
-/// deadline and is counted, so the driver can force a re-read instead of waiting forever.
-#[test]
-fn a_held_frame_expires_on_its_deadline_and_is_counted() {
     let mut frames = PendingFrames::new();
     held(&mut frames, "early", 0);
     held(&mut frames, "late", 5_000_000);
@@ -410,7 +366,9 @@ fn minted_cancel(client_id: ClientOrderId) -> (RequestId, ExecRequest) {
 }
 
 /// A marketable order is held 250 ms at the venue and CANNOT be cancelled during it. Sending the
-/// cancel anyway earns a refusal that counts against the hard-reject streak, so it waits.
+/// cancel anyway earns a refusal that counts against the hard-reject streak, so it waits. The hold
+/// belongs to the order, not to the run: once the order is gone the stamp must go with it or a later
+/// id reusing the slot inherits a wait it never earned.
 #[test]
 fn a_cancel_inside_the_taker_hold_is_withheld_and_released_once() {
     let client_id = ClientOrderId(0x5150);
@@ -459,13 +417,7 @@ fn a_cancel_inside_the_taker_hold_is_withheld_and_released_once() {
     };
     assert_eq!(request_id, minted_id);
     assert_eq!(request, cancel_request(client_id));
-}
 
-/// The hold belongs to the order, not to the run: once the order is gone the stamp must go with it
-/// or a later id reusing the slot inherits a wait it never earned.
-#[test]
-fn a_terminal_order_forgets_its_hold() {
-    let client_id = ClientOrderId(0x5150);
     let mut delayed = DelayedOrders::default();
     delayed.on_delayed(client_id, at(1_000_000));
     delayed.forget(client_id);
@@ -507,130 +459,86 @@ fn resting(side: Side, price: i64, qty: i64) -> UnmappedOrder {
     }
 }
 
-/// A placement whose answer was lost leaves an order this run placed and cannot name. Adopting it is
-/// the only way the engine regains the ability to cancel it.
+/// `classify_unmapped` decides what an order the venue reports but this run cannot name means,
+/// keyed on whether a placement for that (instrument, side) is still in flight. Adopting a resting
+/// order while our own placement on the side has no venue id yet would bind a SECOND venue id to our
+/// slot the moment our own answer lands, double-folding the position — so it defers instead. Once a
+/// placement is lost (ambiguous, no venue id ever coming) it becomes the only explanation for such
+/// an order and is adopted; a prior run's order carries no client id this run could mint, so it can
+/// never be an adoption — the boot sweep cancels it by venue id instead.
 #[test]
-fn an_unmapped_order_is_adopted_by_the_placement_that_lost_its_answer() {
-    let mirror = [lost(0xa1, Side::Buy, 45_000_000, 500_000_000)];
-    assert_eq!(
-        classify_unmapped(
-            &mirror,
-            &resting(Side::Buy, 45_000_000, 500_000_000),
-            |_| false,
-        ),
-        UnmappedVerdict::Adopt(ClientOrderId(0xa1)),
-    );
-}
+fn classify_unmapped_decides_by_placement_state_and_match() {
+    struct Case {
+        name: &'static str,
+        mirror: Vec<MirroredOrder>,
+        resting: UnmappedOrder,
+        venue_id_landed: bool,
+        expected: UnmappedVerdict,
+    }
 
-/// R16: while a placement on the side is still in flight — a mine mirror order with no venue id that
-/// is not yet ambiguous — an unmapped resting order there is indistinguishable from a person's own
-/// order at the venue. Adopting it would bind a SECOND venue id to our slot the moment our own answer
-/// lands, double-folding the position. So it is deferred, not classified, until the place resolves.
-#[test]
-fn an_unmapped_order_is_deferred_while_a_placement_on_the_side_is_in_flight() {
-    let mirror = [mine(0xa1, Side::Buy, 45_000_000, 500_000_000)];
-    assert_eq!(
-        classify_unmapped(
-            &mirror,
-            &resting(Side::Buy, 45_000_000, 500_000_000),
-            |_| false,
-        ),
-        UnmappedVerdict::Defer,
-        "an exact price and size match still defers — the answer decides, not a guess",
-    );
-    assert_eq!(
-        classify_unmapped(
-            &mirror,
-            &resting(Side::Buy, 44_000_000, 700_000_000),
-            |_| false,
-        ),
-        UnmappedVerdict::Defer,
-        "deferral is keyed on the side, not on a match: a different order on it still waits",
-    );
-    assert_eq!(
-        classify_unmapped(
-            &mirror,
-            &resting(Side::Sell, 45_000_000, 500_000_000),
-            |_| false,
-        ),
-        UnmappedVerdict::LeaveAlone,
-        "the OTHER side has no placement in flight, so an order there is not deferred",
-    );
-    assert_eq!(
-        classify_unmapped(
-            &mirror,
-            &resting(Side::Buy, 45_000_000, 500_000_000),
-            |_| true,
-        ),
-        UnmappedVerdict::LeaveAlone,
-        "once our own placement's venue id has arrived it blocks nothing, and the resting order is \
-         then unexplained — left alone, never adopted",
-    );
-}
-
-/// Same credentials reach the venue's own website order entry. An order nothing this run placed
-/// explains is somebody's, and cancelling it is not a recovery.
-#[test]
-fn an_unmapped_order_with_no_matching_placement_is_left_alone() {
-    let mirror = [lost(0xa1, Side::Buy, 45_000_000, 500_000_000)];
-    assert_eq!(
-        classify_unmapped(
-            &mirror,
-            &resting(Side::Sell, 45_000_000, 500_000_000),
-            |_| false,
-        ),
-        UnmappedVerdict::LeaveAlone,
-        "the other side is not this order"
-    );
-    assert_eq!(
-        classify_unmapped(
-            &mirror,
-            &resting(Side::Buy, 45_000_000, 500_000_000),
-            |_| true,
-        ),
-        UnmappedVerdict::LeaveAlone,
-        "an order whose venue id already arrived is accounted for; this one is not it"
-    );
-    assert_eq!(
-        classify_unmapped(&[], &resting(Side::Buy, 45_000_000, 500_000_000), |_| false),
-        UnmappedVerdict::LeaveAlone,
-        "an empty mirror explains nothing"
-    );
-}
-
-/// A ladder can leave more than one unanswered slot on a side, so the price and size decide which.
-#[test]
-fn price_and_size_pick_between_two_unanswered_placements() {
-    let mirror = [
-        lost(0xa1, Side::Buy, 45_000_000, 500_000_000),
-        lost(0xa2, Side::Buy, 44_000_000, 700_000_000),
+    let cases = [
+        Case {
+            name: "a lost placement's answer is adopted by the order it lost",
+            mirror: vec![lost(0xa1, Side::Buy, 45_000_000, 500_000_000)],
+            resting: resting(Side::Buy, 45_000_000, 500_000_000),
+            venue_id_landed: false,
+            expected: UnmappedVerdict::Adopt(ClientOrderId(0xa1)),
+        },
+        Case {
+            name: "an exact price and size match still defers — the answer decides, not a guess",
+            mirror: vec![mine(0xa1, Side::Buy, 45_000_000, 500_000_000)],
+            resting: resting(Side::Buy, 45_000_000, 500_000_000),
+            venue_id_landed: false,
+            expected: UnmappedVerdict::Defer,
+        },
+        Case {
+            name: "deferral is keyed on the side, not on a match: a different order on it still waits",
+            mirror: vec![mine(0xa1, Side::Buy, 45_000_000, 500_000_000)],
+            resting: resting(Side::Buy, 44_000_000, 700_000_000),
+            venue_id_landed: false,
+            expected: UnmappedVerdict::Defer,
+        },
+        Case {
+            name: "the OTHER side has no placement in flight, so an order there is not deferred",
+            mirror: vec![mine(0xa1, Side::Buy, 45_000_000, 500_000_000)],
+            resting: resting(Side::Sell, 45_000_000, 500_000_000),
+            venue_id_landed: false,
+            expected: UnmappedVerdict::LeaveAlone,
+        },
+        Case {
+            name: "once our own placement's venue id has arrived it blocks nothing, and the resting \
+                   order is then unexplained — left alone, never adopted",
+            mirror: vec![mine(0xa1, Side::Buy, 45_000_000, 500_000_000)],
+            resting: resting(Side::Buy, 45_000_000, 500_000_000),
+            venue_id_landed: true,
+            expected: UnmappedVerdict::LeaveAlone,
+        },
+        Case {
+            name: "a ladder can leave more than one unanswered slot; price and size pick between them",
+            mirror: vec![
+                lost(0xa1, Side::Buy, 45_000_000, 500_000_000),
+                lost(0xa2, Side::Buy, 44_000_000, 700_000_000),
+            ],
+            resting: resting(Side::Buy, 44_000_000, 700_000_000),
+            venue_id_landed: false,
+            expected: UnmappedVerdict::Adopt(ClientOrderId(0xa2)),
+        },
+        Case {
+            name: "a prior run's order carries no client id this run could mint, so it is never adopted",
+            mirror: vec![MirroredOrder {
+                provenance: Provenance::PriorRun,
+                ..lost(0xa1, Side::Buy, 45_000_000, 500_000_000)
+            }],
+            resting: resting(Side::Buy, 45_000_000, 500_000_000),
+            venue_id_landed: false,
+            expected: UnmappedVerdict::LeaveAlone,
+        },
     ];
-    assert_eq!(
-        classify_unmapped(
-            &mirror,
-            &resting(Side::Buy, 44_000_000, 700_000_000),
-            |_| false,
-        ),
-        UnmappedVerdict::Adopt(ClientOrderId(0xa2)),
-    );
-}
 
-/// A prior run's order carries no client id this run could mint, so it can never be an adoption —
-/// the boot sweep cancels it by venue id instead.
-#[test]
-fn a_prior_run_order_is_never_adopted() {
-    let mirror = [MirroredOrder {
-        provenance: Provenance::PriorRun,
-        ..lost(0xa1, Side::Buy, 45_000_000, 500_000_000)
-    }];
-    assert_eq!(
-        classify_unmapped(
-            &mirror,
-            &resting(Side::Buy, 45_000_000, 500_000_000),
-            |_| false,
-        ),
-        UnmappedVerdict::LeaveAlone,
-    );
+    for case in cases {
+        let got = classify_unmapped(&case.mirror, &case.resting, |_| case.venue_id_landed);
+        assert_eq!(got, case.expected, "case: {}", case.name);
+    }
 }
 
 /// At boot the token table is empty until the first rotation lands, so a prior run's order rests on
@@ -711,29 +619,56 @@ fn event(kind: ExecKind, last_qty: i64, cumulative_qty: i64) -> ExecEvent {
 
 /// The hot account table releases a fill's reservation only against a balance stamped LATER than
 /// the reservation. An edge that reports a fill and no new balance holds that reservation forever,
-/// and the next flatten starves at the funds gate against a wallet that is demonstrably full.
-#[test]
-fn both_ways_a_fill_is_reported_oblige_a_balance_restatement() {
-    assert!(
-        restates_balances(&event(ExecKind::ReportTrade, 0, 200_000_000)),
-        "a maker fill: the order update is the only report of it that exists"
-    );
-    assert!(
-        restates_balances(&event(ExecKind::AckPlaced, 200_000_000, 200_000_000)),
-        "a taker fill: the placement answer reports it once and never again"
-    );
-}
-
-/// A placement that rested without matching moves no money, and a snapshot is a READ of a fill that
-/// was already accounted for. Restating on either would make a resync trigger the read that
+/// and the next flatten starves at the funds gate against a wallet that is demonstrably full. A
+/// placement that rested without matching moves no money, and a snapshot is a READ of a fill that
+/// was already accounted for — restating on either would make a resync trigger the read that
 /// triggers the next resync.
 #[test]
-fn a_placement_that_did_not_fill_and_a_snapshot_do_not() {
-    assert!(!restates_balances(&event(ExecKind::AckPlaced, 0, 0)));
-    assert!(
-        !restates_balances(&event(ExecKind::SnapshotOrder, 0, 200_000_000)),
-        "a snapshot carries a filled size too — that is exactly the trap"
-    );
+fn restates_balances_classifies_every_exec_kind() {
+    struct Case {
+        name: &'static str,
+        kind: ExecKind,
+        last_qty: i64,
+        cumulative_qty: i64,
+        expected: bool,
+    }
+
+    let cases = [
+        Case {
+            name: "a maker fill: the order update is the only report of it that exists",
+            kind: ExecKind::ReportTrade,
+            last_qty: 0,
+            cumulative_qty: 200_000_000,
+            expected: true,
+        },
+        Case {
+            name: "a taker fill: the placement answer reports it once and never again",
+            kind: ExecKind::AckPlaced,
+            last_qty: 200_000_000,
+            cumulative_qty: 200_000_000,
+            expected: true,
+        },
+        Case {
+            name: "a placement that rested without matching moves no money",
+            kind: ExecKind::AckPlaced,
+            last_qty: 0,
+            cumulative_qty: 0,
+            expected: false,
+        },
+        Case {
+            name: "a snapshot carries a filled size too — that is exactly the trap",
+            kind: ExecKind::SnapshotOrder,
+            last_qty: 0,
+            cumulative_qty: 200_000_000,
+            expected: false,
+        },
+    ];
+
+    for case in cases {
+        let got = restates_balances(&event(case.kind, case.last_qty, case.cumulative_qty));
+        assert_eq!(got, case.expected, "case: {}", case.name);
+    }
+
     for quiet in [
         ExecKind::AckCanceled,
         ExecKind::AckFailed,
