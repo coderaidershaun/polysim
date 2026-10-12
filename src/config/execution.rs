@@ -252,9 +252,9 @@ pub(super) fn check_money(field: &'static str, value: f64) -> Result<(), ConfigE
     check_mantissa_range(field, value)
 }
 
-/// Named without a currency on purpose: quote money, base-asset balances, and basis-point
-/// counts all come through here, and the only thing they share is that zero is legal and
-/// the value has to survive conversion to a mantissa.
+/// Named without a currency on purpose: quote money and base-asset balances both come through
+/// here, and the only thing they share is that zero is legal and the value has to survive
+/// conversion to a mantissa.
 pub(super) fn check_nonnegative_amount(field: &'static str, value: f64) -> Result<(), ConfigError> {
     if !value.is_finite() || value < 0.0 {
         return Err(ConfigError::Invalid {
@@ -277,8 +277,8 @@ fn check_mantissa_range(field: &'static str, value: f64) -> Result<(), ConfigErr
     })
 }
 
-/// Every amount routed here has passed [`check_money`] or [`check_nonnegative_amount`] first, so a
-/// value that will not convert is a gap in validation rather than an operator mistake.
+/// Every caller has already bounded its value to the mantissa range while validating the config, so
+/// a value that will not convert is a gap in validation rather than an operator mistake.
 pub(crate) fn validated_mantissa(units: f64) -> i64 {
     fixed_mantissa(units)
         .expect("a config amount reached bring-up without being bounded to the mantissa range")

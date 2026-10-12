@@ -730,6 +730,15 @@ fn account_and_edge_case_decodes() {
         );
         assert_ne!(base_fee.commission_asset, AssetId::UNKNOWN);
 
+        let rebated = fixture!("report_trade_filled")
+            .replace("\"n\": \"0.00000006\"", "\"n\": \"-0.00000006\"");
+        assert_eq!(
+            decode_exec(&rebated, &venue).commission,
+            -6,
+            "a rebate is a negative commission, and a fill report that fails to decode is a fill \
+             the engine never hears about"
+        );
+
         let discounted = decode_exec(
             fixture!("report_trade_filled_unknown_commission_asset"),
             &venue,

@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex};
 use polysim::config::TrackerSpec;
 use polysim::hot::dispatch::HotEngine;
 use polysim::hot::strategy::{Fill, Registration, Strategy, StrategyCtx};
-use polysim::ids::{InstrumentId, Qty, Side};
+use polysim::ids::{AssetId, InstrumentId, Qty, Side};
+use polysim::msg::exec::ExecEvent;
 use polysim::msg::inbound::{InboundMessage, SpinTick};
 use polysim::registry::InstrumentRow;
 use proptest::prelude::*;
@@ -609,8 +610,12 @@ impl Strategy for MoneyProbe {
 /// do not exist. A mapping that is inverted CONSISTENTLY at every layer compiles, satisfies every
 /// structural test, agrees with itself everywhere — and trades backwards. The only thing that cannot
 /// be fooled by a consistent inversion is which way the cash went.
+///
+/// A commission is the third thing that moves the cash, and its sign inverts just as quietly: a
+/// rebate booked as a fee, or a fee paid in another asset counted as quote, reports a profit or a
+/// loss that the venue never paid.
 #[test]
-fn a_fill_on_our_bid_buys_and_a_fill_on_our_ask_sells() {
+fn a_fill_moves_cash_the_way_its_side_and_its_commission_say() {
     let instruments = [instrument_row(0, TrackerSpec::default(), 64)];
     let latest = Arc::new(Mutex::new(None));
     let (persistence, _persist) = persist_ring(256);
@@ -660,4 +665,57 @@ fn a_fill_on_our_bid_buys_and_a_fill_on_our_ask_sells() {
         10 * ONE,
         "the round trip bought at 100 and sold at 110, so exactly 10 must be banked"
     );
+
+    // Every row is the same buy of one unit at 100, so whatever the cash moves beyond that notional
+    // is the commission alone.
+    const COMMISSION: i64 = 23_599;
+    let (base_asset, quote_asset) = (instruments[0].base_asset, instruments[0].quote_asset);
+    let commissions = [
+        (
+            -COMMISSION,
+            quote_asset,
+            COMMISSION,
+            "a rebate paid in quote is income — cash must rise by exactly the rebate",
+        ),
+        (
+            COMMISSION,
+            quote_asset,
+            -COMMISSION,
+            "a fee paid in quote is a cost — cash must fall by exactly the fee",
+        ),
+        (
+            -COMMISSION,
+            base_asset,
+            0,
+            "a rebate paid in base is not this instrument's quote cash",
+        ),
+        (
+            COMMISSION,
+            AssetId::UNKNOWN,
+            0,
+            "a fee in an asset no instrument names is not this instrument's quote cash",
+        ),
+    ];
+    let mut cash_before = cash;
+    for (step, (commission, commission_asset, cash_gain, why)) in
+        commissions.into_iter().enumerate()
+    {
+        let when = 50 + 20 * step as i64;
+        let InboundMessage::Exec(report) = pen.report(Side::Buy, 100 * ONE, ONE, when) else {
+            unreachable!("the pen reports a fill as an Exec message");
+        };
+        let charged = InboundMessage::Exec(ExecEvent {
+            commission,
+            commission_asset,
+            ..report
+        });
+        engine.dispatch(pop(0, 0), &charged);
+        engine.dispatch(
+            pop(0, 0),
+            &InboundMessage::SpinTick(spin(2 + step as u64, when + 10)),
+        );
+        let (_, cash_after) = latest.lock().expect("poisoned").expect("the spin ran");
+        assert_eq!(cash_after - cash_before, cash_gain - 100 * ONE, "{why}");
+        cash_before = cash_after;
+    }
 }

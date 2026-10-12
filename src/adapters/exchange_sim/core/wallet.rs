@@ -1,25 +1,34 @@
 //! Exact balances, reservations, fills, and fees for simulated execution.
 
-use crate::ids::{AssetId, Price, Qty, Side};
+use crate::ids::{AssetId, FIXED_SCALE, Price, Qty, Side};
 use crate::msg::exec::AssetBalance;
 
-const BPS_DENOMINATOR: i128 = 10_000;
+const WHOLE_FILL_BPS: i64 = 10_000;
 
+/// Basis points as a 1e-8 mantissa, so a fractional rate stays exact. Negative is a rebate: the
+/// fill pays the maker on top of what it traded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FeeBps(i64);
 
 impl FeeBps {
+    const WHOLE_FILL: i64 = WHOLE_FILL_BPS * FIXED_SCALE;
+
     /// # Errors
-    /// [`WalletError::FeeOutOfRange`] outside `0..=10_000`.
-    pub fn new(bps: i64) -> Result<Self, WalletError> {
-        match (0..=10_000).contains(&bps) {
-            true => Ok(Self(bps)),
-            false => Err(WalletError::FeeOutOfRange { bps }),
+    /// Returns [`WalletError::FeeOutOfRange`] when the rate is more than the whole fill, as a fee
+    /// or as a rebate.
+    pub fn new(mantissa: i64) -> Result<Self, WalletError> {
+        match (-Self::WHOLE_FILL..=Self::WHOLE_FILL).contains(&mantissa) {
+            true => Ok(Self(mantissa)),
+            false => Err(WalletError::FeeOutOfRange { mantissa }),
         }
     }
 
-    fn charge(self, received: i64) -> i64 {
-        narrow(i128::from(received) * i128::from(self.0) / BPS_DENOMINATOR)
+    fn charge(self, amount: i64) -> i64 {
+        narrow(i128::from(amount) * i128::from(self.0) / i128::from(Self::WHOLE_FILL))
+    }
+
+    fn is_rebate(self) -> bool {
+        self.0 < 0
     }
 }
 
@@ -222,11 +231,19 @@ impl SimWallet {
             Side::Buy => (last_quote, last_qty.0),
             Side::Sell => (last_qty.0, last_quote),
         };
-        let fee = self.maker_fee_bps.charge(received_gross);
-        let received_net = received_gross - fee;
 
         let reserved = WalletSlot::of(reservation.side, Reserved);
         let received = WalletSlot::of(reservation.side, Received);
+        let fee_slot = self.fee_slot(received);
+        let fee_basis = match fee_slot {
+            WalletSlot::Base => last_qty.0,
+            WalletSlot::Quote => last_quote,
+        };
+        let fee = self.maker_fee_bps.charge(fee_basis);
+        let received_net = match fee_slot == received {
+            true => received_gross - fee,
+            false => received_gross,
+        };
         let locked = self.funds(reserved).locked;
         assert!(
             locked >= debit,
@@ -235,7 +252,7 @@ impl SimWallet {
         let locked_after = checked_sub(locked, debit, "locked balance after a fill");
         let received_after = checked_add(
             self.funds(received).free,
-            received_net,
+            received_gross,
             "received free balance",
         );
         let cumulative_debit = checked_add(
@@ -246,6 +263,9 @@ impl SimWallet {
 
         self.funds_mut(reserved).locked = locked_after;
         self.funds_mut(received).free = received_after;
+        let fee_slot_after =
+            checked_sub(self.funds(fee_slot).free, fee, "free balance after a fee");
+        self.funds_mut(fee_slot).free = fee_slot_after;
         reservation.cumulative_qty = cumulative_qty;
         reservation.cumulative_quote = cumulative_quote;
         reservation.cumulative_debit = cumulative_debit;
@@ -259,7 +279,7 @@ impl SimWallet {
             received_gross,
             received_net,
             fee,
-            fee_asset: self.asset_of(received),
+            fee_asset: self.asset_of(fee_slot),
         }
     }
 
@@ -348,6 +368,16 @@ impl SimWallet {
         funds.free = free;
     }
 
+    /// A rebate is always paid in the quote asset: paid in base it rounds away on a small order
+    /// and never reaches PnL, which only counts quote commissions. A charge comes out of what
+    /// the fill received.
+    fn fee_slot(&self, received: WalletSlot) -> WalletSlot {
+        match self.maker_fee_bps.is_rebate() {
+            true => WalletSlot::Quote,
+            false => received,
+        }
+    }
+
     fn asset_of(&self, slot: WalletSlot) -> AssetId {
         match slot {
             WalletSlot::Base => self.base_asset,
@@ -372,8 +402,8 @@ impl SimWallet {
 
 #[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalletError {
-    #[error("maker fee {bps}bps is outside 0..=10000")]
-    FeeOutOfRange { bps: i64 },
+    #[error("maker fee {mantissa}e-8bps is outside -10000..=10000bps")]
+    FeeOutOfRange { mantissa: i64 },
     #[error("base and quote asset both resolve to {}", asset.0)]
     SameAsset { asset: AssetId },
     #[error("opening balance {amount} for asset {} is negative", asset.0)]

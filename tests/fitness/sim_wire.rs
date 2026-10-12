@@ -4,7 +4,9 @@
 //! between the matching model and the wallet.
 
 use polysim::adapters::exchange_sim::core::orders::SimOrder;
-use polysim::adapters::exchange_sim::core::wallet::FillSettlement;
+use polysim::adapters::exchange_sim::core::wallet::{
+    FeeBps, FillSettlement, ReservationRequest, ReserveOutcome, SimWallet, SimWalletSetup,
+};
 use polysim::adapters::exchange_sim::wire::{SimFill, VenueWire};
 use polysim::adapters::exec::{EngineIdentity, TeTag};
 use polysim::config::RunIdentity;
@@ -49,6 +51,142 @@ fn a_settlement_disagreeing_with_the_order_stops_the_trade_report() {
             fee_asset: "",
         },
     );
+}
+
+struct FeeRow {
+    name: &'static str,
+    side: Side,
+    rate_bps_e8: i64,
+    slices: &'static [i64],
+    last_fee: i64,
+    fee_asset: &'static str,
+    last_received_net: i64,
+    base_free: i64,
+    quote_free: i64,
+    wire_fee: &'static str,
+}
+
+#[test]
+fn a_rebate_is_paid_in_quote_and_a_charge_in_the_asset_received() {
+    const BASE: AssetId = AssetId(0);
+    const QUOTE: AssetId = AssetId(1);
+    let rows = [
+        FeeRow {
+            name: "rebated sell",
+            side: Side::Sell,
+            rate_bps_e8: -4 * FIXED_SCALE / 10,
+            slices: &[10_000],
+            last_fee: -47_199,
+            fee_asset: "USDT",
+            last_received_net: 1_179_990_000 + 47_199,
+            base_free: 0,
+            quote_free: 1_179_990_000 + 47_199,
+            wire_fee: "-0.00047199",
+        },
+        FeeRow {
+            name: "charged buy",
+            side: Side::Buy,
+            rate_bps_e8: 75 * FIXED_SCALE / 10,
+            slices: &[10_000],
+            last_fee: 7,
+            fee_asset: "BTC",
+            last_received_net: 9_993,
+            base_free: 9_993,
+            quote_free: 0,
+            wire_fee: "0.00000007",
+        },
+        FeeRow {
+            name: "rebated buy",
+            side: Side::Buy,
+            rate_bps_e8: -4 * FIXED_SCALE / 10,
+            slices: &[5_000, 5_000],
+            last_fee: -23_599,
+            fee_asset: "USDT",
+            last_received_net: 5_000,
+            base_free: 10_000,
+            quote_free: 2 * 23_599,
+            wire_fee: "-0.00023599",
+        },
+    ];
+    let price = Price(117_999 * FIXED_SCALE);
+    let qty = Qty(10_000);
+
+    for row in rows {
+        let name = row.name;
+        let (opening_base, opening_quote) = match row.side {
+            Side::Buy => (0, price.notional(qty)),
+            Side::Sell => (qty.0, 0),
+        };
+        let mut wallet = SimWallet::new(SimWalletSetup {
+            base_asset: BASE,
+            quote_asset: QUOTE,
+            opening_base,
+            opening_quote,
+            maker_fee_bps: FeeBps::new(row.rate_bps_e8).expect("the row's rate is in range"),
+        })
+        .expect("two distinct assets and non-negative balances");
+        let request = ReservationRequest {
+            side: row.side,
+            price,
+            qty,
+        };
+        let ReserveOutcome::Reserved(mut reservation) = wallet.reserve(request) else {
+            panic!("{name}: the opening balance covers the whole order");
+        };
+
+        let settlement = row
+            .slices
+            .iter()
+            .map(|&slice| wallet.fill(&mut reservation, Qty(slice)))
+            .last()
+            .expect("every row fills at least once");
+
+        let fee_asset = match settlement.fee_asset {
+            BASE => "BTC",
+            QUOTE => "USDT",
+            other => panic!(
+                "{name}: the fee was paid in asset {} of neither slot",
+                other.0
+            ),
+        };
+        assert_eq!(
+            (settlement.fee, fee_asset, settlement.received_net),
+            (row.last_fee, row.fee_asset, row.last_received_net),
+            "{name}: the last fill's fee, the asset it is paid in, and what the received asset rose by"
+        );
+        let [base, quote] = wallet.settle(0).balances;
+        assert_eq!(
+            (base.free, quote.free),
+            (row.base_free, row.quote_free),
+            "{name}: free balances after the order is fully filled"
+        );
+
+        let order = SimOrder {
+            client_id: ClientOrderId(42),
+            venue_order_id: VenueOrderId(12_510_053_281),
+            side: row.side,
+            price,
+            qty,
+            filled: settlement.cumulative_qty,
+            filled_quote: settlement.cumulative_quote,
+        };
+        let report = wire().at(REPORTED_AT).trade_report(
+            &order,
+            SimFill {
+                trade_id: TRADE_ID,
+                settlement: &settlement,
+                fee_asset,
+            },
+        );
+        assert!(
+            report.contains(&format!("\"n\":\"{}\"", row.wire_fee)),
+            "{name}: the wire commission amount: {report}"
+        );
+        assert!(
+            report.contains(&format!("\"N\":\"{}\"", row.fee_asset)),
+            "{name}: the wire commission asset: {report}"
+        );
+    }
 }
 
 fn wire() -> VenueWire {

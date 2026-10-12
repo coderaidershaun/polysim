@@ -844,6 +844,28 @@ fn every_reason_a_simulated_config_is_refused_names_itself() {
     polysim::config::Config::<NoParams>::from_yaml(&accepted)
         .expect("binance spot with all three market streams and a sim block is the valid shape");
 
+    let with_maker_fee = |bps: &str| {
+        let block = SIM_BLOCK.replace("maker_fee_bps: 10.0", &format!("maker_fee_bps: {bps}"));
+        config_with_execution_on(BINANCE_SPOT_SOURCE, &execution_block_with("sim", &block))
+    };
+    for bps in ["-0.4", "7.5"] {
+        polysim::config::Config::<NoParams>::from_yaml(&with_maker_fee(bps)).unwrap_or_else(
+            |error| panic!("a fractional fee and a rebate are both real schedules, {bps}: {error}"),
+        );
+    }
+    for bps in ["10000.5", "-10000.5", ".nan"] {
+        assert!(
+            matches!(
+                refusal(&with_maker_fee(bps)),
+                ConfigError::Invalid {
+                    field: "execution.sim.maker_fee_bps",
+                    ..
+                }
+            ),
+            "{bps} is not a fee rate: it must be finite and move no more than the whole fill"
+        );
+    }
+
     let no_block = config_with_execution_on(BINANCE_SPOT_SOURCE, &execution_block_with("sim", ""));
     assert!(
         matches!(

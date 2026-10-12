@@ -20,6 +20,7 @@ pub struct SimConfig {
     pub opening_base_balance: f64,
     #[serde(default = "default_opening_quote_balance")]
     pub opening_quote_balance: f64,
+    /// Negative is a rebate, paid in the quote asset.
     #[serde(default = "default_maker_fee_bps")]
     pub maker_fee_bps: f64,
 }
@@ -38,12 +39,11 @@ impl SimConfig {
             "execution.sim.opening_quote_balance",
             self.opening_quote_balance,
         )?;
-        check_nonnegative_amount("execution.sim.maker_fee_bps", self.maker_fee_bps)?;
-        if self.maker_fee_bps > 10_000.0 || self.maker_fee_bps.fract() != 0.0 {
+        if !self.maker_fee_bps.is_finite() || self.maker_fee_bps.abs() > 10_000.0 {
             return Err(ConfigError::Invalid {
                 field: "execution.sim.maker_fee_bps",
                 value: self.maker_fee_bps.to_string().into(),
-                expected: "a whole number of basis points in 0..=10000",
+                expected: "basis points in -10000..=10000, negative for a rebate",
             });
         }
 

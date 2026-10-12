@@ -32,8 +32,8 @@ pub struct ExecEvent {
     /// corrupt the ledger.
     pub cumulative_qty: Qty,
     pub cumulative_quote: i64,
-    /// The fee for `last_qty`, as a 1e-8 mantissa. The asset is UNKNOWN when this configured
-    /// instrument is not charged a fee at all.
+    /// The fee for `last_qty`, as a 1e-8 mantissa, negative for a rebate. The asset is UNKNOWN when
+    /// this configured instrument is not charged a fee at all.
     pub commission: i64,
     pub commission_asset: AssetId,
     /// The venue's own error code, kept for the tape and for operators; the hot path

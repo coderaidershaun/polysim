@@ -12,7 +12,7 @@ use crate::time::TsUs;
 use super::client_id::classify_client_order_id;
 use super::wire::{ExecutionReport, StreamEnvelope, StreamPayload};
 use super::{DecodeContext, FRAME, WireError, money_field, order_side, venue_status};
-use crate::adapters::decode::{mantissa_field, price_field, qty_field};
+use crate::adapters::decode::{DecimalFault, mantissa_field, price_field, qty_field};
 
 /// Frame type. Nothing silent. Driver counts, operator sees.
 #[derive(Debug, Clone, PartialEq)]
@@ -134,7 +134,7 @@ fn decode_execution_report(
         last_qty: qty_field("l", &report.last_qty)?,
         cumulative_qty: qty_field("z", &report.cumulative_qty)?,
         cumulative_quote: money_field("Z", &report.cumulative_quote)?,
-        commission: mantissa_field("n", &report.commission)?,
+        commission: commission_field(&report.commission)?,
         commission_asset: commission_asset(report.commission_asset.as_deref(), context.assets),
         // Stream reports reason, not code (code from request). reject = meaning either way.
         reject_code: 0,
@@ -191,7 +191,16 @@ fn report_reject(kind: ExecKind, reason: &str) -> Option<RejectClass> {
     })
 }
 
-/// Fee charged in asset received. Unregistered -> UNKNOWN (not misattribute). Null = zero fee.
+/// A rebate is a negative commission. Refusing the sign would drop the fill report with it.
+fn commission_field(text: &str) -> Result<i64, DecimalFault> {
+    match text.strip_prefix('-') {
+        Some(rebate) => mantissa_field("n", rebate).map(|rebate| -rebate),
+        None => mantissa_field("n", text),
+    }
+}
+
+/// An asset no configured instrument names becomes UNKNOWN, so its fee is never booked against
+/// one the engine trades. The venue sends null when the fee is zero.
 fn commission_asset(asset: Option<&str>, assets: &AssetDictionary) -> AssetId {
     asset.map_or(AssetId::UNKNOWN, |name| assets.id(name))
 }

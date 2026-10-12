@@ -189,7 +189,10 @@ fn wallet_setup(row: &InstrumentRow, sim: &SimConfig) -> Result<SimWalletSetup, 
         quote_asset: row.quote_asset,
         opening_base: validated_mantissa(sim.opening_base_balance),
         opening_quote: validated_mantissa(sim.opening_quote_balance),
-        maker_fee_bps: FeeBps::new(sim.maker_fee_bps as i64)?,
+        // SMELL: no test reaches this conversion. The fee type counts hundred-millionths of a
+        // basis point, so passing the configured number in unscaled still compiles and charges
+        // almost nothing.
+        maker_fee_bps: FeeBps::new(validated_mantissa(sim.maker_fee_bps))?,
     })
 }
 
