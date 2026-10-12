@@ -1,15 +1,23 @@
+# Build output
+/target
+/dist
+
+# Run output
+/logs
+/data
+
+# The engine's surviving position. Committing one engine's position would restore it onto every
+# checkout of this repo.
+/exposure
+
+# Secrets: config names the env vars, never holds the secret
+.env
+
+# Python
+.venv
+__pycache__/
+
+# Agent tooling and scratch work
 .claude
 .scratch
 .work
-/target
-/dist
-/logs
-/data
-# The engine's surviving position. Machine state, never source — and committing one engine's
-# position would restore it onto every checkout of this repo.
-/exposure
-.venv
-__pycache__/
-.firecrawl
-# Live exchange credentials. Never tracked — config names the env vars, never holds the secret.
-.env

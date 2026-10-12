@@ -3,7 +3,9 @@
 //! Anything out of range, unlisted, absent or unreachable refuses the start loudly. Polymarket
 //! reads from Gamma but shares the taxonomy.
 
-use crate::adapters::binance::rest::{BinanceEnv, ExchangeInfo, RestClient, SymbolFilter};
+use crate::adapters::binance::rest::{
+    BinanceEnv, ExchangeInfo, RestClient, RestError, SymbolFilter,
+};
 use crate::adapters::polymarket::rest::{GammaError, GammaMarket, PolyRest};
 use crate::config::{BinanceMarket, PolySeries, VenueMarket};
 use crate::hot::exec::MAX_QUOTE_LEVELS;
@@ -47,20 +49,17 @@ pub(super) async fn preflight_scales(
                 source,
             }
         })?;
-        let info =
-            client
-                .exchange_info(&[])
-                .await
-                .map_err(|source| EngineError::ScaleUnreachable {
-                    market: binance_market.as_str(),
-                    source,
-                })?;
         for id in members {
-            let scales = check_symbol_scale(registry.instrument(id), &info)?;
+            let row = registry.instrument(id);
+            let info = client
+                .exchange_info(&row.venue_symbol)
+                .await
+                .map_err(|source| exchange_info_failure(row, binance_market, source))?;
+            let scales = check_symbol_scale(row, &info)?;
             registry.set_scales(id, scales.tick_size, scales.step_size);
             registry.set_binance_limits(id, scales.limits);
+            registry.set_order_rate_limits(check_order_rate_limits(binance_market, &info)?);
         }
-        registry.set_order_rate_limits(check_order_rate_limits(binance_market, &info)?);
     }
     Ok(())
 }
@@ -122,6 +121,9 @@ pub fn check_symbol_scale(
     row: &InstrumentRow,
     info: &ExchangeInfo,
 ) -> Result<SymbolScales, EngineError> {
+    // SMELL: a row from another venue is reported as a symbol Binance does not list, and the error
+    // points at Binance config fields that row does not have. This cannot happen today because only
+    // Binance rows are passed in. Taking the Binance market as a parameter would remove the branch.
     let VenueMarket::Binance(binance_market) = row.market else {
         return Err(symbol_unknown(row));
     };
@@ -281,6 +283,20 @@ fn filter_field<'a, T>(
         .iter()
         .find(|filter| filter.filter_type.as_ref() == filter_type)
         .and_then(pick)
+}
+
+fn exchange_info_failure(
+    row: &InstrumentRow,
+    market: BinanceMarket,
+    source: RestError,
+) -> EngineError {
+    if source.is_symbol_rejected() {
+        return symbol_unknown(row);
+    }
+    EngineError::ScaleUnreachable {
+        market: market.as_str(),
+        source,
+    }
 }
 
 fn symbol_unknown(row: &InstrumentRow) -> EngineError {

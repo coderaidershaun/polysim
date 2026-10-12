@@ -52,9 +52,9 @@ impl RestRequest {
                 method: HttpMethod::Get,
                 auth: RequestAuth::Public,
             },
-            RestRequest::ExchangeInfo { symbols } => RequestPlan {
+            RestRequest::ExchangeInfo { symbol } => RequestPlan {
                 path: format!("{prefix}/exchangeInfo"),
-                query: exchange_info_query(market, symbols),
+                query: exchange_info_query(market, symbol),
                 weight: exchange_info_weight(market),
                 endpoint: "exchangeInfo",
                 method: HttpMethod::Get,
@@ -177,16 +177,10 @@ fn api_prefix(market: BinanceMarket) -> &'static str {
     }
 }
 
-fn exchange_info_query(market: BinanceMarket, symbols: &[String]) -> Vec<(&'static str, String)> {
+fn exchange_info_query(market: BinanceMarket, symbol: &str) -> Vec<(&'static str, String)> {
     // only spot narrows the payload by symbol; futures ignores the param and returns all
-    if market == BinanceMarket::Spot && !symbols.is_empty() {
-        let joined = symbols
-            .iter()
-            .map(|symbol| format!("\"{}\"", symbol.to_uppercase()))
-            .collect::<Vec<_>>()
-            .join(",");
-        vec![("symbols", format!("[{joined}]"))]
-    } else {
-        Vec::new()
+    match market {
+        BinanceMarket::Spot => vec![("symbol", symbol.to_uppercase())],
+        BinanceMarket::Perpetual => Vec::new(),
     }
 }

@@ -106,7 +106,9 @@ pub enum EngineError {
         #[source]
         source: DecimalError,
     },
-    #[error("instrument {instrument} ({symbol}) is not listed in {market} exchangeInfo")]
+    #[error(
+        "instrument {instrument} ({symbol}) is not listed on binance {market} — check source.market, env, base and quote in config.yaml"
+    )]
     ScaleSymbolUnknown {
         instrument: u16,
         symbol: Box<str>,
@@ -151,7 +153,7 @@ pub enum EngineError {
         value: Box<str>,
     },
     #[error(
-        "scale preflight could not reach {market} exchangeInfo — refusing to start unvalidated"
+        "scale preflight could not fetch binance {market} exchangeInfo — refusing to start unvalidated"
     )]
     ScaleUnreachable {
         market: &'static str,

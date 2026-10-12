@@ -44,7 +44,7 @@ pub enum RestRequest {
     },
     Klines(KlineQuery),
     ExchangeInfo {
-        symbols: Vec<String>,
+        symbol: String,
     },
     ServerTime,
     AccountInfo,
@@ -102,6 +102,16 @@ pub enum RestError {
         #[source]
         source: reqwest::Error,
     },
+    // The url goes last because a log record cuts a long line off at the end, and a signed url is
+    // long enough to hide anything written after it.
+    #[error(
+        "request timed out after {limit_secs}s while {phase} — slow or blocked route to the venue (vpn, proxy, firewall): {url}"
+    )]
+    Timeout {
+        url: String,
+        phase: &'static str,
+        limit_secs: u64,
+    },
     #[error(
         "binance rate limited {url}: http {status}, retry after {retry_after_secs:?}s (code {code:?}: {message:?})"
     )]
@@ -149,7 +159,9 @@ pub enum RestError {
 impl RestError {
     pub fn verdict(&self) -> FailureVerdict {
         match self {
-            RestError::Transport { .. } | RestError::RateLimited { .. } => FailureVerdict::Retry,
+            RestError::Transport { .. }
+            | RestError::Timeout { .. }
+            | RestError::RateLimited { .. } => FailureVerdict::Retry,
             // A decode failure means the venue said something this build cannot read; the same
             // request will say it again.
             RestError::ClientBuild { .. }
@@ -160,6 +172,16 @@ impl RestError {
             | RestError::Decode { .. } => FailureVerdict::Fatal,
             RestError::Status { code, message, .. } => status_verdict(*code, message.as_deref()),
         }
+    }
+
+    pub(crate) fn is_symbol_rejected(&self) -> bool {
+        matches!(
+            self,
+            RestError::Status {
+                code: Some(-1121),
+                ..
+            }
+        )
     }
 }
 
@@ -218,10 +240,10 @@ impl RestClient {
 
     /// # Errors
     /// [`RestError`].
-    pub async fn exchange_info(&mut self, symbols: &[String]) -> Result<ExchangeInfo, RestError> {
+    pub async fn exchange_info(&mut self, symbol: &str) -> Result<ExchangeInfo, RestError> {
         let fetched = self
             .request(&RestRequest::ExchangeInfo {
-                symbols: symbols.to_vec(),
+                symbol: symbol.to_owned(),
             })
             .await?;
         decode(&fetched)
@@ -272,10 +294,7 @@ impl RestClient {
         let response = builder
             .send()
             .await
-            .map_err(|source| RestError::Transport {
-                url: url.clone(),
-                source,
-            })?;
+            .map_err(|source| transport_error(&url, "waiting for the response", source))?;
 
         let status = response.status().as_u16();
         self.observe_limit_headers(response.headers());
@@ -312,10 +331,7 @@ impl RestClient {
         let body = response
             .text()
             .await
-            .map_err(|source| RestError::Transport {
-                url: url.clone(),
-                source,
-            })?;
+            .map_err(|source| transport_error(&url, "reading the response body", source))?;
         Ok(Fetched { url, body })
     }
 
@@ -370,6 +386,27 @@ fn method_of(method: HttpMethod) -> reqwest::Method {
     match method {
         HttpMethod::Get => reqwest::Method::GET,
         HttpMethod::Delete => reqwest::Method::DELETE,
+    }
+}
+
+/// One deadline covers both the wait for headers and the body read, and reqwest reports a slow
+/// body as a timeout wrapped in a decoding error. The phase says which of the two ran out of time.
+fn transport_error(url: &str, phase: &'static str, source: reqwest::Error) -> RestError {
+    let url = url.to_owned();
+    if !source.is_timeout() {
+        return RestError::Transport { url, source };
+    }
+    if source.is_connect() {
+        return RestError::Timeout {
+            url,
+            phase: "connecting",
+            limit_secs: CONNECT_TIMEOUT.as_secs(),
+        };
+    }
+    RestError::Timeout {
+        url,
+        phase,
+        limit_secs: REQUEST_TIMEOUT.as_secs(),
     }
 }
 

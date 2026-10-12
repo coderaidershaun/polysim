@@ -89,7 +89,7 @@ fn every_request_plans_its_documented_weight_method_and_auth() {
         ),
         (
             RestRequest::ExchangeInfo {
-                symbols: Vec::new(),
+                symbol: "btcusdt".to_owned(),
             },
             20,
             HttpMethod::Get,
@@ -112,6 +112,21 @@ fn every_request_plans_its_documented_weight_method_and_auth() {
         assert_eq!(plan.auth, auth, "auth for {endpoint}");
         assert_eq!(plan.endpoint, endpoint);
     }
+}
+
+/// Spot's unfiltered catalog is about 17 MB, enough to time out a startup on a slow link, so a
+/// spot request must always name its one symbol. Perpetual ignores the parameter, so none is sent.
+#[test]
+fn exchange_info_asks_the_venue_for_one_symbol_on_spot_and_none_on_perp() {
+    let request = RestRequest::ExchangeInfo {
+        symbol: "btcusdt".to_owned(),
+    };
+
+    assert_eq!(
+        request.plan(BinanceMarket::Spot).query,
+        vec![("symbol", "BTCUSDT".to_owned())]
+    );
+    assert!(request.plan(BinanceMarket::Perpetual).query.is_empty());
 }
 
 /// The public client must refuse a private request rather than send it unsigned. Reached without a
@@ -235,6 +250,15 @@ fn venue_failure_classification() {
                 message: None,
             },
             FailureVerdict::Fatal,
+        ),
+        (
+            "timed out reading the body (Timeout variant)",
+            RestError::Timeout {
+                url: "https://api.binance.com/api/v3/exchangeInfo".to_owned(),
+                phase: "reading the response body",
+                limit_secs: 10,
+            },
+            FailureVerdict::Retry,
         ),
         (
             "rate limited (RateLimited variant)",

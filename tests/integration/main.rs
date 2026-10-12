@@ -3,6 +3,7 @@
 //! (`cargo test --test integration -- --ignored`). Grouped as one target so the ignored set runs
 //! together, mirroring the fitness `main.rs` convention.
 
+mod binance_scale;
 mod binance_signed;
 mod observer;
 mod poly_exec;
