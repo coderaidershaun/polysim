@@ -231,6 +231,27 @@ fn place_responses_decode_to_the_outcome_each_shape_demands() {
         assert_eq!(outcome.event.reject, None);
     }
 
+    // A resting order answers `live`, the commonest answer a maker ever gets: accepted and on the
+    // book with nothing filled.
+    {
+        let outcome = answered(
+            decode_place(
+                ok(fixture!("place_live")),
+                &buy_request(CLIENT_A),
+                &wiring.decode(),
+            )
+            .expect("committed fixture decodes"),
+        );
+        assert_eq!(
+            outcome.placed.expect("a live placement rests").status,
+            PlacementStatus::Live
+        );
+        assert_eq!(outcome.event.kind, ExecKind::AckPlaced);
+        assert_eq!(outcome.event.status, Some(VenueOrderStatus::New));
+        assert_eq!(outcome.event.cumulative_qty, Qty(0));
+        assert_eq!(outcome.event.reject, None);
+    }
+
     // An unmatched placement is live with empty amounts — the venue leaves these EMPTY rather
     // than "0"; a strict integer parse would fail the frame.
     {
@@ -342,6 +363,30 @@ fn a_maker_fill_folds_from_the_cumulative_size_matched() {
         filled.cumulative_qty.0 > partial.cumulative_qty.0,
         "size_matched must be cumulative or the fold is a delta fold in disguise"
     );
+}
+
+/// The two order frames that report no fill of their own. A cancellation still carries the quantity
+/// matched before it, because the engine's totals are cumulative and a cancel that zeroed them
+/// would hand back a fill the venue had already settled.
+#[test]
+fn placement_and_cancellation_frames_report_their_own_kind() {
+    let wiring = Wiring::new();
+
+    let placed = stream_order(fixture!("ws_order_placement"), &wiring);
+    assert_eq!(placed.kind, ExecKind::ReportNew);
+    assert_eq!(placed.client_id, CLIENT_A);
+    assert_eq!(placed.status, Some(VenueOrderStatus::New));
+    assert_eq!(placed.liquidity, None);
+    assert_eq!(placed.cumulative_qty, Qty(0));
+
+    let canceled = stream_order(fixture!("ws_order_cancellation"), &wiring);
+    assert_eq!(canceled.kind, ExecKind::ReportCanceled);
+    assert_eq!(canceled.client_id, CLIENT_A);
+    assert_eq!(canceled.status, Some(VenueOrderStatus::Canceled));
+    assert_eq!(canceled.liquidity, None);
+    assert_eq!(canceled.qty, SIZE);
+    assert_eq!(canceled.cumulative_qty, Qty(4 * FIXED_SCALE));
+    assert_eq!(canceled.cumulative_quote, 208_000_000);
 }
 
 /// Everything downstream of a trade frame that is NOT the failed↔matched settlement transition
