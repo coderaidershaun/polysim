@@ -19,7 +19,7 @@ use std::path::Path;
 ///
 /// Named one at a time on purpose. The guard below exists so that a new target cannot quietly
 /// re-link eframe everywhere, and any rule shaped like "examples are exempt" would hand that back.
-const NON_UI_TARGETS: [&str; 2] = ["poly-probe", "poly-recover"];
+const NON_UI_TARGETS: [&str; 1] = ["poly-probe"];
 
 /// Parsed straight from the manifest text — pulling in a toml crate to read two tables would be a
 /// new dependency earned for nothing.

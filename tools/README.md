@@ -18,7 +18,3 @@ A read-only health check for a Polymarket account. It answers, in one report: is
 cargo run --example poly-probe              # reads .env
 cargo run --example poly-probe path/to/env  # or a specific file
 ```
-
-## poly-recover
-
-A one-off emergency tool, kept for the record. A decode bug once stranded a real bought position on Polymarket, and this program sold that one position back — sell only, one order at most, never more than the venue says is actually held, and it checks the venue at every step. It is hard-wired to that single incident, so it is not a general-purpose tool; it stays here because it documents what a careful hand recovery looks like.

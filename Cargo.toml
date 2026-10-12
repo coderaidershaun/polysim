@@ -27,10 +27,6 @@ required-features = ["ui"]
 name = "poly-probe"
 path = "tools/poly-probe/main.rs"
 
-[[example]]
-name = "poly-recover"
-path = "tools/poly-recover/main.rs"
-
 [features]
 ui = ["dep:eframe"]
 
