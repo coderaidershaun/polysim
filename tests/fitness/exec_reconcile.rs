@@ -16,7 +16,7 @@
 //! belongs to neither alone.
 
 use polysim::hot::exec::{
-    BookTop, CloseReason, DesiredQuote, ExecLimits, FundsView, OrderSlot, OrderState, PlaceIntent,
+    BookTop, CloseReason, DesiredQuote, ExecLimits, OrderSlot, OrderState, PlaceIntent,
     ReconcileInput, ReconcileOutcome, RejectReason, RestingOrder, TickGrid, apply_exec_event,
     reconcile_side,
 };
@@ -26,6 +26,8 @@ use polysim::msg::exec::{
 };
 use polysim::time::{DurationUs, TsUs};
 use proptest::prelude::*;
+
+use crate::engine_support::{rich, top};
 
 /// A whole price unit in mantissas, matching the rest of the suite.
 const ONE: i64 = 100_000_000;
@@ -43,18 +45,6 @@ fn grid() -> TickGrid {
     }
 }
 
-/// A two-sided book around `mid`, fresh as of the spin that reads it.
-fn top(bid: i64, ask: i64) -> BookTop {
-    BookTop {
-        best_bid: Some(Price(bid)),
-        best_ask: Some(Price(ask)),
-        mid: Price(bid + (ask - bid) / 2),
-        is_valid: true,
-        last_commit_ts_us: TsUs::from_micros(1_000),
-        now_ts_us: TsUs::from_micros(1_000),
-    }
-}
-
 fn limits() -> ExecLimits {
     ExecLimits {
         requote_threshold_ticks: 1,
@@ -62,14 +52,6 @@ fn limits() -> ExecLimits {
         max_quote_distance_centi_bps: 100 * 100 * 100,
         max_book_age: DurationUs::from_secs(2),
         max_order_notional_quote: i64::MAX / 2,
-    }
-}
-
-/// Funded far past anything these cases ask for, so the funds gate is not silently what refuses.
-fn rich() -> FundsView {
-    FundsView {
-        spendable: i64::MAX / 4,
-        floor: 0,
     }
 }
 

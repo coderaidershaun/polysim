@@ -1,8 +1,8 @@
-//! Chart projection fitness (chunk C1): the pure map from the ordered book and event lanes to the
+//! Chart projection fitness: the pure map from the ordered book and event lanes to the
 //! rolling five-minute mid series, and the screen transform over it. Buckets are folded in event time
 //! alone, so a spin carrying no trustworthy mid stays a real hole the line splits across rather
 //! than an invented sample, and replay reproduces the series exactly. Prices never leave exact
-//! half-tick integers until the final `0..=1` fraction. The domain grows left → right before it
+//! half-tick integers until the final `0..=1` fraction. The domain grows from left to right before it
 //! slides; the bounds cover fills as well as mids, so an off-mid marker can never be invisible.
 
 use polysim::desktop::chart_model::{
@@ -13,76 +13,17 @@ use polysim::desktop::chart_view::{
 };
 use polysim::ids::{AssetId, InstrumentId, Price, Qty, Side};
 use polysim::msg::exec::Liquidity;
-use polysim::msg::inbound::Level;
-use polysim::msg::ui::{UI_BOOK_LEVELS, UiBookSnapshot, UiBookState, UiEvent};
+use polysim::msg::ui::{UiBookSnapshot, UiBookState, UiEvent};
 use polysim::time::{DurationUs, TsUs};
 use proptest::prelude::*;
 
-/// One-mantissa tick, so a price mantissa reads directly as its tick index and a mid reads as the
-/// plain sum of the two best indices (half-ticks).
-const TICK: Price = Price(1);
-
-/// The shipped one-second spin, so the five-minute window is exactly 300 buckets and a bucket index
-/// reads as its second.
-const SPIN: DurationUs = DurationUs::from_micros(1_000_000);
-
-/// The window at [`SPIN`]: `300_000_000 / 1_000_000`.
-const CAPACITY: u64 = 300;
+use crate::desktop_support::{
+    CAPACITY, SPIN, TICK, chart_book, chart_model, chart_with_ticks, rotation_event, valid_book,
+};
 
 /// Buckets committed past a full window, so eviction and sliding are exercised by an amount rather
 /// than by a literal that would silently mean something else if the window span moved.
 const OVERRUN: u64 = 100;
-
-fn chart_with_ticks(ticks: &[Option<Price>]) -> ChartModel {
-    let mut chart = ChartModel::with_capacity(ticks.len(), SPIN);
-    chart.configure(ticks, SPIN);
-    chart
-}
-
-fn chart_model(instruments: usize) -> ChartModel {
-    chart_with_ticks(&vec![Some(TICK); instruments])
-}
-
-fn book(
-    instrument: u16,
-    bucket: u64,
-    state: UiBookState,
-    bids: &[i64],
-    asks: &[i64],
-) -> UiBookSnapshot {
-    let empty = Level {
-        price: Price(0),
-        qty: Qty(0),
-    };
-    let mut bid_levels = [empty; UI_BOOK_LEVELS];
-    let mut ask_levels = [empty; UI_BOOK_LEVELS];
-    for (slot, &price) in bid_levels.iter_mut().zip(bids) {
-        *slot = Level {
-            price: Price(price),
-            qty: Qty(1),
-        };
-    }
-    for (slot, &price) in ask_levels.iter_mut().zip(asks) {
-        *slot = Level {
-            price: Price(price),
-            qty: Qty(1),
-        };
-    }
-    UiBookSnapshot {
-        instrument: InstrumentId(instrument),
-        seq: 0,
-        event_ts_us: TsUs::from_micros(bucket as i64 * SPIN.micros()),
-        state,
-        bid_len: bids.len() as u16,
-        ask_len: asks.len() as u16,
-        bids: bid_levels,
-        asks: ask_levels,
-    }
-}
-
-fn valid_book(instrument: u16, bucket: u64, bid: i64, ask: i64) -> UiBookSnapshot {
-    book(instrument, bucket, UiBookState::Valid, &[bid], &[ask])
-}
 
 /// Fold one two-sided commit into `bucket` with no snapshot loss before it — the ordinary case.
 fn commit(chart: &mut ChartModel, instrument: u16, bucket: u64, bid: i64, ask: i64) {
@@ -104,14 +45,6 @@ fn fill_event(instrument: u16, bucket: u64, side: Side, price: i64) -> UiEvent {
         commission: 0,
         commission_asset: AssetId(0),
         liquidity: Some(Liquidity::Maker),
-    }
-}
-
-fn rotation_event(instrument: u16, bucket: u64) -> UiEvent {
-    UiEvent::Rotation {
-        instrument: InstrumentId(instrument),
-        seq: 0,
-        event_ts_us: TsUs::from_micros(bucket as i64 * SPIN.micros()),
     }
 }
 
@@ -240,7 +173,7 @@ fn missing_spin_case(chart: &mut ChartModel) {
     commit(chart, 0, 2, 101, 103);
     // Spin 3 commits, but the book is awaiting its snapshot: nothing is banked for it.
     chart.apply_book(
-        &book(0, 3, UiBookState::AwaitingSnapshot, &[], &[]),
+        &chart_book(0, 3, UiBookState::AwaitingSnapshot, &[], &[]),
         BookContinuity::Continuous,
     );
     commit(chart, 0, 4, 105, 107);
@@ -251,7 +184,7 @@ fn lost_snapshot_run_case(chart: &mut ChartModel) {
     commit(chart, 0, 2, 101, 103);
     // The lane dropped snapshots, revealed on a one-sided commit that banks nothing itself.
     chart.apply_book(
-        &book(0, 3, UiBookState::Valid, &[100], &[]),
+        &chart_book(0, 3, UiBookState::Valid, &[100], &[]),
         BookContinuity::GapBefore,
     );
     commit(chart, 0, 3, 104, 106);
@@ -324,7 +257,7 @@ fn line_breaks_across_discontinuities() {
 /// Buckets retained past the visible window stay in the series (eviction is by capacity, visibility by
 /// the five-minute domain); a rotation clears only its own instrument; only a valid two-sided,
 /// on-grid book banks a mid, and an instrument with no tick grid at all charts nothing; the domain
-/// grows left → right while filling then slides once full; and the whole projection is replay
+/// grows from left to right while filling then slides once full; and the whole projection is replay
 /// deterministic.
 #[test]
 fn domain_retention_rotation_grid_and_replay_determinism() {
@@ -377,15 +310,15 @@ fn domain_retention_rotation_grid_and_replay_determinism() {
 
     let mut grid_chart = chart_model(1);
     grid_chart.apply_book(
-        &book(0, 1, UiBookState::AwaitingSnapshot, &[100], &[102]),
+        &chart_book(0, 1, UiBookState::AwaitingSnapshot, &[100], &[102]),
         BookContinuity::Continuous,
     );
     grid_chart.apply_book(
-        &book(0, 2, UiBookState::Valid, &[100], &[]),
+        &chart_book(0, 2, UiBookState::Valid, &[100], &[]),
         BookContinuity::Continuous,
     );
     grid_chart.apply_book(
-        &book(0, 3, UiBookState::Valid, &[], &[102]),
+        &chart_book(0, 3, UiBookState::Valid, &[], &[102]),
         BookContinuity::Continuous,
     );
     assert!(
@@ -462,7 +395,7 @@ fn domain_retention_rotation_grid_and_replay_determinism() {
         commit(&mut chart, 1, 1, 300, 302);
         commit(&mut chart, 0, 1, 105, 107);
         chart.apply_book(
-            &book(0, 2, UiBookState::AwaitingSnapshot, &[], &[]),
+            &chart_book(0, 2, UiBookState::AwaitingSnapshot, &[], &[]),
             BookContinuity::GapBefore,
         );
         commit(&mut chart, 0, 3, 98, 100);
@@ -491,8 +424,8 @@ fn domain_retention_rotation_grid_and_replay_determinism() {
 }
 
 /// A fill marks its own price, never the mid, and a whole window of fills at the run's real rate is
-/// never evicted out from under a still-drawn bucket (the cadence at which a fill ring unrelated to
-/// the bucket ring used to start doing exactly that). Bounds span the data's extremes with 5% air —
+/// never evicted out from under a still-drawn bucket, which is what a fill ring sized independently
+/// of the bucket ring would do. Bounds span the data's extremes with 5% air —
 /// swallowing fills as well as mids, and never collapsing to zero height on a flat series — and the
 /// x/y fractions built over those bounds stay in `0.0..=1.0`, clamping outside the window and reading
 /// as their own centre on a zero-height range.

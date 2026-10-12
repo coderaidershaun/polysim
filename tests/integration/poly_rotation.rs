@@ -5,9 +5,9 @@
 //! reconstructs the books) AND a real [`PersistWriter`] via the rotations side-channel, so the
 //! run also proves the live lineage parquet lands and reads back per leg.
 //!
-//! EXCEPTION to the rex-code-tests-live-smoke ≤20s ceiling, stated up front: rotation physics set
-//! the span. Confirming a NEW window's book goes Valid while the OLD still streams, then measuring
-//! how long past nominal close the old tears down, needs ≥2 full ~5-minute grid cycles to coexist.
+//! This capture runs far longer than a quick live smoke test, because rotation physics set the
+//! span. Confirming a NEW window's book goes Valid while the OLD still streams, then measuring how
+//! long past nominal close the old tears down, needs ≥2 full ~5-minute grid cycles to coexist.
 //! Still one capture, run deliberately by the agent — never CI (`#[ignore]`).
 
 use std::collections::BTreeSet;
@@ -36,7 +36,7 @@ use polysim::time::EngineClock;
 
 use crate::observer::RotationObserver;
 use crate::rotations_parquet::rotation_instruments;
-use crate::{WINDOW_SECS, rest_check, unix_now_s};
+use crate::{US, WINDOW_SECS, rest_check, unix_now_s};
 
 /// 12 minutes: boot subscribes the current window, then ≥2 handovers land inside the span.
 const RUN_SECS: u64 = 720;
@@ -45,7 +45,6 @@ const PRE_BOUNDARY_SECS: i64 = 90;
 const RING_CAPACITY: usize = 65_536;
 const PERSIST_RING_CAPACITY: usize = 4_096;
 const ROTATIONS_CHANNEL_CAPACITY: usize = 256;
-const US: f64 = 1_000_000.0;
 const POLL: Duration = Duration::from_millis(50);
 const PRINT_EVERY: Duration = Duration::from_secs(60);
 const STRATEGY_ID: &str = "poly-integration";
@@ -302,8 +301,8 @@ fn assert_existence(observer: &RotationObserver, fatal: &FatalSignal, persisted:
         observer.total_messages()
     );
 
-    // Every leg that rotated must have landed ≥1 lineage row in the parquet (mandate: ≥1 RotationRow
-    // per leg, read back from the rotations table).
+    // Every leg that rotated must have landed at least one lineage row in the parquet, read back
+    // from the rotations table.
     let rotated_legs: BTreeSet<usize> = observer
         .rotations()
         .iter()

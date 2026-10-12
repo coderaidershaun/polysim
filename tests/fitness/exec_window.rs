@@ -17,7 +17,7 @@
 use polysim::config::RecordedTables;
 use polysim::hot::dispatch::HotEngine;
 use polysim::hot::exec::{
-    DesiredQuote, ExecSettings, OrderSlot, OrderState, QuoteLevel, RejectOrigin, RejectReason,
+    DesiredQuote, ExecSettings, OrderSlot, OrderState, QuoteLevel, RejectReason,
 };
 use polysim::hot::strategy::{Strategy, StrategyCtx, WindowInfo};
 use polysim::ids::{Price, Side};
@@ -29,7 +29,7 @@ use polysim::msg::ui::UiEvent;
 use polysim::time::{DurationUs, TsUs};
 use rtrb::Consumer;
 
-use crate::engine_support::{ALL_TABLES, ONE, exec_event, pop, rotation};
+use crate::engine_support::{ALL_TABLES, ONE, exec_event, local_refusals, pop, rotation};
 use crate::risk_gate::{
     ASK, BID, CEILING, INSTRUMENT, QUOTE_QTY, QuotingSetup, TwoSidedQuoter, built_quoting_engine,
     drain_commands, exec_settings, make_ready, reseat_book, row_with_ceiling, spin_at,
@@ -40,15 +40,19 @@ use crate::risk_gate::{
 const WINDOW: DurationUs = DurationUs::from_secs(300);
 const MARGIN: DurationUs = DurationUs::from_secs(3);
 const OPEN: i64 = 1_000_000_000;
-const CLOSE: i64 = OPEN + 300 * 1_000_000;
+const CLOSE: i64 = OPEN + WINDOW.micros();
 
-fn windowed_engine() -> (HotEngine, Consumer<ExecLaneItem>, Consumer<UiEvent>) {
+fn quoting_engine(
+    strategy: Box<dyn Strategy>,
+    max_orders_per_side: usize,
+) -> (HotEngine, Consumer<ExecLaneItem>, Consumer<UiEvent>) {
     let built = built_quoting_engine(QuotingSetup {
         row: row_with_ceiling(CEILING),
-        strategy: Box::new(TwoSidedQuoter),
+        strategy,
         restored: &[],
         settings: ExecSettings {
             quote_stop_margin: MARGIN,
+            max_orders_per_side,
             ..exec_settings()
         },
         tables: RecordedTables::new(&ALL_TABLES),
@@ -69,20 +73,6 @@ fn cancels(commands: &[ExecCommand]) -> usize {
         .iter()
         .filter(|command| matches!(command, ExecCommand::Cancel { .. }))
         .count()
-}
-
-fn refusals(ui_events: &mut Consumer<UiEvent>) -> Vec<RejectReason> {
-    let mut reasons = Vec::new();
-    while let Ok(event) = ui_events.pop() {
-        if let UiEvent::Reject {
-            origin: RejectOrigin::Local(reason),
-            ..
-        } = event
-        {
-            reasons.push(reason);
-        }
-    }
-    reasons
 }
 
 #[test]
@@ -145,22 +135,6 @@ impl Strategy for LadderQuoter {
     }
 }
 
-fn laddered_engine() -> (HotEngine, Consumer<ExecLaneItem>, Consumer<UiEvent>) {
-    let built = built_quoting_engine(QuotingSetup {
-        row: row_with_ceiling(CEILING),
-        strategy: Box::new(LadderQuoter),
-        restored: &[],
-        settings: ExecSettings {
-            quote_stop_margin: MARGIN,
-            max_orders_per_side: LADDER_DEPTH,
-            ..exec_settings()
-        },
-        tables: RecordedTables::new(&ALL_TABLES),
-        run_nonce: 0,
-    });
-    (built.engine, built.commands, built.ui_events)
-}
-
 fn seat_ladder(
     engine: &mut HotEngine,
     commands: &mut Consumer<ExecLaneItem>,
@@ -187,7 +161,8 @@ fn seat_ladder(
 /// reason would read exactly like the window gate working.
 #[test]
 fn the_quote_stop_pulls_the_whole_ladder_and_an_unwindowed_instrument_never_stops() {
-    let (mut engine, mut commands, mut ui_events) = laddered_engine();
+    let (mut engine, mut commands, mut ui_events) =
+        quoting_engine(Box::new(LadderQuoter), LADDER_DEPTH);
     make_ready(&mut engine, OPEN);
     engine.dispatch(
         pop(0, 0),
@@ -205,7 +180,7 @@ fn the_quote_stop_pulls_the_whole_ladder_and_an_unwindowed_instrument_never_stop
     assert_eq!(cancels(&swept), LADDER_DEPTH);
     assert_eq!(places(&swept), 0, "and nothing new may go on it: {swept:?}");
     assert!(
-        refusals(&mut ui_events).contains(&RejectReason::OutsideWindow),
+        local_refusals(&mut ui_events).contains(&RejectReason::OutsideWindow),
         "the reason the side stopped quoting is the window, and it must say so"
     );
 
@@ -215,7 +190,7 @@ fn the_quote_stop_pulls_the_whole_ladder_and_an_unwindowed_instrument_never_stop
 
     ack_cancelled(&mut engine, &swept, stop + 2_000_000);
     let next_open = CLOSE;
-    let next_close = next_open + 300 * 1_000_000;
+    let next_close = next_open + WINDOW.micros();
     engine.dispatch(
         pop(0, 0),
         &InboundMessage::MarketRotation(rotation(0, next_open, next_close, next_open)),
@@ -230,7 +205,10 @@ fn the_quote_stop_pulls_the_whole_ladder_and_an_unwindowed_instrument_never_stop
     let swept_again = drain_commands(&mut commands);
     assert_eq!(cancels(&swept_again), LADDER_DEPTH);
 
-    let (mut unwindowed, mut unwindowed_commands, _ui_events) = windowed_engine();
+    let (mut unwindowed, mut unwindowed_commands, _ui_events) = quoting_engine(
+        Box::new(TwoSidedQuoter),
+        exec_settings().max_orders_per_side,
+    );
     make_ready(&mut unwindowed, 0);
     for message in reseat_book(BID, ASK, 10) {
         unwindowed.dispatch(pop(0, 0), &message);

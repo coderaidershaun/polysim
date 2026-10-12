@@ -65,6 +65,14 @@ const WINDOW: i64 = 300_000_000;
 /// A grid boundary far from zero, so a sign or origin slip cannot pass by accident.
 const FIRST_OPEN: i64 = 1_000_000_000_000;
 
+/// Slot a hosts the first window and slot b the second, each leg opening with its window.
+const TILING: [(u16, i64); 4] = [
+    (A_UP, FIRST_OPEN),
+    (A_DOWN, FIRST_OPEN),
+    (B_UP, FIRST_OPEN + WINDOW),
+    (B_DOWN, FIRST_OPEN + WINDOW),
+];
+
 /// [`PolySeries::slot_symbols`] order: the `{a,b}` window slots crossed with `{up,down}`.
 const SLOT_SYMBOLS: [&str; 4] = [
     "btc-updown-5m-a-up",
@@ -183,14 +191,7 @@ fn publisher() -> crate::engine_support::LinkedEngine {
 /// rotation resets the slot's derived state, exactly as the live path does.
 fn publisher_at_the_first_two_windows() -> crate::engine_support::LinkedEngine {
     let mut linked = publisher();
-    let second_open = FIRST_OPEN + WINDOW;
-    let rotations = [
-        (A_UP, FIRST_OPEN),
-        (A_DOWN, FIRST_OPEN),
-        (B_UP, second_open),
-        (B_DOWN, second_open),
-    ];
-    for (instrument, open) in rotations {
+    for (instrument, open) in TILING {
         dispatch(
             &mut linked,
             InboundMessage::MarketRotation(rotation(
@@ -1069,13 +1070,7 @@ impl Maker {
 /// priced, exactly as [`publisher_at_the_first_two_windows`] arranges them.
 fn armed_maker() -> Maker {
     let mut maker = Maker::new(maker_params());
-    let second_open = FIRST_OPEN + WINDOW;
-    for (instrument, open) in [
-        (A_UP, FIRST_OPEN),
-        (A_DOWN, FIRST_OPEN),
-        (B_UP, second_open),
-        (B_DOWN, second_open),
-    ] {
+    for (instrument, open) in TILING {
         maker.dispatch(InboundMessage::MarketRotation(rotation(
             instrument,
             open,

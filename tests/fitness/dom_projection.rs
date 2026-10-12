@@ -1,13 +1,11 @@
-//! DOM projection fitness (chunk 3): the pure map from a book snapshot + simulated quote to a
+//! DOM projection fitness: the pure map from a book snapshot + simulated quote to a
 //! fixed-center tick ladder. Anchors are exact integer math on tick indices at both mid parities;
 //! empty ticks keep their rows as `None` (never a fabricated zero); off-grid prices are invalid, not
 //! rounded; the quote highlights exactly one row per side or reports a directional off-screen delta.
 //! The model half asserts latest-per-instrument retention, sequence-gap counting, and event-time
-//! quote liveness; the formatters render the tick-unit convention the spec's `65991` example fixes.
-//! The fit half pins the one geometry rule that can fail silently: asking for more rows than the
-//! panel holds costs rows, never legibility.
-
-use std::collections::HashMap;
+//! quote liveness; the formatters render the tick-unit convention, a mid of 65991.5 ticks reading
+//! as `65991.5`. The fit half pins the one geometry rule that can fail silently: asking for more
+//! rows than the panel holds costs rows, never legibility.
 
 use polysim::desktop::dom_view::{
     DEFAULT_ROWS_PER_SIDE, DomGrouping, DomOverlay, DomRow, DomStatus, DomViewInput, FeedStatus,
@@ -18,10 +16,11 @@ use polysim::desktop::exec_model::{OrderCell, OrderStatus};
 use polysim::desktop::format::{MISSING, write_mid, write_opt_qty, write_qty};
 use polysim::desktop::model::UiModel;
 use polysim::ids::{ClientOrderId, FIXED_SCALE, InstrumentId, Price, Qty};
-use polysim::msg::inbound::Level;
-use polysim::msg::ui::{DomQuote, UI_BOOK_LEVELS, UiBookSnapshot, UiBookState, UiEvent};
+use polysim::msg::ui::{DomQuote, UiBookSnapshot, UiBookState, UiEvent};
 use polysim::time::{DurationUs, TsUs};
 use proptest::prelude::*;
+
+use crate::desktop_support::{BookFixture, NamedCase, book_snapshot, overlay};
 
 /// A one-mantissa tick, so a price mantissa reads directly as its tick index and the ladder math is
 /// legible in the assertions.
@@ -34,44 +33,26 @@ fn book(
     bids: &[(i64, i64)],
     asks: &[(i64, i64)],
 ) -> UiBookSnapshot {
-    let empty = Level {
-        price: Price(0),
-        qty: Qty(0),
-    };
-    let mut bid_levels = [empty; UI_BOOK_LEVELS];
-    let mut ask_levels = [empty; UI_BOOK_LEVELS];
-    for (slot, &(price, qty)) in bid_levels.iter_mut().zip(bids) {
-        *slot = Level {
-            price: Price(price),
-            qty: Qty(qty),
-        };
-    }
-    for (slot, &(price, qty)) in ask_levels.iter_mut().zip(asks) {
-        *slot = Level {
-            price: Price(price),
-            qty: Qty(qty),
-        };
-    }
-    UiBookSnapshot {
-        instrument: InstrumentId(instrument),
+    book_snapshot(BookFixture {
+        instrument,
         seq,
-        event_ts_us: TsUs::from_micros(event_ts),
+        event_ts,
         state: UiBookState::Valid,
-        bid_len: bids.len() as u16,
-        ask_len: asks.len() as u16,
-        bids: bid_levels,
-        asks: ask_levels,
-    }
+        bids,
+        asks,
+    })
 }
 
 /// Anchors are exact integer math at both mid parities: an even `mid_half` skips the shared tick (the
 /// separator's own), an odd one skips no tick and every level between the best price and the mid is
-/// `None`, never a fabricated zero. A locked book (best bid == best ask) shows the shared price only
-/// in the separator. The tick-unit formatters render the same convention the spec's `65991` example
-/// fixes, and a negative sub-unit qty keeps its sign even though the integer part rounds to zero.
+/// `None`, never a fabricated zero. A locked book (best bid equal to best ask) shows the shared price only
+/// in the separator. The tick-unit formatters render the same tick-count convention, a half-tick
+/// mid keeping its half, and a negative sub-unit qty keeps its sign even though the integer part
+/// rounds to zero.
 #[test]
 fn anchor_math_holds_at_both_mid_parities_and_a_locked_book() {
-    // bb 100, ba 102 → mid_half 202 (even) → integer mid 101, which is the separator's own tick.
+    // Best bid 100 and best ask 102 give 202 half-ticks, which is even, so the mid is the whole tick
+    // 101 and it is the separator's own tick.
     let mid = mid_half_ticks(Price(100), Price(102), TICK).expect("on-grid");
     assert_eq!(mid, 202);
     assert_eq!(
@@ -110,7 +91,8 @@ fn anchor_math_holds_at_both_mid_parities_and_a_locked_book() {
     assert_eq!(bids[1].public_qty, Some(Qty(2)));
     assert_eq!(bids[2].public_qty, None);
 
-    // Wide spread: bb 100, ba 105 → mid_half 205 (odd) → 102.5; ticks 101-104 have no quantity.
+    // Wide spread: best bid 100 and best ask 105 give 205 half-ticks, which is odd, so the mid is
+    // 102.5 and ticks 101 to 104 have no quantity.
     let odd_snapshot = book(0, 0, 10, &[(100, 4)], &[(105, 5)]);
     let odd_view = build_dom_view(DomViewInput {
         snapshot: Some(&odd_snapshot),
@@ -138,7 +120,8 @@ fn anchor_math_holds_at_both_mid_parities_and_a_locked_book() {
     assert_eq!(odd_bids[2].tick_index, 100);
     assert_eq!(odd_bids[2].public_qty, Some(Qty(4)));
 
-    // bb == ba == 100 → mid_half 200 (even) → mid 100; a0 101, b0 99 skip tick 100 entirely.
+    // Best bid and best ask are both 100, which gives 200 half-ticks, so the mid is 100. The first
+    // ask row is 101 and the first bid row is 99, so both skip tick 100 entirely.
     let locked_snapshot = book(0, 0, 10, &[(100, 4)], &[(100, 5)]);
     let locked_view = build_dom_view(DomViewInput {
         snapshot: Some(&locked_snapshot),
@@ -403,7 +386,7 @@ fn the_model_holds_a_level_count_inside_the_controls_range() {
 
 #[test]
 fn model_judges_quote_liveness_in_event_time() {
-    // spin 100 ms → liveness threshold 2.5 spins = 250 ms.
+    // A 100 ms spin makes the liveness threshold 2.5 spins, which is 250 ms.
     let mut model = UiModel::with_capacity(1, DurationUs::from_micros(100_000));
     let inst = InstrumentId(0);
     assert!(
@@ -434,65 +417,6 @@ fn model_judges_quote_liveness_in_event_time() {
         !model.is_quote_live(inst),
         "book 400 ms past the quote is stale"
     );
-}
-
-proptest! {
-    /// Every book level whose tick falls inside the visible window lands on exactly its own tick
-    /// row; every row without a matching level is `None`; nothing outside the window appears.
-    #[test]
-    fn levels_land_on_their_tick_rows(
-        best_bid in 1_000i64..2_000,
-        spread in 1i64..8,
-        bid_gaps in prop::collection::vec(1i64..6, 0..8),
-        ask_gaps in prop::collection::vec(1i64..6, 0..8),
-    ) {
-        let best_ask = best_bid + spread;
-
-        let mut bid_levels = vec![(best_bid, 11i64)];
-        let mut tick = best_bid;
-        for (i, gap) in bid_gaps.iter().enumerate() {
-            tick -= gap;
-            bid_levels.push((tick, 12 + i as i64));
-        }
-        let mut ask_levels = vec![(best_ask, 21i64)];
-        let mut tick = best_ask;
-        for (i, gap) in ask_gaps.iter().enumerate() {
-            tick += gap;
-            ask_levels.push((tick, 22 + i as i64));
-        }
-
-        let snapshot = book(0, 0, 10, &bid_levels, &ask_levels);
-        let view = build_dom_view(DomViewInput {
-        snapshot: Some(&snapshot),
-        overlay: DomOverlay::default(),
-        tick: TICK,
-        grouping: DomGrouping::default(),
-        rows_per_side: MAX_ROWS_PER_SIDE,
-        feed: FeedStatus::default(),
-    });
-
-        let ask_by_tick: HashMap<i64, i64> = ask_levels.iter().copied().collect();
-        let bid_by_tick: HashMap<i64, i64> = bid_levels.iter().copied().collect();
-
-        for row in view.ask_rows() {
-            let expected = ask_by_tick.get(&row.tick_index).map(|&q| Qty(q));
-            prop_assert_eq!(row.public_qty, expected);
-        }
-        for row in view.bid_rows() {
-            let expected = bid_by_tick.get(&row.tick_index).map(|&q| Qty(q));
-            prop_assert_eq!(row.public_qty, expected);
-        }
-    }
-}
-
-/// A ladder overlay carrying only the desired quote — the shape every case below drives, since real
-/// working orders are pinned separately.
-fn overlay(desired: DomQuote) -> DomOverlay<'static> {
-    DomOverlay {
-        desired: Some(desired),
-        bid_orders: &[],
-        ask_orders: &[],
-    }
 }
 
 /// A two-sided book at the tick grid the cases below use.
@@ -657,7 +581,6 @@ fn order_overlay_rules() {
         );
     }
 
-    type NamedCase = (&'static str, fn(&str));
     let cases: &[NamedCase] = &[
         (
             "a real order and a desired quote are separate row fields",

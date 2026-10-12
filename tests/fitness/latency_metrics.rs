@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use polysim::config::{KlineInterval, TrackerSpec};
 use polysim::hot::metrics::{Category, HotMetrics, MetricsSnapshot, Stage};
-use polysim::hot::strategy::{Registration, Strategy};
+use polysim::hot::strategy::Strategy;
 use polysim::ids::{ClientOrderId, InstrumentId, QueueId, Side};
 use polysim::msg::exec::{ExecEvent, ExecKind};
 use polysim::msg::inbound::{BookChunk, InboundMessage, KlineEvent, TradeEvent};
@@ -18,7 +18,8 @@ use crate::engine_support::{
     persist_ring, pop, spin, spin_pop, strategy_log_ring, trade, ts,
 };
 
-/// Distinct by construction — a crossed wiring lands on another stage's number instead of coincidentally matching its own.
+/// Distinct by construction — a crossed wiring lands on another stage's number instead of
+/// coincidentally matching its own.
 const SEND_TO_RECV_US: i64 = 3_000;
 const MATCH_TO_SEND_US: i64 = 2_000;
 const ROUND_TRIP_US: i64 = 8_000;
@@ -27,8 +28,8 @@ const KLINE_SEND_TO_RECV_US: i64 = 2_500;
 const EXEC_VENUE_TO_RECV_US: i64 = 4_000;
 const SYNTHESISED_LOCAL_GAP_US: i64 = 60_000;
 
-/// Far enough back that admitting it moves every number it touches by four orders of magnitude — the
-/// live reading that exposed this was a 5.5-second market-data mean over healthy 113ms traffic.
+/// Far enough back that admitting it moves every number it touches by four orders of magnitude: a
+/// market-data mean over healthy 113ms traffic would read as several seconds.
 const BACKFILLED_CANDLE_AGE_US: i64 = 6 * 60 * 60 * 1_000_000;
 
 const ELEVEN_MINUTES_US: i64 = 11 * 60 * 1_000_000;
@@ -42,7 +43,8 @@ const DISPATCH_DEPTHS: [(u8, usize); 7] = [(0, 4), (0, 2), (1, 3), (1, 0), (1, 5
 /// all rings, and a fold that reused the popped queue's own depth would land on one of those.
 const SPIN_BACKLOG: usize = 6;
 
-/// Rollup keeps only buckets within ten minutes of now — a fixture stamped from an arbitrary epoch would be filtered out, and every assertion below would read zero.
+/// Rollup keeps only buckets within ten minutes of now — a fixture stamped from an arbitrary epoch
+/// would be filtered out, and every assertion below would read zero.
 fn wall_now_us() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -52,13 +54,7 @@ fn wall_now_us() -> i64 {
 
 struct Silent;
 
-impl Strategy for Silent {
-    fn features(&self) -> &'static [&'static str] {
-        &[]
-    }
-
-    fn register(&mut self, _registration: Registration<'_>) {}
-}
+impl Strategy for Silent {}
 
 fn dispatch_stamped_traffic() -> MetricsSnapshot {
     let instruments = [instrument_row(0, TrackerSpec::default(), 64)];
@@ -123,7 +119,8 @@ fn venue_answer(base: i64) -> ExecEvent {
     }
 }
 
-/// Edge-synthesised: `exchange_ts_us` here is OUR clock wearing the venue's field, stamped far back enough that admitting it would move both count and max.
+/// Edge-synthesised: `exchange_ts_us` here is OUR clock wearing the venue's field, stamped far back
+/// enough that admitting it would move both count and max.
 fn never_sent(base: i64) -> ExecEvent {
     ExecEvent {
         kind: ExecKind::PlaceNotSent,
@@ -316,8 +313,8 @@ fn queue_depth_reports_min_mean_and_max_over_the_window_it_ages_out() {
 
 /// FITNESS: before the first spin there is no backlog reading at all, and the panel must say so
 /// rather than draw a zero. Once a spin lands, a caught-up engine reads exactly 0.0 — the reading an
-/// operator checks against, and the one the old per-dispatch sampler could never produce because a
-/// quiet queue contributed nothing and the whole column went blank.
+/// operator checks against. A per-dispatch sampler cannot produce it, because a quiet queue
+/// contributes nothing and the whole column goes blank.
 #[test]
 fn the_backlog_is_absent_until_the_first_spin_and_zero_once_one_lands() {
     let mut metrics = HotMetrics::new();

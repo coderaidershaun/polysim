@@ -1,17 +1,9 @@
-//! The book equilibrium every quote is skewed around. Two names (`orderbook_equilibrium`,
-//! `microprice`) must stay the same number: a drift between them would move every quote a research
-//! run recorded without changing a single column name.
+//! The book equilibrium. `orderbook_equilibrium` is a public alias of `microprice`, and nothing in
+//! the engine calls it, so these pins are the only thing that keeps the alias the same number as
+//! `microprice` and as the longhand size-weighted formula.
 
+use crate::engine_support::level;
 use polysim::hot::quant::micro::{microprice, mid, orderbook_equilibrium, spread};
-use polysim::ids::{Price, Qty};
-use polysim::msg::inbound::Level;
-
-fn level(price: i64, qty: i64) -> Level {
-    Level {
-        price: Price(price),
-        qty: Qty(qty),
-    }
-}
 
 #[test]
 fn equilibrium_is_the_microprice() {

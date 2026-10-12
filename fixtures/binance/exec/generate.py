@@ -242,8 +242,6 @@ ERRORS = [
     # string can arrive under -1013 FILTER_FAILURE. Only a rejection OF AN AMEND may speak about an
     # amend budget; this one is fatal and speaks about nothing.
     ("error_1013_amend_filter_failure", 400, -1013, "Filter failure: MAX_NUM_ORDER_AMENDS"),
-    ("error_1022_invalid_signature", 401, -1022, "Signature for this request is not valid."),
-    ("error_2015_rejected_mbx_key", 401, -2015, "Invalid API-key, IP, or permissions for action."),
 ]
 for name, status, code, msg in ERRORS:
     write(name, {"id": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0", "status": status,

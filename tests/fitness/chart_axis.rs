@@ -1,5 +1,5 @@
 //! Axis and crosshair projection fitness: the nice-numbers tick generator both charts share, the
-//! exact label strings it feeds the painter, and the pointer → bucket inverse the shared crosshair
+//! exact label strings it feeds the painter, and the pointer-to-bucket inverse the shared crosshair
 //! rides on. ONE generator serves the mid chart and the exposure/PnL chart, so its failure mode
 //! is a tick drawn outside the plotted range or a label that quietly rounds — a lie painted over live
 //! data rather than a crash, which is exactly what a fitness pin exists to catch.
@@ -48,8 +48,8 @@ const IDEAL_PITCH: f32 = AXIS_FONT * 2.0;
 const MINIMUM_PITCH: f32 = AXIS_FONT * 1.2;
 
 /// The lower chart's plot in the default window: 30% of a ~400pt left-panel body, less the 30pt
-/// sub-header. Shaun asked for a y-axis on this chart specifically, so the geometry it actually ships
-/// at is pinned rather than left to follow from the arithmetic.
+/// sub-header. This chart must show a y-axis, so the geometry it actually ships at is pinned rather
+/// than left to follow from the arithmetic.
 const EXPOSURE_PLOT_HEIGHT: f32 = 90.0;
 
 struct TickCase {
@@ -64,10 +64,10 @@ struct TickCase {
 /// FITNESS: the generator climbs the {1,2,5}·10^k ladder to the finest step under the ceiling and
 /// stays safe on degenerate ranges (inverted, zero-ceiling, single-value, and past i64's own width);
 /// the axis never hands a painter more labels than a plot can show legibly nor withholds one it could
-/// show, pinned both generally and at the exposure chart's own shipped height (asked for by Shaun —
-/// raise the plot or lower the legibility pitch before ever deleting that assertion); the label
-/// writers render exact strings from the step's own chosen decimals; and the crosshair's fraction →
-/// bucket inverse clamps to an edge for a pointer that has left the plot.
+/// show, pinned both generally and at the exposure chart's own shipped height (that chart must show
+/// an axis there: raise the plot or lower the legibility pitch before ever deleting that assertion);
+/// the label writers render exact strings from the step's own chosen decimals; and the crosshair's
+/// fraction-to-bucket inverse clamps to an edge for a pointer that has left the plot.
 #[test]
 fn axis_tick_generation_legibility_and_label_rendering() {
     let cases = [
@@ -159,7 +159,7 @@ fn axis_tick_generation_legibility_and_label_rendering() {
     }
 
     // the_exposure_chart_shows_an_axis_at_its_default_height: the exposure chart at its shipped size
-    // carries the axis it was asked for.
+    // carries the axis it is required to show.
     let ceiling = legible_tick_ceiling(EXPOSURE_PLOT_HEIGHT, IDEAL_PITCH, MINIMUM_PITCH);
     let ticks: Vec<i64> = axis_ticks(-5_000_000, 5_000_000, ceiling).collect();
     assert!(

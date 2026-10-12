@@ -31,9 +31,10 @@ use polysim::sink::ExecSink;
 use rtrb::{Consumer, RingBuffer};
 
 use crate::engine_support::{
-    ONE, detached_exposure, exec_event, instrument_row, metrics_ring, persist_ring_for, pop, spin,
-    strategy_log_ring, ui_book_ring, ui_event_ring,
+    ONE, detached_exposure, drain_orders_and_fills, exec_event, instrument_row, metrics_ring,
+    persist_ring_for, pop, spin, strategy_log_ring, ui_book_ring, ui_event_ring,
 };
+use crate::risk_gate::drain_commands;
 
 const INSTRUMENT: InstrumentId = InstrumentId(0);
 
@@ -171,34 +172,6 @@ fn read(fixture: &mut Fixture, seq: u64, when: i64) -> Reading {
         .expect("the spin ran, so the probe read the ledger")
 }
 
-fn drain_commands(commands: &mut Consumer<ExecLaneItem>) -> Vec<ExecCommand> {
-    let mut drained = Vec::new();
-    while let Ok(item) = commands.pop() {
-        if let ExecLaneItem::Command(stamped) = item {
-            drained.push(stamped.command);
-        }
-    }
-    drained
-}
-
-#[derive(Default)]
-struct Banked {
-    orders: Vec<polysim::msg::persist::OrderRow>,
-    fills: Vec<polysim::msg::persist::FillRow>,
-}
-
-fn drain_records(records: &mut Consumer<PersistRecord>) -> Banked {
-    let mut banked = Banked::default();
-    while let Ok(record) = records.pop() {
-        match record {
-            PersistRecord::Order(row) => banked.orders.push(row),
-            PersistRecord::Fill(row) => banked.fills.push(row),
-            other => panic!("only orders and fills are recorded here, got {other:?}"),
-        }
-    }
-    banked
-}
-
 /// FITNESS: a fill on a prior run's order moves the money exactly once however many times the venue
 /// redelivers it, banks the rows that explain it, and is still cancelled on sight.
 ///
@@ -226,7 +199,7 @@ fn a_prior_run_fill_moves_the_money_once_banks_its_rows_and_still_cancels() {
         "no mark yet, so PnL is the bare cost basis — and the cash leg must have moved too"
     );
 
-    let banked = drain_records(&mut fixture.records);
+    let banked = drain_orders_and_fills(&mut fixture.records);
     assert_eq!(
         banked.fills.len(),
         1,
@@ -272,7 +245,7 @@ fn a_prior_run_fill_moves_the_money_once_banks_its_rows_and_still_cancels() {
         "a redelivered report carries totals already folded and must move nothing"
     );
     assert_eq!(redelivered.pnl_quote, -(100 * ONE));
-    let after_redelivery = drain_records(&mut fixture.records);
+    let after_redelivery = drain_orders_and_fills(&mut fixture.records);
     assert!(
         after_redelivery.fills.is_empty() && after_redelivery.orders.is_empty(),
         "a redelivery moved neither state nor totals and must record nothing, got {} order rows \
@@ -292,7 +265,7 @@ fn a_prior_run_fill_moves_the_money_once_banks_its_rows_and_still_cancels() {
         "the second execution is a real one — its cumulative advanced"
     );
     assert_eq!(second.pnl_quote, -(200 * ONE));
-    assert_eq!(drain_records(&mut fixture.records).fills.len(), 1);
+    assert_eq!(drain_orders_and_fills(&mut fixture.records).fills.len(), 1);
 }
 
 /// FITNESS: a prior run's order occupies no slot this run quotes from. It is somebody else's

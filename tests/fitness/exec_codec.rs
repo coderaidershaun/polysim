@@ -59,26 +59,13 @@ fn decode_exec(fixture: &str, venue: &FakeVenue) -> ExecEvent {
     }
 }
 
-fn respond(fixture: &str, request: ExecRequest, venue: &FakeVenue) -> Vec<ExecEvent> {
-    decode_response(
-        fixture,
-        &ResponseContext {
-            decode: venue.decode_context(NOW),
-            request,
-            recon_seq: 7,
-        },
-    )
-    .expect("committed fixture decodes")
-    .events
-}
-
 fn decoded(fixture: &str, request: ExecRequest, venue: &FakeVenue) -> DecodedResponse {
     decode_response(
         fixture,
         &ResponseContext {
             decode: venue.decode_context(NOW),
             request,
-            recon_seq: 0,
+            recon_seq: 7,
         },
     )
     .expect("committed fixture decodes")
@@ -513,14 +500,15 @@ fn every_response_shape_decodes_to_the_events_it_should() {
     // A cancel ack returns the acting request's own `clientOrderId` and the order's id as
     // `origClientOrderId`. Reading the former addresses no slot at all.
     {
-        let events = respond(
+        let events = decoded(
             fixture!("ack_order_cancel"),
             ExecRequest::Cancel {
                 instrument: InstrumentId(0),
                 client_id: ORDER_A,
             },
             &venue,
-        );
+        )
+        .events;
         assert_eq!(events[0].client_id, ORDER_A);
         assert_eq!(events[0].kind, ExecKind::AckCanceled);
     }
@@ -529,7 +517,7 @@ fn every_response_shape_decodes_to_the_events_it_should() {
     // and the cumulative quote with one `m` rather than two. A reader reusing the place-response
     // shape gets null for both.
     {
-        let events = respond(
+        let events = decoded(
             fixture!("ack_order_amend_keep_priority"),
             ExecRequest::AmendQty {
                 instrument: InstrumentId(0),
@@ -537,7 +525,8 @@ fn every_response_shape_decodes_to_the_events_it_should() {
                 qty: Qty(6_000),
             },
             &venue,
-        );
+        )
+        .events;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, ExecKind::AckAmended);
         assert_eq!(
@@ -550,14 +539,15 @@ fn every_response_shape_decodes_to_the_events_it_should() {
     // The definitive answer to an ambiguous cancel. `-2011` said "unknown order"; the query says
     // it filled, and the cumulative totals are what the ledger folds.
     {
-        let events = respond(
+        let events = decoded(
             fixture!("ack_order_status_filled"),
             ExecRequest::OrderStatus {
                 instrument: InstrumentId(0),
                 client_id: ORDER_A,
             },
             &venue,
-        );
+        )
+        .events;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, ExecKind::SnapshotOrder);
         assert_eq!(events[0].status, Some(VenueOrderStatus::Filled));
@@ -576,13 +566,14 @@ fn every_response_shape_decodes_to_the_events_it_should() {
     // reported with its own provenance rather than filtered out — the sweep has to know it is
     // there.
     {
-        let events = respond(
+        let events = decoded(
             fixture!("ack_open_orders"),
             ExecRequest::OpenOrders {
                 instrument: InstrumentId(0),
             },
             &venue,
-        );
+        )
+        .events;
         assert_eq!(events.len(), 3, "two orders plus the end marker");
         assert_eq!(events[0].kind, ExecKind::SnapshotOrder);
         assert_eq!(events[0].client_id, ORDER_A);
@@ -595,13 +586,14 @@ fn every_response_shape_decodes_to_the_events_it_should() {
     // An empty answer still ends the pass. It is the answer that says everything the engine
     // believes is live is gone, so swallowing it would leave phantom orders on the books forever.
     {
-        let events = respond(
+        let events = decoded(
             fixture!("ack_open_orders_empty"),
             ExecRequest::OpenOrders {
                 instrument: InstrumentId(0),
             },
             &venue,
-        );
+        )
+        .events;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, ExecKind::SnapshotEnd);
     }
@@ -610,27 +602,29 @@ fn every_response_shape_decodes_to_the_events_it_should() {
     // believing what it already believed rather than declaring live orders gone on a request that
     // never ran.
     {
-        let events = respond(
+        let events = decoded(
             fixture!("error_1021_timestamp_outside_recv_window"),
             ExecRequest::OpenOrders {
                 instrument: InstrumentId(0),
             },
             &venue,
-        );
+        )
+        .events;
         assert!(events.is_empty(), "no marker, no sweep");
     }
 
     // An error response names no order at all, so the request it answers is the only thing that
     // says which client id it is about.
     {
-        let events = respond(
+        let events = decoded(
             fixture!("error_2011_cancel_rejected"),
             ExecRequest::Cancel {
                 instrument: InstrumentId(0),
                 client_id: ORDER_A,
             },
             &venue,
-        );
+        )
+        .events;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, ExecKind::AckFailed);
         assert_eq!(events[0].client_id, ORDER_A);
@@ -645,7 +639,7 @@ fn every_response_shape_decodes_to_the_events_it_should() {
     // budget. Left unclassified — as `-2038` was — the code falls through to `Fatal` and halts
     // the run the first time an order legitimately runs out of amends.
     {
-        let events = respond(
+        let events = decoded(
             fixture!("error_2038_amend_budget_spent"),
             ExecRequest::AmendQty {
                 instrument: InstrumentId(0),
@@ -653,7 +647,8 @@ fn every_response_shape_decodes_to_the_events_it_should() {
                 qty: Qty(6_000),
             },
             &venue,
-        );
+        )
+        .events;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].client_id, ORDER_A);
         assert_eq!(events[0].kind, ExecKind::AckFailed);
@@ -670,11 +665,11 @@ fn every_response_shape_decodes_to_the_events_it_should() {
     }
 
     // The same code, a different condition, and the reason the code alone cannot be the test.
-    // `-2038` is a many-messages-one-code error — `errors.md` documents it in the same table as
-    // `-2010`, which is exactly why this refusal's message is read too. Read as "budget spent",
+    // `-2038` is one code that covers many different messages, and the vendor's error table lists
+    // it beside `-2010`, which is exactly why this refusal's message is read too. Read as "budget spent",
     // this transient refusal would retire the amend primitive for the order permanently.
     {
-        let events = respond(
+        let events = decoded(
             fixture!("error_2038_amend_quantity_increase"),
             ExecRequest::AmendQty {
                 instrument: InstrumentId(0),
@@ -682,7 +677,8 @@ fn every_response_shape_decodes_to_the_events_it_should() {
                 qty: Qty(6_000),
             },
             &venue,
-        );
+        )
+        .events;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].client_id, ORDER_A);
         assert_eq!(events[0].kind, ExecKind::AckFailed);
@@ -915,7 +911,6 @@ fn fake_venue_events_match_the_real_decoders() {
             (Delivery::ReportOnly, 1),
             (Delivery::Ambiguous, 0),
             (Delivery::Duplicated, 4),
-            (Delivery::Reordered, 2),
         ];
         for (delivery, expected) in deliveries {
             let mut venue = venue();
@@ -981,7 +976,7 @@ fn rest_reconciliation_rows_decode_like_their_websocket_twins() {
 }
 
 proptest! {
-    /// The ONE property the single-implementation ruling exists to protect: whichever route a
+    /// The ONE property that having a single shared implementation exists to protect: whichever route a
     /// client id arrives by, it classifies the same. `Foreign` is never cancelled and `Mine`
     /// always is, so a split verdict is either a human's order pulled or one of ours abandoned.
     #[test]
@@ -1099,9 +1094,9 @@ fn a_post_only_cross_is_a_different_class_from_every_other_gone() {
     );
     assert_eq!(acked.events[0].reject, Some(RejectClass::Refused));
 
-    // `-2013` from a status query is the DEFINITIVE absence: an answer, not a rejection. It kept
-    // the `Gone` name, and it is the one that must reach no reject counter — a limit wired to a
-    // counter it ticked would fire precisely while the engine was reconciling.
+    // `-2013` from a status query is the DEFINITIVE absence: an answer, not a rejection, and it
+    // must reach no reject counter — a limit wired to a counter it ticked would fire precisely
+    // while the engine was reconciling.
     let resolved = decoded(
         fixture!("error_2013_no_such_order"),
         ExecRequest::OrderStatus {

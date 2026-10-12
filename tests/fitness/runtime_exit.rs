@@ -2,8 +2,7 @@
 //! queues drain (a hot-thread panic caught by the panic hook) — must never be reported as a
 //! graceful (exit-0) shutdown, and a fatal dominates a drain error. `decide_exit` is the pure
 //! decision `run_until_shutdown` wires through; one case per row of its truth table. An external
-//! graceful trigger flows through the same path as a signal (reason "shutdown request"), and
-//! [`ShutdownRequest`] is the latch it trips.
+//! graceful trigger flows through the same path as a signal (reason "shutdown request").
 
 use polysim::runtime::decide_exit;
 

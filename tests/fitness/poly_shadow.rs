@@ -7,15 +7,9 @@
 use polysim::adapters::polymarket::shadow::{BookFrameOutcome, ShadowValidator};
 use polysim::adapters::polymarket::teardown::{CollapseDetector, CollapseSignal, LevelUpdate};
 use polysim::ids::{Price, Qty, Side};
-use polysim::msg::inbound::Level;
 use polysim::time::TsUs;
 
-fn level(price: i64, qty: i64) -> Level {
-    Level {
-        price: Price(price),
-        qty: Qty(qty),
-    }
-}
+use crate::engine_support::level;
 
 fn update(side: Side, price: i64, qty: i64, venue_ts: i64) -> LevelUpdate {
     LevelUpdate {

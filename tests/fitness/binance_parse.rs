@@ -2,9 +2,8 @@
 //! aggTrade replays, the venue-stamp clamp over the whole i64 space, the perp depth pu/T
 //! normalisation, and the REST-kline structural tail rule.
 //!
-//! The recorder that captured `fixtures/` is gone, so these committed goldens are the sole
-//! source of truth: to change them, re-record by hand from the live venue rather than from
-//! that tool.
+//! No recorder tool exists for `fixtures/`, so these committed goldens are the sole source of
+//! truth: to change them, re-record by hand from the live venue.
 
 use polysim::adapters::binance::parse::{
     DepthDiff, ParseContext, RestKlineTail, parse_agg_trade, parse_combined_frame,
@@ -12,10 +11,12 @@ use polysim::adapters::binance::parse::{
 };
 use polysim::adapters::venue_clock::MAX_VENUE_SKEW_US;
 use polysim::config::KlineInterval;
-use polysim::ids::{InstrumentId, Price, Qty, Side};
-use polysim::msg::inbound::{Level, TradeEvent};
+use polysim::ids::{InstrumentId, Price, Side};
+use polysim::msg::inbound::TradeEvent;
 use polysim::time::TsUs;
 use proptest::prelude::*;
+
+use crate::engine_support::level;
 
 const INSTRUMENT: InstrumentId = InstrumentId(7);
 
@@ -23,13 +24,6 @@ fn ctx(received_us: i64) -> ParseContext {
     ParseContext {
         instrument: INSTRUMENT,
         received_ts_us: TsUs::from_micros(received_us),
-    }
-}
-
-fn level(price: i64, qty: i64) -> Level {
-    Level {
-        price: Price(price),
-        qty: Qty(qty),
     }
 }
 
@@ -127,7 +121,7 @@ mod rest_klines {
             events.iter().all(|event| event.is_closed),
             "AllClosed marks every row closed regardless of the local clock"
         );
-        // Fields still decode exactly (locks the decimal / ms→µs boundary).
+        // Fields still decode exactly (locks the decimal and millisecond-to-microsecond boundary).
         assert_eq!(
             events[0].open_ts_us,
             TsUs::from_micros(1_672_515_780_000_000)

@@ -11,17 +11,15 @@ use polysim::adapters::polymarket::rotation::{
     SlotMachine, SlotState, TokenId, WindowAssignment, WindowTokens,
 };
 use polysim::ids::InstrumentId;
-use polysim::time::{DurationUs, TsUs};
+use polysim::time::DurationUs;
+
+use crate::engine_support::ts_secs;
 
 const SECOND_US: i64 = 1_000_000;
 const OPEN: i64 = 1_784_439_000;
 const CLOSE: i64 = OPEN + 300;
 const UP: InstrumentId = InstrumentId(6);
 const DOWN: InstrumentId = InstrumentId(7);
-
-fn ts(secs: i64) -> TsUs {
-    TsUs::from_micros(secs * SECOND_US)
-}
 
 fn tokens(tag: &str) -> WindowTokens {
     WindowTokens {
@@ -40,15 +38,15 @@ fn window(open_secs: i64, tag: &str) -> WindowAssignment {
             instrument: DOWN,
             token: TokenId::from(format!("{tag}-down")),
         },
-        window_open_ts_us: ts(open_secs),
-        window_close_ts_us: ts(open_secs + 300),
+        window_open_ts_us: ts_secs(open_secs),
+        window_close_ts_us: ts_secs(open_secs + 300),
         condition_id: Arc::from(format!("cond-{tag}").as_str()),
     }
 }
 
 fn feed(machine: &mut SlotMachine, now_secs: i64, input: SlotInput) -> Vec<SlotAction> {
     let mut actions = Vec::new();
-    machine.on_input(ts(now_secs), input, &mut |action| actions.push(action));
+    machine.on_input(ts_secs(now_secs), input, &mut |action| actions.push(action));
     actions
 }
 
@@ -128,7 +126,7 @@ fn revived_book_after_false_collapse_does_not_fast_teardown() {
     feed(&mut machine, CLOSE + 10, SlotInput::Collapsed);
     assert!(feed(&mut machine, CLOSE + 11, SlotInput::Frame).is_empty());
 
-    // The later silence no longer FAST-tears-down (latch cleared) — it falls back to a probe.
+    // The latch is cleared, so the later silence does not fast-tear-down; it falls back to a probe.
     assert_eq!(
         feed(&mut machine, CLOSE + 14, SlotInput::Tick),
         vec![SlotAction::Probe(tokens("n"))]
@@ -223,7 +221,7 @@ fn force_teardown_when_next_subscribe_finds_slot_occupied() {
         SlotAction::ForceTeardown(ForceTeardownFacts {
             up_instrument: UP,
             down_instrument: DOWN,
-            window_open_ts_us: ts(OPEN),
+            window_open_ts_us: ts_secs(OPEN),
             grace_age: DurationUs::from_micros(240 * SECOND_US),
             tokens: tokens("n"),
         }),

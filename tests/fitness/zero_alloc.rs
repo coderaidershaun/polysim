@@ -66,7 +66,8 @@ fn step_message(i: i64) -> (InboundMessage, Option<bool>) {
         0 => InboundMessage::Trade(trade(0, 100 * ONE + i, 1_000_000, Side::Buy, i)),
         1 => InboundMessage::Book(delta_chunk(0, Side::Buy, &[(100 * ONE, ONE + (i % 5))], i)),
         2 => {
-            // `i % 7 == 2` here, so gate closed on a term that actually varies.
+            // `i % 7` is always 2 in this arm, so the closed flag is derived from `i / 7`, which
+            // actually varies.
             let is_closed = (i / 7) % 2 == 0;
             kline_closed = Some(is_closed);
             InboundMessage::Kline(kline(
@@ -87,18 +88,8 @@ fn step_message(i: i64) -> (InboundMessage, Option<bool>) {
     (message, kline_closed)
 }
 
-/// Two fully-configured instruments pumped across every category; the measured 100k-message
-/// window must not touch the allocator.
-#[test]
-fn steady_state_dispatch_does_not_allocate() {
-    let instruments = [
-        instrument_row(0, tracker_spec_all(100), 128),
-        instrument_row(1, tracker_spec_all(100), 128),
-    ];
-    let (sink, mut consumer) = persist_ring(4096);
-    let (log_sink, _log_consumer) = strategy_log_ring(64);
-    let (metrics_producer, mut metrics_consumer) = metrics_ring(64);
-    let strategy = Box::new(RecorderStrategy::from_spec(
+fn recorder_all_tables() -> Box<RecorderStrategy> {
+    Box::new(RecorderStrategy::from_spec(
         &recorder_spec(vec![
             TableKind::Trades,
             TableKind::BookEvents,
@@ -106,16 +97,10 @@ fn steady_state_dispatch_does_not_allocate() {
             TableKind::Features,
         ]),
         engine_view(NOMINAL_SPIN),
-    ));
-    let (mut engine, mut ui_books, mut ui_events) = engine_with_ui(
-        &instruments,
-        strategy,
-        sink,
-        log_sink,
-        metrics_producer,
-        DurationUs::ZERO,
-    );
+    ))
+}
 
+fn seed_two_instruments(engine: &mut HotEngine) {
     for instrument in 0..2u16 {
         let base = 100 * ONE * i64::from(instrument + 1);
         let (bids, asks) = snapshot_pair(
@@ -127,6 +112,42 @@ fn steady_state_dispatch_does_not_allocate() {
         engine.dispatch(pop(0, 0), &InboundMessage::Book(bids));
         engine.dispatch(pop(0, 0), &InboundMessage::Book(asks));
     }
+}
+
+fn seeded_book() -> Book {
+    let (bids, asks) = snapshot_pair(0, &[(100 * ONE, 2 * ONE)], &[(101 * ONE, ONE)], 0);
+    let mut book = Book::new(64);
+    let first = book.apply_snapshot_chunk(&bids);
+    let second = book.apply_snapshot_chunk(&asks);
+    assert_eq!(
+        (first, second),
+        (SnapshotOutcome::Clean, SnapshotOutcome::Clean)
+    );
+    book
+}
+
+/// Two fully-configured instruments pumped across every category; the measured 100k-message
+/// window must not touch the allocator.
+#[test]
+fn steady_state_dispatch_does_not_allocate() {
+    let instruments = [
+        instrument_row(0, tracker_spec_all(100), 128),
+        instrument_row(1, tracker_spec_all(100), 128),
+    ];
+    let (sink, mut consumer) = persist_ring(4096);
+    let (log_sink, _log_consumer) = strategy_log_ring(64);
+    let (metrics_producer, mut metrics_consumer) = metrics_ring(64);
+    let strategy = recorder_all_tables();
+    let (mut engine, mut ui_books, mut ui_events) = engine_with_ui(
+        &instruments,
+        strategy,
+        sink,
+        log_sink,
+        metrics_producer,
+        DurationUs::ZERO,
+    );
+
+    seed_two_instruments(&mut engine);
     while consumer.pop().is_ok() {}
     drain_ui(&mut ui_books, &mut ui_events);
 
@@ -161,17 +182,10 @@ fn steady_state_dispatch_does_not_allocate() {
         "measured window must overflow the 64-slot metrics ring so the drop path is proven"
     );
 
-    // Self-enforcing: the volume clock the measured window exercises is not a silent no-op —
-    // bar-filling trades close bars and sample them.
+    // A standalone tracker with the same spec samples on every bar close, so the trades in the
+    // measured window are large enough to close bars.
     let mut tracker = MicroTracker::new(&tracker_spec_all(100), &[KlineInterval::OneMinute], None);
-    let (bids, asks) = snapshot_pair(0, &[(100 * ONE, 2 * ONE)], &[(101 * ONE, ONE)], 0);
-    let mut book = Book::new(64);
-    let first = book.apply_snapshot_chunk(&bids);
-    let second = book.apply_snapshot_chunk(&asks);
-    assert_eq!(
-        (first, second),
-        (SnapshotOutcome::Clean, SnapshotOutcome::Clean)
-    );
+    let book = seeded_book();
     tracker.on_book(&book);
     for when in 0..8i64 {
         tracker.on_trade(&trade(0, 100 * ONE, 1_000_000, Side::Buy, when));
@@ -184,8 +198,8 @@ fn steady_state_dispatch_does_not_allocate() {
 
 /// The same window with NO persistence configured — the zero-allocation guarantee binds both
 /// configurations, and discarding a row must be at least as allocation-free as recording one.
-/// The strategy still emits into all four
-/// tables: the config is the authority, so this is the gate's worst case, one discard per emit.
+/// The strategy still emits into all four tables: the config is the authority, so this is the
+/// gate's worst case, one discard per emit.
 #[test]
 fn steady_state_dispatch_without_persistence_does_not_allocate() {
     let instruments = [
@@ -194,28 +208,10 @@ fn steady_state_dispatch_without_persistence_does_not_allocate() {
     ];
     let (log_sink, _log_consumer) = strategy_log_ring(64);
     let (metrics_producer, mut metrics_consumer) = metrics_ring(64);
-    let strategy = Box::new(RecorderStrategy::from_spec(
-        &recorder_spec(vec![
-            TableKind::Trades,
-            TableKind::BookEvents,
-            TableKind::Klines,
-            TableKind::Features,
-        ]),
-        engine_view(NOMINAL_SPIN),
-    ));
+    let strategy = recorder_all_tables();
     let mut engine = engine_without_persistence(&instruments, strategy, log_sink, metrics_producer);
 
-    for instrument in 0..2u16 {
-        let base = 100 * ONE * i64::from(instrument + 1);
-        let (bids, asks) = snapshot_pair(
-            instrument,
-            &[(base, 2 * ONE), (base - ONE, ONE)],
-            &[(base + ONE, ONE), (base + 2 * ONE, 2 * ONE)],
-            0,
-        );
-        engine.dispatch(pop(0, 0), &InboundMessage::Book(bids));
-        engine.dispatch(pop(0, 0), &InboundMessage::Book(asks));
-    }
+    seed_two_instruments(&mut engine);
     for i in 0..2_000i64 {
         let (message, _) = step_message(i);
         engine.dispatch(pop(0, 0), &message);
@@ -252,22 +248,14 @@ fn intensity_spec() -> TrackerSpec {
 }
 
 /// Intensity must stay allocation-free on both halves: inside the measured window the accumulator
-/// (decay + bucket
-/// increments + rotation clear) AND the strategy's pull-based MLE `fit` (warm-started Nelder-Mead)
-/// must touch the allocator not at all. `estimates` proves the fit actually ran and produced output,
+/// (decay, bucket increments and rotation clear) AND the strategy's pull-based MLE `fit`
+/// (warm-started Nelder-Mead) must touch the allocator not at all. `estimates` proves the fit actually ran and produced output,
 /// so a dead no-op cannot pass the allocation assertion by doing nothing.
 #[test]
 fn intensity_accumulator_and_fit_do_not_allocate() {
     let tick = ONE / 100;
     let mut tracker = MicroTracker::new(&intensity_spec(), &[], Some(Price(tick)));
-    let (bids, asks) = snapshot_pair(0, &[(100 * ONE, 2 * ONE)], &[(101 * ONE, ONE)], 0);
-    let mut book = Book::new(64);
-    let first = book.apply_snapshot_chunk(&bids);
-    let second = book.apply_snapshot_chunk(&asks);
-    assert_eq!(
-        (first, second),
-        (SnapshotOutcome::Clean, SnapshotOutcome::Clean)
-    );
+    let book = seeded_book();
     tracker.on_book(&book);
 
     // Buy aggressors 0..3 ticks above the ask populate the ask histogram; distinct timestamps make
@@ -345,9 +333,6 @@ struct RecorderColumns {
     /// must emit — inside the measured window.
     volume_imbalance: FeatureId,
     volume_duration: FeatureId,
-    /// The λ column, which emits only once the same-trade fold has completed a run AND the
-    /// estimator's gates pass — so counting it proves the whole `on_volume` Kyle path ran end to end.
-    kyle_lambda: FeatureId,
     /// The two VPIN toxicity windows and their signed-flow companions, emitted from `on_volume`
     /// once each window has its bucket count. The long window only fills because the instrument row
     /// below retains more closed bars than the shipped fixture keep — see the `keep` override.
@@ -356,8 +341,8 @@ struct RecorderColumns {
     vpin_signed_flow_st: FeatureId,
     vpin_signed_flow_lt: FeatureId,
     /// The per-side Hawkes columns emitted from the spin. Only the ask side is asserted live:
-    /// `micro_step` sends buy aggressors alone (buy → ask), so the bid side never banks an arrival
-    /// and its columns stay null — the `intensity_ask`-only precedent. λ is the resident live
+    /// `micro_step` sends buy aggressors alone, which hit the ask side, so the bid side never banks
+    /// an arrival and its columns stay null, as with `intensity_ask`. λ is the resident live
     /// intensity, the other four the fitted kernel.
     hawkes_lambda_ask: FeatureId,
     hawkes_mu_ask: FeatureId,
@@ -381,7 +366,6 @@ impl RecorderColumns {
             gueant_sigma: recorder_feature_id("gueant_sigma_bps"),
             volume_imbalance: recorder_feature_id("volume_bar_imbalance"),
             volume_duration: recorder_feature_id("volume_bar_duration_secs"),
-            kyle_lambda: recorder_feature_id("kyle_lambda_per_notional"),
             vpin_st: recorder_feature_id("vpin_st"),
             vpin_lt: recorder_feature_id("vpin_lt"),
             vpin_signed_flow_st: recorder_feature_id("vpin_signed_flow_st"),
@@ -428,7 +412,6 @@ struct FeatureEmissions {
     gueant_sigma: u64,
     volume_imbalance: u64,
     volume_duration: u64,
-    kyle_lambda: u64,
     vpin_st: u64,
     vpin_lt: u64,
     vpin_signed_flow_st: u64,
@@ -442,9 +425,9 @@ struct FeatureEmissions {
 
 /// One binance instrument: closed klines feed the EGARCH close history, spins sample the mids for
 /// realised vol. The cycle stays six phases wide so the spin — and the per-side Hawkes refit it
-/// drives, which dominates this test's runtime — keeps the same share of the measured window it had
-/// when two of the phases fed a second instrument. Returns `Some(is_closed)` on a kline step so the
-/// caller can confirm closed candles reach the measured window and thus fire a refit there.
+/// drives, which dominates this test's runtime — keeps a fixed share of the measured window.
+/// Returns `Some(is_closed)` on a kline step so the caller can confirm closed candles reach the
+/// measured window and thus fire a refit there.
 fn micro_step(
     engine: &mut HotEngine,
     consumer: &mut Consumer<PersistRecord>,
@@ -537,8 +520,6 @@ fn micro_step(
                 emissions.volume_imbalance += 1;
             } else if row.feature == columns.volume_duration {
                 emissions.volume_duration += 1;
-            } else if row.feature == columns.kyle_lambda {
-                emissions.kyle_lambda += 1;
             } else if row.feature == columns.vpin_st {
                 assert!(
                     (0.0..=1.0).contains(&row.value),
@@ -718,7 +699,7 @@ fn micro_recorder_dispatch_does_not_allocate() {
     // 0.2-per-sign floor refuses a one-sided window forever. The allocation question is still
     // covered — the same-trade fold and the rolling OLS both run under the counter on every closed
     // bar; only the four emits at the end are gated off. Whether a one-sided tape is estimable is
-    // the estimator's own question, which its inline tests answer.
+    // the estimator's own question, which the Kyle's lambda estimator tests answer.
     assert!(
         emissions.vpin_st > 0,
         "the short VPIN toxicity window must reach the sink via on_volume"
@@ -824,7 +805,7 @@ fn declaration_and_log_lanes_do_not_allocate() {
         "the drained log lane never dropped a record"
     );
 
-    // `orders_submitted` now counts EXECUTION commands the engine banked, not intents a strategy
+    // `orders_submitted` counts EXECUTION commands the engine banked, not intents a strategy
     // expressed, so a run with execution off reports zero and must — a non-zero count here would
     // mean the engine banked a command nobody asked it to send.
     let max_orders = std::iter::from_fn(|| metrics_consumer.pop().ok())
@@ -845,7 +826,8 @@ fn declaration_and_log_lanes_do_not_allocate() {
 ///
 /// OrderUpdate, Reject and Balance are NOT driven here: each needs a message this steady-state mix
 /// does not carry, and seating one per iteration would allocate in the harness rather than in the
-/// engine. They share `push_stamped` with the six below, and `ui_feed` pins that each is emitted.
+/// engine. They share `push_stamped` with the six below, and the UI feed tests pin that each is
+/// emitted.
 struct UiTeeProbe {
     feature: Option<FeatureId>,
 }
@@ -889,7 +871,6 @@ struct TeeKinds {
     quote: u64,
     position: u64,
     execution: u64,
-    other: u64,
 }
 
 fn drain_ui_kinds(events: &mut Consumer<UiEvent>, kinds: &mut TeeKinds) {
@@ -906,9 +887,7 @@ fn drain_ui_kinds(events: &mut Consumer<UiEvent>, kinds: &mut TeeKinds) {
             | UiEvent::OrderSnapshot { .. }
             | UiEvent::Reject { .. }
             | UiEvent::Balance { .. }
-            | UiEvent::Latency { .. } => {
-                kinds.other += 1;
-            }
+            | UiEvent::Latency { .. } => {}
         }
     }
 }

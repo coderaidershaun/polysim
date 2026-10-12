@@ -11,92 +11,22 @@ use polysim::config::{
 use polysim::hot::book::{Book, SnapshotOutcome};
 use polysim::hot::quant::volatility::{Returns, realised_vol_per_sec};
 use polysim::hot::tracker::{MicroTracker, SideFilter};
-use polysim::ids::{InstrumentId, Price, Qty, Side};
-use polysim::msg::inbound::{
-    BOOK_CHUNK_LEVELS, BookChunk, BookChunkKind, KlineEvent, Level, TradeEvent,
-};
-use polysim::time::{DurationUs, TsUs};
+use polysim::ids::{Price, Side};
+use polysim::time::DurationUs;
 use proptest::prelude::*;
 
-const ONE: i64 = 100_000_000;
-
-fn ts(us: i64) -> TsUs {
-    TsUs::from_micros(us)
-}
-
-fn trade(price: i64, qty: i64, side: Side, when: i64) -> TradeEvent {
-    TradeEvent {
-        instrument: InstrumentId(0),
-        price: Price(price),
-        qty: Qty(qty),
-        side,
-        exchange_ts_us: ts(when),
-        exchange_sent_ts_us: None,
-        received_ts_us: ts(when),
-        queued_ts_us: ts(when),
-    }
-}
-
-fn snapshot_chunk(side: Side, levels: &[(i64, i64)], is_last_chunk: bool) -> BookChunk {
-    let mut filled = [Level {
-        price: Price(0),
-        qty: Qty(0),
-    }; BOOK_CHUNK_LEVELS];
-    for (slot, &(price, qty)) in filled.iter_mut().zip(levels) {
-        *slot = Level {
-            price: Price(price),
-            qty: Qty(qty),
-        };
-    }
-    BookChunk {
-        instrument: InstrumentId(0),
-        kind: BookChunkKind::Snapshot,
-        side,
-        levels: filled,
-        len: levels.len() as u8,
-        is_last_chunk,
-        update_id: 0,
-        exchange_ts_us: None,
-        received_ts_us: ts(0),
-        queued_ts_us: ts(0),
-    }
-}
+use crate::engine_support::{ONE, kline, snapshot_pair, trade};
 
 fn book_with(bids: &[(i64, i64)], asks: &[(i64, i64)]) -> Book {
+    let (bid_chunk, ask_chunk) = snapshot_pair(0, bids, asks, 0);
     let mut book = Book::new(16);
-    let first = book.apply_snapshot_chunk(&snapshot_chunk(Side::Buy, bids, false));
-    let second = book.apply_snapshot_chunk(&snapshot_chunk(Side::Sell, asks, true));
+    let first = book.apply_snapshot_chunk(&bid_chunk);
+    let second = book.apply_snapshot_chunk(&ask_chunk);
     assert_eq!(
         (first, second),
         (SnapshotOutcome::Clean, SnapshotOutcome::Clean)
     );
     book
-}
-
-fn kline(
-    interval: KlineInterval,
-    open_ts: i64,
-    ohlc: (i64, i64, i64, i64),
-    is_closed: bool,
-) -> KlineEvent {
-    let (open, high, low, close) = ohlc;
-    KlineEvent {
-        instrument: InstrumentId(0),
-        interval,
-        open_ts_us: ts(open_ts),
-        open: Price(open),
-        high: Price(high),
-        low: Price(low),
-        close: Price(close),
-        base_volume: Qty(ONE),
-        quote_volume: 12_345,
-        trade_count: 7,
-        is_closed,
-        exchange_ts_us: ts(open_ts),
-        exchange_sent_ts_us: None,
-        received_ts_us: ts(open_ts),
-        queued_ts_us: ts(open_ts),
-    }
 }
 
 fn close_to(actual: f64, expected: f64, tol: f64) -> bool {
@@ -140,7 +70,7 @@ proptest! {
         let mut cumulative: i128 = 0;
         for (i, &(price, qty, side)) in trades.iter().enumerate() {
             cumulative += i128::from(price) * i128::from(qty) / i128::from(ONE);
-            tracker.on_trade(&trade(price, qty, side, i as i64));
+            tracker.on_trade(&trade(0, price, qty, side, i as i64));
         }
 
         let expected = (cumulative / target_mantissa) as usize;
@@ -186,22 +116,24 @@ fn replay(spec: &TrackerSpec) -> MicroTracker {
         &[(100 * ONE, 2 * ONE), (99 * ONE, ONE)],
         &[(101 * ONE, ONE)],
     );
-    tracker.on_trade(&trade(100 * ONE, ONE, Side::Buy, 1));
-    tracker.on_trade(&trade(100 * ONE + ONE / 2, 3 * ONE, Side::Sell, 2));
+    tracker.on_trade(&trade(0, 100 * ONE, ONE, Side::Buy, 1));
+    tracker.on_trade(&trade(0, 100 * ONE + ONE / 2, 3 * ONE, Side::Sell, 2));
     tracker.on_book(&book);
     // A bar-closing trade after the book samples the current microprice onto the volume clock.
-    tracker.on_trade(&trade(100 * ONE, 1_000_000, Side::Buy, 3));
+    tracker.on_trade(&trade(0, 100 * ONE, 1_000_000, Side::Buy, 3));
     tracker.on_kline(&kline(
+        0,
         KlineInterval::OneMinute,
-        60_000_000,
         (100 * ONE, 102 * ONE, 99 * ONE, 101 * ONE),
         false,
+        60_000_000,
     ));
     tracker.on_kline(&kline(
+        0,
         KlineInterval::OneMinute,
-        60_000_000,
         (100 * ONE, 103 * ONE, 98 * ONE, 100 * ONE + ONE / 2),
         true,
+        60_000_000,
     ));
     tracker.on_spin();
     tracker
@@ -217,7 +149,7 @@ fn replay_is_deterministic_with_hand_values() {
     assert_eq!(first, second, "identical replay diverged");
 
     // best bid (100.0, 2.0), best ask (101.0, 1.0): microprice weights each price by the
-    // opposite size -> (100*1 + 101*2) / 3.
+    // opposite size, so it is (100*1 + 101*2) / 3.
     let microprice = first.last_microprice().expect("microprice computed");
     assert!(
         close_to(microprice, (100.0 * 1.0 + 101.0 * 2.0) / 3.0, 1e-9),
@@ -311,8 +243,9 @@ fn full_spec() -> TrackerSpec {
     }
 }
 
-/// `on_rotation` returns every configured series + latest + trade-side state to the post-`new`
-/// physical state (`FastQueue::clear` + clock resets) — the equality replay determinism leans on.
+/// `on_rotation` returns every configured series, the latest values and the trade-side state to the
+/// physical state right after `new`, by clearing the queues and resetting the clocks. Replay
+/// determinism leans on that equality.
 /// The `unconfigured_klines` diagnostic is a lifetime counter, not window state, so it survives.
 #[test]
 fn on_rotation_clears_tracker_to_fresh() {
@@ -328,13 +261,14 @@ fn on_rotation_clears_tracker_to_fresh() {
     tracker.on_book(&book);
     for i in 0..6i64 {
         let side = if i % 2 == 0 { Side::Buy } else { Side::Sell };
-        tracker.on_trade(&trade(100 * ONE, 2_000_000, side, i));
+        tracker.on_trade(&trade(0, 100 * ONE, 2_000_000, side, i));
     }
     tracker.on_kline(&kline(
+        0,
         KlineInterval::OneMinute,
-        60_000_000,
         (100 * ONE, 102 * ONE, 99 * ONE, 101 * ONE),
         true,
+        60_000_000,
     ));
     tracker.on_spin();
     assert_ne!(
@@ -352,10 +286,11 @@ fn on_rotation_clears_tracker_to_fresh() {
 
     // The unconfigured-interval diagnostic is a lifetime counter, not window state: it survives.
     tracker.on_kline(&kline(
-        KlineInterval::FiveMinutes,
         0,
+        KlineInterval::FiveMinutes,
         (100 * ONE, 100 * ONE, 100 * ONE, 100 * ONE),
         true,
+        0,
     ));
     assert_eq!(
         tracker.unconfigured_kline_count(),

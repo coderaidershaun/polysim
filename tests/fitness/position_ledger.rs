@@ -6,10 +6,9 @@
 //! or carried across a window rotation into a market whose prices mean something else, values a
 //! position at a number no venue ever showed.
 //!
-//! Every position here opens through the real inbound path ([`FillPen`]), because there is no other
-//! one: `SimFill` and `ctx.emit_fill` are gone, and a strategy can no longer assert a fill into
-//! existence. The fold therefore lands on the fill's OWN message, ahead of the `on_fill` that
-//! reports it — the boundary this file used to state as a drain boundary, restated where it now is.
+//! Every position here opens through the real inbound path ([`FillPen`]), so a strategy cannot
+//! assert a fill into existence. The fold therefore lands on the fill's OWN message, ahead of the
+//! `on_fill` that reports it.
 
 use std::sync::{Arc, Mutex};
 
@@ -57,7 +56,7 @@ type Readings = Arc<Mutex<Vec<Reading>>>;
 
 /// Reads the ledger back through `ctx` on both callbacks it sees, so the tape alone decides the
 /// ledger and both sides of the fold boundary are observed. It banks nothing: the position it
-/// reports arrives from the venue, which is the only place a position comes from now.
+/// reports arrives from the venue, which is the only place a position can come from.
 struct LedgerProbe {
     readings: Readings,
     instrument_count: usize,
@@ -102,8 +101,8 @@ impl Strategy for LedgerProbe {
     }
 }
 
-/// The fold every assertion is measured against, written from the ratified definitions rather than
-/// from the engine's expressions: buy pays cash and takes base, sell the reverse, exposure is the
+/// The fold every assertion is measured against, written from the definitions rather than from the
+/// engine's expressions: buy pays cash and takes base, sell the reverse, exposure is the
 /// mark times the position, PnL is the two added. A shared expression would agree with a bug.
 #[derive(Debug, Clone, Copy, Default)]
 struct Shadow {
@@ -299,12 +298,11 @@ proptest! {
 /// redelivers moves the MONEY exactly once, whatever order the copies arrive in.
 ///
 /// A strategy reading its position from `on_fill` must see the fill counted exactly once — adding it
-/// again is the double count. This is the inverse of the boundary this file used to pin, and the
-/// inversion is the milestone: a fill is no longer something a strategy banks mid-message and the
-/// engine folds at the drain, it is its own message the engine has already applied by the time anyone
-/// is told. Redelivery is not a hypothetical either — Binance really does it, and the second copy is
+/// again is the double count. A fill is its own message, which the engine has already applied by the
+/// time anyone is told, never something a strategy banks mid-message for a later drain to fold.
+/// Redelivery is not a hypothetical either — Binance really does it, and the second copy is
 /// ordinary traffic that looks exactly like a real fill, with only its already-folded totals to tell
-/// it apart; `exec_order.rs` pins the same idempotence on the slot's own totals, this pins it where it
+/// it apart; the order table's own fitness pins the same idempotence on the slot's totals, and this pins it where it
 /// costs, on position and cash through the whole engine, because a fold idempotent about quantities
 /// and not about cash would still bank a profit that never happened.
 #[test]

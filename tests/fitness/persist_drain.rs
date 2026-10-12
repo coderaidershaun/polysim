@@ -8,20 +8,19 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use rtrb::RingBuffer;
-use tokio::sync::mpsc;
 
-use polysim::config::{ExecutionMode, RecordedTables, StrategyId, TableKind, TradingEngineId};
-use polysim::ids::{FIXED_SCALE, InstrumentId, Price, Qty, Side};
+use polysim::config::{RecordedTables, TableKind};
+use polysim::ids::{InstrumentId, Price, Qty, Side};
 use polysim::msg::persist::{FeatureId, FeatureRow, PersistRecord, TradeRow};
-use polysim::persist::{PersistConfig, PersistError, PersistHandle, PersistWriter, RunMeta};
+use polysim::persist::PersistError;
 use polysim::time::TsUs;
 
-use crate::parquet_readback::{Cell, TempDir, parquet_files, read_parquet_file};
+use crate::engine_support::ONE;
+use crate::parquet_readback::{
+    BASE_TS_US, Cell, TempDir, drain_blocking, parquet_files, read_parquet_file, run_dir,
+    spawn_writer,
+};
 
-const ONE: i64 = 100_000_000;
-/// Arbitrary in-range receipt time; the partition it picks doesn't affect the assertions.
-const BASE_TS_US: i64 = 3_600_000_000;
 /// Mirrors the writer's per-table row cap. Pinned here on purpose: the cap is the promise a reader
 /// depends on, so moving it must break this test and be a deliberate act.
 const ROWS_PER_SEAL: usize = 10_000;
@@ -74,7 +73,11 @@ fn rows_are_readable_mid_run_once_the_row_cap_is_crossed() {
     let run_dir = run_dir(dir.path());
     let features_dir = run_dir.join("features");
 
-    let handle = spawn_actor(dir.path(), (0..MID_RUN_ROWS).map(feature_record).collect());
+    let handle = spawn_writer(
+        dir.path(),
+        features_and_trades(),
+        (0..MID_RUN_ROWS).map(feature_record).collect(),
+    );
 
     // Three files means two are sealed: the third only exists because a row arrived AFTER the
     // second seal closed its predecessor.
@@ -94,10 +97,7 @@ fn rows_are_readable_mid_run_once_the_row_cap_is_crossed() {
         "a table with no rows never opens a file, so seals cannot litter empty ones"
     );
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("build a current-thread runtime for the persistence drain");
-    runtime.block_on(handle.drain()).expect("clean drain");
+    drain_blocking(handle).expect("clean drain");
 
     let files = parquet_files(&features_dir);
     let total: usize = files
@@ -155,16 +155,7 @@ fn feature_record(index: usize) -> PersistRecord {
 /// Features rows then a trades row: the healthy table opens its file before the trades open
 /// faults, so a naive abort-on-first-error would abandon the features footer.
 fn records_features_then_trade() -> Vec<PersistRecord> {
-    let mut records: Vec<PersistRecord> = (0..3)
-        .map(|i| {
-            PersistRecord::Feature(FeatureRow {
-                instrument: InstrumentId(0),
-                feature: FeatureId(0),
-                value: f64::from(i),
-                event_ts_us: TsUs::from_micros(BASE_TS_US + i64::from(i)),
-            })
-        })
-        .collect();
+    let mut records: Vec<PersistRecord> = (0..3).map(feature_record).collect();
     records.push(PersistRecord::Trade(TradeRow {
         instrument: InstrumentId(0),
         price: Price(100 * ONE),
@@ -176,53 +167,13 @@ fn records_features_then_trade() -> Vec<PersistRecord> {
     records
 }
 
-/// Preloads the ring so the actor sees a producer that has already quiesced — the records are all
-/// available the moment it starts pumping.
-fn spawn_actor(dir_root: &Path, records: Vec<PersistRecord>) -> PersistHandle {
-    let (mut producer, consumer) = RingBuffer::<PersistRecord>::new(records.len() + 1);
-    for record in records {
-        producer
-            .push(record)
-            .expect("persist test ring has capacity");
-    }
-    // No rotation lineage in these tests — the sender drops immediately, so the side-channel stays empty.
-    let (_, rotations_rx) = mpsc::channel(1);
-    PersistWriter::spawn(
-        PersistConfig {
-            dir: dir_root.to_path_buf(),
-            // Trades is named but never fed, so its file-open stays a LAZY one — the property
-            // `rows_are_readable_mid_run` asserts on. Gating has its own module.
-            tables: RecordedTables::new(&[TableKind::Features, TableKind::Trades]),
-        },
-        run_meta(),
-        consumer,
-        rotations_rx,
-    )
-}
-
 /// Spawn the actor, then drain it exactly as the runtime does on SIGTERM.
 fn drive_drain(dir_root: &Path, records: Vec<PersistRecord>) -> Result<(), PersistError> {
-    let handle = spawn_actor(dir_root, records);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("build a current-thread runtime for the persistence drain");
-    runtime.block_on(handle.drain())
+    drain_blocking(spawn_writer(dir_root, features_and_trades(), records))
 }
 
-/// The `{strategy-id}/{te-id}` pair the writer keys the tree by — a run's own root.
-fn run_dir(dir_root: &Path) -> PathBuf {
-    dir_root.join("recorder").join("te-recorder")
-}
-
-fn run_meta() -> RunMeta {
-    RunMeta {
-        strategy_id: StrategyId::new("recorder").expect("valid strategy id"),
-        te_id: TradingEngineId::new("te-recorder").expect("valid trading engine id"),
-        execution_mode: Some(ExecutionMode::Live),
-        fixed_scale: FIXED_SCALE,
-        engine_version: "test".into(),
-        feature_names: vec!["ewma_vol".into()],
-        instrument_symbols: vec!["btcusdt".into()],
-        asset_symbols: vec!["btc".into(), "usdt".into()],
-    }
+/// Trades is named but never fed, so its file-open stays a LAZY one — the property
+/// `rows_are_readable_mid_run` asserts on. Gating has its own module.
+fn features_and_trades() -> RecordedTables {
+    RecordedTables::new(&[TableKind::Features, TableKind::Trades])
 }

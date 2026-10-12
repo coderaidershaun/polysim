@@ -5,29 +5,16 @@
 //! both series bucket one event time identically, the window is never derived here, and a wire value
 //! becomes the exact quote mantissa the engine's ledger held.
 
-use polysim::desktop::chart_model::{BookContinuity, ChartModel};
+use polysim::desktop::chart_model::ChartModel;
 use polysim::desktop::chart_view::{ChartDomain, domain, x_fraction};
 use polysim::desktop::position_chart_model::{PositionBucket, PositionModel};
 use polysim::desktop::position_chart_view::{RiskSeries, bounds, visible_buckets};
-use polysim::ids::{FIXED_SCALE, InstrumentId, Price, Qty};
-use polysim::msg::inbound::Level;
-use polysim::msg::ui::{UI_BOOK_LEVELS, UiBookSnapshot, UiBookState, UiEvent};
+use polysim::ids::{FIXED_SCALE, InstrumentId};
+use polysim::msg::ui::UiEvent;
 use polysim::time::{DurationUs, TsUs};
 use proptest::prelude::*;
 
-/// One-mantissa tick, so the mid chart banks from the plainest possible two-sided book.
-const TICK: Price = Price(1);
-
-/// The shipped one-second spin, so the five-minute window is exactly 300 buckets and a bucket index
-/// reads as its second.
-const SPIN: DurationUs = DurationUs::from_micros(1_000_000);
-
-/// The window at [`SPIN`]: `300_000_000 / 1_000_000`.
-const CAPACITY: u64 = 300;
-
-fn at(bucket: u64) -> TsUs {
-    TsUs::from_micros(bucket as i64 * SPIN.micros())
-}
+use crate::desktop_support::{CAPACITY, SPIN, TICK, at, chart_model, commit_at, rotation_event};
 
 fn positions(instruments: usize) -> PositionModel {
     PositionModel::with_capacity(instruments, SPIN)
@@ -56,57 +43,11 @@ fn wire_position(instrument: u16, bucket: u64, exposure_quote: f64, pnl_quote: f
     }
 }
 
-fn rotation(instrument: u16, bucket: u64) -> UiEvent {
-    UiEvent::Rotation {
-        instrument: InstrumentId(instrument),
-        seq: 0,
-        event_ts_us: at(bucket),
-    }
-}
-
 fn banked(positions: &PositionModel, instrument: u16) -> Vec<PositionBucket> {
     positions
         .buckets(InstrumentId(instrument))
         .copied()
         .collect()
-}
-
-fn mid_chart(instruments: usize) -> ChartModel {
-    let ticks = vec![Some(TICK); instruments];
-    let mut chart = ChartModel::with_capacity(instruments, SPIN);
-    chart.configure(&ticks, SPIN);
-    chart
-}
-
-/// Fold one two-sided commit into the mid chart at `event_ts_us`, with no snapshot loss before it.
-fn commit(chart: &mut ChartModel, instrument: u16, event_ts_us: TsUs) {
-    let empty = Level {
-        price: Price(0),
-        qty: Qty(0),
-    };
-    let mut bids = [empty; UI_BOOK_LEVELS];
-    let mut asks = [empty; UI_BOOK_LEVELS];
-    bids[0] = Level {
-        price: Price(100),
-        qty: Qty(1),
-    };
-    asks[0] = Level {
-        price: Price(102),
-        qty: Qty(1),
-    };
-    chart.apply_book(
-        &UiBookSnapshot {
-            instrument: InstrumentId(instrument),
-            seq: 0,
-            event_ts_us,
-            state: UiBookState::Valid,
-            bid_len: 1,
-            ask_len: 1,
-            bids,
-            asks,
-        },
-        BookContinuity::Continuous,
-    );
 }
 
 /// A window over the whole retained series, supplied the way the composer supplies it: from outside.
@@ -171,7 +112,7 @@ fn a_window_never_fabricates_a_value_it_cannot_support() {
         positions.apply_event(&position(0, 1, 500, 10));
         positions.apply_event(&position(1, 1, 700, 20));
 
-        positions.apply_event(&rotation(0, 2));
+        positions.apply_event(&rotation_event(0, 2));
 
         assert!(banked(&positions, 0).is_empty());
         assert_eq!(positions.latest(InstrumentId(0)), None);
@@ -236,10 +177,10 @@ fn a_window_never_fabricates_a_value_it_cannot_support() {
 /// computed.
 #[test]
 fn a_self_derived_window_would_put_the_same_bucket_somewhere_else() {
-    let mut chart = mid_chart(1);
+    let mut chart = chart_model(1);
     let mut positions = positions(1);
     for bucket in 0..=400 {
-        commit(&mut chart, 0, at(bucket));
+        commit_at(&mut chart, 0, at(bucket));
     }
     let position_buckets = [250, 300, 350, 400];
     for bucket in position_buckets {
@@ -255,9 +196,9 @@ fn a_self_derived_window_would_put_the_same_bucket_somewhere_else() {
 
     // What a window derived from the position series' own extents would be, built through the same
     // public projection so the comparison cannot drift from the real formula.
-    let mut shadow = mid_chart(1);
+    let mut shadow = chart_model(1);
     for bucket in position_buckets {
-        commit(&mut shadow, 0, at(bucket));
+        commit_at(&mut shadow, 0, at(bucket));
     }
     let self_derived = domain(&shadow, InstrumentId(0)).expect("a shadow series to project");
 
@@ -389,7 +330,7 @@ proptest! {
         let mut positions = PositionModel::with_capacity(1, spin);
 
         let stamp = TsUs::from_micros(micros);
-        commit(&mut chart, 0, stamp);
+        commit_at(&mut chart, 0, stamp);
         positions.apply_event(&UiEvent::Position {
             instrument: InstrumentId(0),
             seq: 0,

@@ -3,14 +3,13 @@
 //! and that anchoring is half the calculation: an estimator fed the post-trade book reports a fill
 //! intensity that is wrong in one direction all day and errors nowhere.
 //!
-//! NARROWED on relocation (2026-07-28): the inline original was
-//! `bucketing_side_mapping_sweeps_and_anomalies` and read the reach histogram directly — per-depth
-//! bucket fill, sweep grouping by `(side, exchange_ts)`, the shallower-continuation rule, decay
-//! between groups, and the clamp of an inside-spread print to bucket 0. `bid_reach`/`ask_reach` are
-//! private with no accessor, so only the two anomaly COUNTERS survive. Buy -> ask routing was
-//! recovered below via `estimate.bid.is_none()`; the bucket contents themselves are unpinned, as is
-//! the closed-form geometric MLE cross-check the fit test used to carry.
+//! The reach histograms are private with no accessor, so only the two anomaly counters are pinned
+//! directly, and buy-to-ask routing is pinned through `estimate.bid.is_none()`. The bucket
+//! contents (per-depth fill, sweep grouping by `(side, exchange_ts)`, the shallower-continuation
+//! rule, decay between groups, the clamp of an inside-spread print to bucket 0) and the closed-form
+//! geometric MLE cross-check of the fit are not checked from outside the crate.
 
+use super::Lcg;
 use polysim::config::{IntensitySpec, TrackerSpec};
 use polysim::hot::book::{Book, SnapshotOutcome};
 use polysim::hot::quant::intensity::{IntensityFit, PacedIntensity};
@@ -22,19 +21,6 @@ use polysim::time::TsUs;
 const TICK: Price = Price(10);
 const ASK: Price = Price(100_000);
 const BID: Price = Price(ASK.0 - TICK.0);
-
-// Deterministic uniform draws (LCG, no `rand` dependency).
-struct Lcg(u64);
-
-impl Lcg {
-    fn unit(&mut self) -> f64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
-    }
-}
 
 fn ts(us: i64) -> TsUs {
     TsUs::from_micros(us)
@@ -158,7 +144,7 @@ fn fit_recovers_a_and_k_and_warm_starts() {
         cold.a_per_sec
     );
 
-    // Warm refit seeds from cache -> same iterations as cold.
+    // A warm refit seeds from the cache, so it takes no more iterations than the cold fit.
     let warm = fit.fit(counts, now).ask.expect("warm");
     assert!(warm.iterations <= cold.iterations, "warm not warmer");
     assert!(!warm.is_stale);

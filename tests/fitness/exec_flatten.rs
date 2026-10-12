@@ -2,9 +2,9 @@
 //! are tested here. Flatten is a DECLARATION (level-triggered like quotes), not a command:
 //! market orders outliving intent should not exist. The engine plans a new order each spin
 //! based on current position. The flatten lane is separate from ctx.quote by design: a quote
-//! declared Immediate still gets refused by exec_reconcile (a bug where the strategy meant
-//! REST but crossed the spread). Both halves are pinned together to prevent convergence on
-//! the easiest path.
+//! declared Immediate is still refused by the reconciler, because a strategy that meant to rest
+//! but crossed the spread has made a mistake. Both halves are pinned together to prevent
+//! convergence on the easiest path.
 
 use polysim::config::{RecordedTables, TrackerSpec};
 use polysim::hot::dispatch::HotEngine;
@@ -23,7 +23,9 @@ use polysim::registry::InstrumentRow;
 use polysim::time::{DurationUs, TsUs};
 use rtrb::Consumer;
 
-use crate::engine_support::{ALL_TABLES, FillPen, exec_event, instrument_row, pop, snapshot_pair};
+use crate::engine_support::{
+    ALL_TABLES, FillPen, exec_event, instrument_row, pop, rich, snapshot_pair, top,
+};
 use crate::risk_gate::{
     CEILING, INSTRUMENT, QuotingSetup, built_quoting_engine, drain_commands, exec_settings,
     open_orders_snapshot, spin_at,
@@ -66,30 +68,12 @@ fn poly_row() -> InstrumentRow {
     }
 }
 
-fn top(bid: i64, ask: i64) -> BookTop {
-    BookTop {
-        best_bid: Some(Price(bid)),
-        best_ask: Some(Price(ask)),
-        mid: Price(bid + (ask - bid) / 2),
-        is_valid: true,
-        last_commit_ts_us: TsUs::from_micros(1_000),
-        now_ts_us: TsUs::from_micros(1_000),
-    }
-}
-
 fn limits() -> ExecLimits {
     ExecLimits {
         requote_threshold_ticks: 1,
         max_quote_distance_centi_bps: 100_000_000,
         max_book_age: DurationUs::from_secs(3_600),
         max_order_notional_quote: 1_000_000 * FIXED_SCALE,
-    }
-}
-
-fn rich() -> FundsView {
-    FundsView {
-        spendable: i64::MAX / 4,
-        floor: 0,
     }
 }
 
@@ -448,6 +432,19 @@ fn seat_book(engine: &mut HotEngine, when: i64) {
     engine.dispatch(pop(0, 0), &InboundMessage::Book(asks));
 }
 
+/// An engine long ten shares bought at 0.41 through the real inbound path, with its commands drained.
+fn long_ten_shares(strategy: Box<dyn Strategy>) -> (HotEngine, Consumer<ExecLaneItem>) {
+    let (mut engine, mut commands) = flattening_engine(strategy);
+    make_ready_with_inventory(&mut engine, 0);
+    seat_book(&mut engine, 10);
+    let mut pen = FillPen::new(0);
+    for message in pen.fill(Side::Buy, 41 * TICK, 10 * FIXED_SCALE, 20) {
+        engine.dispatch(pop(0, 0), &message);
+    }
+    drain_commands(&mut commands);
+    (engine, commands)
+}
+
 fn flatten_places(commands: &[ExecCommand]) -> Vec<(Side, Qty, OrderStyle, ClientOrderId)> {
     commands
         .iter()
@@ -473,16 +470,7 @@ fn flatten_places(commands: &[ExecCommand]) -> Vec<(Side, Qty, OrderStyle, Clien
 /// a strategy that stopped asking and an engine that keeps selling.
 #[test]
 fn a_declared_flatten_sends_one_marketable_order_and_expires_with_the_declaration() {
-    let (mut engine, mut commands) = flattening_engine(Box::new(Flattener { is_declaring: true }));
-    make_ready_with_inventory(&mut engine, 0);
-    seat_book(&mut engine, 10);
-
-    // Ten shares bought at 0.41, through the real inbound path.
-    let mut pen = FillPen::new(0);
-    for message in pen.fill(Side::Buy, 41 * TICK, 10 * FIXED_SCALE, 20) {
-        engine.dispatch(pop(0, 0), &message);
-    }
-    drain_commands(&mut commands);
+    let (mut engine, mut commands) = long_ten_shares(Box::new(Flattener { is_declaring: true }));
 
     spin_at(&mut engine, 1, 30);
     let sent = flatten_places(&drain_commands(&mut commands));
@@ -499,16 +487,9 @@ fn a_declared_flatten_sends_one_marketable_order_and_expires_with_the_declaratio
     // The order dies without filling; the position is untouched and still wants closing.
     kill_unfilled(&mut engine, client_id, 40);
 
-    let (mut engine, mut commands) = flattening_engine(Box::new(Flattener {
+    let (mut engine, mut commands) = long_ten_shares(Box::new(Flattener {
         is_declaring: false,
     }));
-    make_ready_with_inventory(&mut engine, 0);
-    seat_book(&mut engine, 10);
-    let mut pen = FillPen::new(0);
-    for message in pen.fill(Side::Buy, 41 * TICK, 10 * FIXED_SCALE, 20) {
-        engine.dispatch(pop(0, 0), &message);
-    }
-    drain_commands(&mut commands);
     spin_at(&mut engine, 1, 30);
     assert!(
         flatten_places(&drain_commands(&mut commands)).is_empty(),
@@ -526,15 +507,7 @@ fn a_declared_flatten_sends_one_marketable_order_and_expires_with_the_declaratio
 /// every way one can end.
 #[test]
 fn a_partial_fill_re_fires_next_spin_sized_by_what_is_left() {
-    let (mut engine, mut commands) = flattening_engine(Box::new(Flattener { is_declaring: true }));
-    make_ready_with_inventory(&mut engine, 0);
-    seat_book(&mut engine, 10);
-
-    let mut pen = FillPen::new(0);
-    for message in pen.fill(Side::Buy, 41 * TICK, 10 * FIXED_SCALE, 20) {
-        engine.dispatch(pop(0, 0), &message);
-    }
-    drain_commands(&mut commands);
+    let (mut engine, mut commands) = long_ten_shares(Box::new(Flattener { is_declaring: true }));
 
     spin_at(&mut engine, 1, 30);
     let first = flatten_places(&drain_commands(&mut commands));
@@ -589,14 +562,7 @@ fn a_partial_fill_re_fires_next_spin_sized_by_what_is_left() {
 /// that cannot send a marketable order under any circumstances, which is what changed.
 #[test]
 fn a_market_order_declared_as_a_quote_is_still_refused_by_name() {
-    let (mut engine, mut commands) = flattening_engine(Box::new(CrossingQuoter));
-    make_ready_with_inventory(&mut engine, 0);
-    seat_book(&mut engine, 10);
-    let mut pen = FillPen::new(0);
-    for message in pen.fill(Side::Buy, 41 * TICK, 10 * FIXED_SCALE, 20) {
-        engine.dispatch(pop(0, 0), &message);
-    }
-    drain_commands(&mut commands);
+    let (mut engine, mut commands) = long_ten_shares(Box::new(CrossingQuoter));
 
     spin_at(&mut engine, 1, 30);
     assert!(
@@ -605,14 +571,7 @@ fn a_market_order_declared_as_a_quote_is_still_refused_by_name() {
          honoured — the strategy asked to REST an order"
     );
 
-    let (mut engine, mut commands) = flattening_engine(Box::new(Flattener { is_declaring: true }));
-    make_ready_with_inventory(&mut engine, 0);
-    seat_book(&mut engine, 10);
-    let mut pen = FillPen::new(0);
-    for message in pen.fill(Side::Buy, 41 * TICK, 10 * FIXED_SCALE, 20) {
-        engine.dispatch(pop(0, 0), &message);
-    }
-    drain_commands(&mut commands);
+    let (mut engine, mut commands) = long_ten_shares(Box::new(Flattener { is_declaring: true }));
     spin_at(&mut engine, 1, 30);
     assert_eq!(
         flatten_places(&drain_commands(&mut commands)).len(),

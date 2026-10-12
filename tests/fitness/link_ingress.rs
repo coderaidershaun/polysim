@@ -19,8 +19,8 @@ use polysim::msg::persist::{FeatureId, LinkFrameRow, LinkRowKind, PersistRecord}
 use polysim::time::{DurationUs, TsUs};
 
 use crate::engine_support::{
-    LinkedEngine, LinkedSetup, engine_with_link, idle_at, instrument_row, pop, run_control, spin,
-    tracker_spec_all, ts,
+    LinkedEngine, LinkedSetup, drain_persist, engine_with_link, idle_at, instrument_row, pop,
+    run_control, spin, tracker_spec_all, ts,
 };
 
 const FIELDS: [&str; 2] = ["peer_mid", "peer_confidence"];
@@ -139,14 +139,6 @@ impl Edge {
     }
 }
 
-fn drain(linked: &mut LinkedEngine) -> Vec<PersistRecord> {
-    let mut records = Vec::new();
-    while let Ok(record) = linked.persist.pop() {
-        records.push(record);
-    }
-    records
-}
-
 fn link_rows(records: &[PersistRecord]) -> Vec<LinkFrameRow> {
     records
         .iter()
@@ -220,12 +212,12 @@ fn a_peer_frame_reaches_the_strategy_and_the_tape_under_independent_gates() {
             linked
                 .engine
                 .dispatch(pop(0, 0), &run_control(idle_at(1), 50));
-            drain(&mut linked);
+            drain_persist(&mut linked);
         }
         let message = edge.admit(1, &case.values, 100).expect("gate admits");
         linked.engine.dispatch(pop(0, 0), &message);
 
-        let records = drain(&mut linked);
+        let records = drain_persist(&mut linked);
         let delivered = features(&records);
         if case.expect_delivery {
             assert_eq!(
@@ -302,7 +294,7 @@ fn the_sequence_gate_keeps_duplicates_and_reorders_off_the_hot_thread() {
         "the duplicate and the reorder never entered the ring"
     );
 
-    let records = drain(&mut linked);
+    let records = drain_persist(&mut linked);
     assert_eq!(features(&records), vec![1.0, 2.0, 3.0]);
     assert_eq!(
         link_rows(&records)
@@ -364,13 +356,7 @@ fn an_overlong_payload_panics_rather_than_truncating() {
 #[test]
 #[should_panic(expected = "engine-reserved topic")]
 fn link_send_refuses_an_engine_topic() {
-    struct Rogue;
-    impl Strategy for Rogue {
-        fn on_spin(&mut self, ctx: &mut StrategyCtx<'_>, _tick: &SpinTick) {
-            ctx.link_send(TopicId::BOOKS, &[1.0]);
-        }
-    }
-    dispatch_one_spin(Box::new(Rogue));
+    dispatch_one_spin(Box::new(Rogue(TopicId::BOOKS)));
 }
 
 /// FITNESS: a topic id above the ones registration handed out is refused on the HOT thread. The
@@ -380,17 +366,19 @@ fn link_send_refuses_an_engine_topic() {
 #[test]
 #[should_panic(expected = "undeclared link topic")]
 fn link_send_refuses_a_topic_past_the_declared_count() {
-    struct Rogue;
-    impl Strategy for Rogue {
-        fn link_topics(&self) -> &'static [&'static str] {
-            &TOPICS
-        }
+    dispatch_one_spin(Box::new(Rogue(TopicId::strategy(TOPICS.len()))));
+}
 
-        fn on_spin(&mut self, ctx: &mut StrategyCtx<'_>, _tick: &SpinTick) {
-            ctx.link_send(TopicId::strategy(TOPICS.len()), &[1.0]);
-        }
+struct Rogue(TopicId);
+
+impl Strategy for Rogue {
+    fn link_topics(&self) -> &'static [&'static str] {
+        &TOPICS
     }
-    dispatch_one_spin(Box::new(Rogue));
+
+    fn on_spin(&mut self, ctx: &mut StrategyCtx<'_>, _tick: &SpinTick) {
+        ctx.link_send(self.0, &[1.0]);
+    }
 }
 
 fn dispatch_one_spin(strategy: Box<dyn Strategy>) {

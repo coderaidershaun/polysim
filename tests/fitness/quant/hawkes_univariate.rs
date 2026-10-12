@@ -2,12 +2,9 @@
 //! and the closed-form readouts must match hand arithmetic. The recursion is the only intensity the
 //! engine ever computes, so a drift from the definition is invisible at run time.
 
+use super::ts;
 use polysim::hot::quant::hawkes::{HawkesEvents, HawkesParams, UnivariateHawkes};
-use polysim::time::{DurationUs, TsUs};
-
-fn ts(secs: f64) -> TsUs {
-    TsUs::from_micros((secs * 1e6).round() as i64)
-}
+use polysim::time::DurationUs;
 
 #[test]
 fn recursion_matches_the_direct_kernel_sum_and_relaxes_to_baseline() {

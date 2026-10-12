@@ -3,14 +3,10 @@
 //! failure mode is a slightly wrong intensity, never an error. Each is pinned against the naive
 //! definition it replaces.
 
+use super::ts;
 use polysim::hot::quant::hawkes::{
     HawkesEvents, LogisticParams, LogisticShape, QuadraticParams, UnivariateHawkes,
 };
-use polysim::time::TsUs;
-
-fn ts(secs: f64) -> TsUs {
-    TsUs::from_micros((secs * 1e6).round() as i64)
-}
 
 #[test]
 fn quadratic_is_a_rescaled_exponential_under_every_gamma_gauge() {

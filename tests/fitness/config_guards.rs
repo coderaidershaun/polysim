@@ -42,20 +42,14 @@ fn config_with_source(source_block: &str) -> String {
     config_with_strategy(source_block, "  instruments: all\n")
 }
 
+const DEFAULT_PERSISTENCE: &str = "persistence:\n  dir: ./data\n";
+
 fn config_with_strategy(source_block: &str, strategy_block: &str) -> String {
-    document(
-        source_block,
-        strategy_block,
-        "persistence:\n  dir: ./data\n",
-    )
+    with_link(source_block, strategy_block, DEFAULT_PERSISTENCE, "")
 }
 
 fn config_without_persistence(source_block: &str, strategy_block: &str) -> String {
-    document(source_block, strategy_block, "")
-}
-
-fn document(source_block: &str, strategy_block: &str, persistence_block: &str) -> String {
-    with_link(source_block, strategy_block, persistence_block, "")
+    with_link(source_block, strategy_block, "", "")
 }
 
 fn with_link(
@@ -87,7 +81,7 @@ fn config_with_link(link_block: &str) -> String {
     with_link(
         BINANCE_PERP_SOURCE,
         "  instruments: all\n",
-        "persistence:\n  dir: ./data\n",
+        DEFAULT_PERSISTENCE,
         link_block,
     )
 }
@@ -705,21 +699,11 @@ fn config_with_execution(block: &str) -> String {
 }
 
 fn config_with_execution_on(source_block: &str, block: &str) -> String {
-    format!(
-        "engine:
-  hot_core_id: 0
-  spin_interval_us: 100000
-queues:
-  input_capacity: 65536
-  persistence_capacity: 65536
-source:
-{source_block}strategy:
-  instruments: all
-persistence:
-  dir: ./data
-{block}logging:
-  dir: ./logs
-"
+    with_link(
+        source_block,
+        "  instruments: all\n",
+        DEFAULT_PERSISTENCE,
+        block,
     )
 }
 

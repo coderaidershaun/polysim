@@ -11,7 +11,9 @@ use polysim::exposure::ExposureSnapshot;
 use polysim::hot::dispatch::{
     ExecWiring, ExposureWiring, HotEngine, HotEngineSetup, LinkWiring, PersistWiring,
 };
-use polysim::hot::exec::{ClientIdLayout, ExecSettings, side_base};
+use polysim::hot::exec::{
+    BookTop, ClientIdLayout, ExecSettings, FundsView, RejectOrigin, RejectReason, side_base,
+};
 use polysim::hot::ingress::QueueSample;
 use polysim::hot::metrics::MetricsSnapshot;
 use polysim::hot::strategy::{EngineView, Strategy, StrategyConfig};
@@ -25,7 +27,7 @@ use polysim::msg::inbound::{
     BOOK_CHUNK_LEVELS, BookChunk, BookChunkKind, BookReset, InboundMessage, KlineEvent, Level,
     MarketRotation, RunControl, SpinTick, TradeEvent,
 };
-use polysim::msg::persist::{FeatureId, PersistRecord};
+use polysim::msg::persist::{FeatureId, FillRow, OrderRow, PersistRecord};
 use polysim::msg::ui::{UI_BOOK_RING_CAPACITY, UI_EVENT_RING_CAPACITY, UiBookSnapshot, UiEvent};
 use polysim::registry::InstrumentRow;
 use polysim::shutdown::{RunAssertion, RunControlGate};
@@ -641,8 +643,8 @@ pub fn detached_exposure() -> ExposureWiring<'static> {
     }
 }
 
-/// Opens positions through the REAL inbound fill path, which is the only path there is now that
-/// simulated fills are gone.
+/// Opens positions through the REAL inbound fill path, which is the only path the engine has for
+/// a fill.
 ///
 /// A fill needs an ORDER to belong to, so each side adopts one slot from a reconciliation snapshot
 /// and then reports trades against it. The venue's totals are cumulative and the engine folds the
@@ -772,4 +774,94 @@ pub fn exec_event(
         received_ts_us: ts(when),
         queued_ts_us: ts(when),
     }
+}
+
+pub fn local_refusals(ui_events: &mut Consumer<UiEvent>) -> Vec<RejectReason> {
+    let mut reasons = Vec::new();
+    while let Ok(event) = ui_events.pop() {
+        if let UiEvent::Reject {
+            origin: RejectOrigin::Local(reason),
+            ..
+        } = event
+        {
+            reasons.push(reason);
+        }
+    }
+    reasons
+}
+
+#[derive(Default)]
+pub struct Banked {
+    pub orders: Vec<OrderRow>,
+    pub fills: Vec<FillRow>,
+}
+
+pub fn drain_orders_and_fills(records: &mut Consumer<PersistRecord>) -> Banked {
+    let mut banked = Banked::default();
+    while let Ok(record) = records.pop() {
+        match record {
+            PersistRecord::Order(row) => banked.orders.push(row),
+            PersistRecord::Fill(row) => banked.fills.push(row),
+            other => panic!("only orders and fills are recorded here, got {other:?}"),
+        }
+    }
+    banked
+}
+
+/// A two-sided book around the midpoint, fresh as of the spin that reads it.
+pub fn top(bid: i64, ask: i64) -> BookTop {
+    BookTop {
+        best_bid: Some(Price(bid)),
+        best_ask: Some(Price(ask)),
+        mid: Price(bid + (ask - bid) / 2),
+        is_valid: true,
+        last_commit_ts_us: ts(1_000),
+        now_ts_us: ts(1_000),
+    }
+}
+
+/// Funded far past anything a case asks for, so the funds gate is not silently what refuses.
+pub fn rich() -> FundsView {
+    FundsView {
+        spendable: i64::MAX / 4,
+        floor: 0,
+    }
+}
+
+/// One price level from bare mantissas.
+pub fn level(price: i64, qty: i64) -> Level {
+    Level {
+        price: Price(price),
+        qty: Qty(qty),
+    }
+}
+
+/// Whole seconds as a timestamp. [`ts`] takes microseconds.
+pub fn ts_secs(secs: i64) -> TsUs {
+    TsUs::from_micros(secs * 1_000_000)
+}
+
+/// Declares nothing and reads nothing, so every command and record a test sees is the engine's.
+pub struct Idle;
+
+impl Strategy for Idle {}
+
+/// Everything the engine has persisted since the last drain.
+pub fn drain_persist(linked: &mut LinkedEngine) -> Vec<PersistRecord> {
+    let mut records = Vec::new();
+    while let Ok(record) = linked.persist.pop() {
+        records.push(record);
+    }
+    records
+}
+
+/// The values a probe strategy recorded under its first feature, in order.
+pub fn call_codes(records: &[PersistRecord]) -> Vec<f64> {
+    records
+        .iter()
+        .filter_map(|record| match record {
+            PersistRecord::Feature(row) if row.feature == FeatureId(0) => Some(row.value),
+            _ => None,
+        })
+        .collect()
 }

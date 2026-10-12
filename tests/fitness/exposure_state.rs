@@ -21,11 +21,12 @@ use std::path::Path;
 
 use polysim::config::{Config, ExecutionMode, NoParams, RunIdentity};
 use polysim::exposure::{
-    ExposureError, ExposureSnapshot, ExposureState, ExposureWriter, ExposureWriterConfig,
-    InstrumentExposure, file_path, load,
+    ExposureError, ExposureHandle, ExposureSnapshot, ExposureState, ExposureWriter,
+    ExposureWriterConfig, InstrumentExposure, file_path, load,
 };
 use polysim::ids::{FIXED_SCALE, InstrumentId, Qty};
 use polysim::registry::Registry;
+use polysim::sink::ExposureSink;
 use polysim::time::TsUs;
 
 use crate::parquet_readback::TempDir;
@@ -107,7 +108,22 @@ fn write_from(
     restored: &ExposureState,
     snapshots: &[ExposureSnapshot],
 ) {
-    let (handle, mut sink) = ExposureWriter::spawn(
+    let (handle, mut sink) = spawn_live_writer(dir, registry, restored);
+    for snapshot in snapshots {
+        sink.push(*snapshot);
+    }
+    // Standing in for the hot thread ending: the sink's destructor flushes what it is still holding,
+    // because that snapshot is the run's final position. The boot fitness tests pin that flush directly.
+    drop(sink);
+    drain_writer(handle).expect("the final write succeeds");
+}
+
+pub fn spawn_live_writer(
+    dir: &Path,
+    registry: &Registry,
+    restored: &ExposureState,
+) -> (ExposureHandle, ExposureSink) {
+    ExposureWriter::spawn(
         ExposureWriterConfig::new(
             dir.to_path_buf(),
             identity(),
@@ -115,31 +131,26 @@ fn write_from(
             registry,
         ),
         restored,
-    );
-    for snapshot in snapshots {
-        sink.push(*snapshot);
-    }
-    // Standing in for the hot thread ending: the sink's destructor flushes what it is still holding,
-    // because that snapshot is the run's final position. `exposure_boot.rs` pins that directly.
-    drop(sink);
+    )
+}
+
+/// The caller drops the sink first, so it alone decides what the writer still holds when it drains.
+pub fn drain_writer(writer: ExposureHandle) -> Result<(), ExposureError> {
     tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("build a current-thread runtime for the exposure drain")
-        .block_on(handle.drain())
-        .expect("the final write succeeds");
+        .block_on(writer.drain())
+}
+
+pub fn load_live(root: &Path, registry: &Registry) -> Result<ExposureState, ExposureError> {
+    load(root, &identity(), registry, Some(ExecutionMode::Live))
 }
 
 #[test]
 fn a_missing_file_is_a_cold_start_rather_than_a_fault() {
     let root = TempDir::new("exposure-cold");
     let registry = registry_for(BINANCE_SOURCE);
-    let state = load(
-        root.path(),
-        &identity(),
-        &registry,
-        Some(ExecutionMode::Live),
-    )
-    .expect("a first run has no past");
+    let state = load_live(root.path(), &registry).expect("a first run has no past");
     assert!(state.is_empty());
     assert!(state.assets().is_empty());
     assert!(
@@ -159,13 +170,7 @@ fn a_written_position_reloads_as_the_same_cost_basis() {
     let rows = [row(0, 100_000, -11_800_000_000, 11_500_000_000)];
     write_through_the_writer(root.path(), &registry, &[snapshot(1, &rows)]);
 
-    let state = load(
-        root.path(),
-        &identity(),
-        &registry,
-        Some(ExecutionMode::Live),
-    )
-    .expect("the file this build wrote loads");
+    let state = load_live(root.path(), &registry).expect("the file this build wrote loads");
     assert_eq!(state.instruments(), rows);
     // btc +0.001 and usdt -118: the position and what it cost, each against its own asset.
     let amounts: Vec<(&str, i64)> = state
@@ -193,13 +198,7 @@ fn a_restored_position_survives_a_run_that_never_emitted_one() {
     let path = file_path(root.path(), &identity(), Some(ExecutionMode::Live));
     let after_first_run = std::fs::read_to_string(&path).expect("the first run wrote a file");
 
-    let restored = load(
-        root.path(),
-        &identity(),
-        &registry,
-        Some(ExecutionMode::Live),
-    )
-    .expect("loads");
+    let restored = load_live(root.path(), &registry).expect("loads");
     // A whole second run: writer up, writer drained, and not one snapshot in between.
     write_from(root.path(), &registry, &restored, &[]);
 
@@ -209,14 +208,9 @@ fn a_restored_position_survives_a_run_that_never_emitted_one() {
         "a run that folded nothing must leave the position it inherited exactly as it found it"
     );
     assert_eq!(
-        load(
-            root.path(),
-            &identity(),
-            &registry,
-            Some(ExecutionMode::Live)
-        )
-        .expect("loads")
-        .instruments(),
+        load_live(root.path(), &registry)
+            .expect("loads")
+            .instruments(),
         rows
     );
 }
@@ -247,13 +241,7 @@ fn the_informational_sections_are_never_read_back() {
     )
     .expect("write the handmade document");
 
-    let state = load(
-        root.path(),
-        &identity(),
-        &registry,
-        Some(ExecutionMode::Live),
-    )
-    .expect("loads");
+    let state = load_live(root.path(), &registry).expect("loads");
     assert_eq!(
         state.instruments(),
         [row(0, 100_000, -11_800_000_000, 11_800_000_000)]
@@ -341,12 +329,7 @@ fn a_file_that_cannot_be_trusted_refuses_the_boot() {
             body,
         )
         .expect("write the case");
-        let result = load(
-            root.path(),
-            &identity(),
-            &registry,
-            Some(ExecutionMode::Live),
-        );
+        let result = load_live(root.path(), &registry);
         match expect {
             Expect::LoadsEmpty => assert!(
                 result
@@ -388,13 +371,7 @@ fn assets_aggregate_across_every_instrument_that_shares_one() {
     ];
     write_through_the_writer(root.path(), &registry, &[snapshot(1, &rows)]);
 
-    let state = load(
-        root.path(),
-        &identity(),
-        &registry,
-        Some(ExecutionMode::Live),
-    )
-    .expect("loads");
+    let state = load_live(root.path(), &registry).expect("loads");
     assert_eq!(state.instruments(), rows);
     let amounts: Vec<(&str, i64)> = state
         .assets()
@@ -443,13 +420,7 @@ fn a_full_ring_supersedes_the_stale_state_rather_than_losing_the_newest() {
         .collect();
     write_through_the_writer(root.path(), &registry, &burst);
 
-    let state = load(
-        root.path(),
-        &identity(),
-        &registry,
-        Some(ExecutionMode::Live),
-    )
-    .expect("loads");
+    let state = load_live(root.path(), &registry).expect("loads");
     assert_eq!(
         state.instruments(),
         [row(0, 512_000, -3_584, 3_584)],

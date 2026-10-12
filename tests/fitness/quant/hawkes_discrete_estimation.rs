@@ -6,6 +6,21 @@ use polysim::hot::quant::hawkes::{
     DiscreteCounts, DiscreteMle, DiscreteParams, DiscreteSimulation,
 };
 
+fn fixture() -> (DiscreteParams, Vec<u32>, DiscreteCounts) {
+    let truth = DiscreteParams::new(2.0, 1.5, 0.3, 3);
+    let path = DiscreteSimulation {
+        params: truth,
+        bins: 3000,
+        seed: 0x5EED_0007,
+    }
+    .run();
+    let mut counts = DiscreteCounts::new(4096);
+    for &count in &path {
+        counts.push(count);
+    }
+    (truth, path, counts)
+}
+
 /// The fitter evaluates its objective through a rolling memory window that advances in O(1) per
 /// bin. This pins that recursion against the definition it stands in for — the direct double sum
 /// over the last `memory` bins — by driving it through its only caller: the reported
@@ -14,18 +29,8 @@ use polysim::hot::quant::hawkes::{
 /// still report `converged`, and quietly fit a different model.
 #[test]
 fn likelihood_matches_the_direct_memory_window_sum() {
-    let truth = DiscreteParams::new(2.0, 1.5, 0.3, 3);
-    let path = DiscreteSimulation {
-        params: truth,
-        bins: 3000,
-        seed: 0x5EED_0007,
-    }
-    .run();
+    let (truth, path, counts) = fixture();
     let bins: Vec<i64> = path.iter().map(|&count| i64::from(count)).collect();
-    let mut counts = DiscreteCounts::new(4096);
-    for count in path {
-        counts.push(count);
-    }
 
     let fitted = DiscreteMle::new(truth.memory, 64)
         .fit(&counts)
@@ -55,18 +60,9 @@ fn likelihood_matches_the_direct_memory_window_sum() {
 
 #[test]
 fn fit_recovers_the_kernel_and_flags_an_explosive_window() {
-    // mu amplitude decay trade-off in the fit tolerance bands.
-    let truth = DiscreteParams::new(2.0, 1.5, 0.3, 3);
-    let path = DiscreteSimulation {
-        params: truth,
-        bins: 3000,
-        seed: 0x5EED_0007,
-    }
-    .run();
-    let mut counts = DiscreteCounts::new(4096);
-    for count in path {
-        counts.push(count);
-    }
+    // The three kernel parameters trade off against each other, so each tolerance band is wider
+    // than a fit of any one of them alone would need.
+    let (truth, _, counts) = fixture();
 
     let mut fitter = DiscreteMle::new(truth.memory, 64);
     let estimate = fitter.fit(&counts).expect("cold fit");

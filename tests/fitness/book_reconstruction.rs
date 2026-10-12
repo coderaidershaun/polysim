@@ -6,44 +6,17 @@ use std::collections::BTreeMap;
 use polysim::adapters::polymarket::book::BookNormaliser;
 use polysim::adapters::polymarket::parse::PolyBook;
 use polysim::hot::book::{Book, BookState, SnapshotOutcome};
-use polysim::ids::{InstrumentId, Price, Qty, Side};
+use polysim::ids::{InstrumentId, Side};
 use polysim::msg::inbound::{BOOK_CHUNK_LEVELS, BookChunk, BookChunkKind, InboundMessage, Level};
 use polysim::time::TsUs;
 use proptest::prelude::*;
 
+use crate::engine_support::{
+    delta_chunk, partial_delta_chunk, partial_snapshot_chunk, snapshot_pair,
+};
+
 fn any_side() -> impl Strategy<Value = Side> {
     prop_oneof![Just(Side::Buy), Just(Side::Sell)]
-}
-
-fn one_chunk(
-    side: Side,
-    kind: BookChunkKind,
-    levels: &[(i64, i64)],
-    is_last_chunk: bool,
-) -> BookChunk {
-    assert!(levels.len() <= BOOK_CHUNK_LEVELS);
-    let mut filled = [Level {
-        price: Price(0),
-        qty: Qty(0),
-    }; BOOK_CHUNK_LEVELS];
-    for (slot, &(price, qty)) in filled.iter_mut().zip(levels) {
-        *slot = Level {
-            price: Price(price),
-            qty: Qty(qty),
-        };
-    }
-    BookChunk {
-        instrument: InstrumentId(0),
-        kind,
-        side,
-        levels: filled,
-        len: levels.len() as u8,
-        is_last_chunk,
-        update_id: 0,
-        exchange_ts_us: None,
-        received_ts_us: TsUs::from_micros(0),
-        queued_ts_us: TsUs::from_micros(0),
-    }
 }
 
 fn make_chunks(
@@ -54,11 +27,18 @@ fn make_chunks(
 ) -> Vec<BookChunk> {
     levels
         .chunks(chunk_size.clamp(1, BOOK_CHUNK_LEVELS))
-        .map(|group| one_chunk(side, kind, group, false))
+        .map(|group| {
+            assert!(group.len() <= BOOK_CHUNK_LEVELS);
+            match kind {
+                BookChunkKind::Snapshot => partial_snapshot_chunk(0, side, group, 0),
+                BookChunkKind::Delta => partial_delta_chunk(0, side, group, 0),
+            }
+        })
         .collect()
 }
 
-/// The oracle: qty=0 removes, insert/replace, and at-capacity evict-worst-unless-deeper.
+/// The oracle: a zero quantity removes a level, any other quantity inserts or replaces one, and at
+/// capacity the worst level is evicted to make room unless the new level would be worse still.
 #[derive(Default)]
 struct BookModel {
     bids: BTreeMap<i64, i64>,
@@ -129,7 +109,7 @@ proptest! {
         let mut snapshot_chunks = make_chunks(Side::Buy, BookChunkKind::Snapshot, &snapshot_bids, chunk_size);
         snapshot_chunks.extend(make_chunks(Side::Sell, BookChunkKind::Snapshot, &snapshot_asks, chunk_size));
         if snapshot_chunks.is_empty() {
-            snapshot_chunks.push(one_chunk(Side::Buy, BookChunkKind::Snapshot, &[], false));
+            snapshot_chunks.push(partial_snapshot_chunk(0, Side::Buy, &[], 0));
         }
         let last = snapshot_chunks.len() - 1;
         snapshot_chunks[last].is_last_chunk = true;
@@ -161,7 +141,8 @@ proptest! {
         prop_assert_eq!(book_side(book.asks()), model.asks_best_first());
     }
 
-    /// Preallocated Vecs + in-place evict-then-insert, so applying never reallocates.
+    /// The book uses preallocated vectors and evicts then inserts in place, so applying never
+    /// reallocates.
     #[test]
     fn apply_never_allocates(
         capacity in 1usize..16,
@@ -178,7 +159,7 @@ proptest! {
         let mut snapshot_chunks = make_chunks(Side::Buy, BookChunkKind::Snapshot, &bids, chunk_size);
         snapshot_chunks.extend(make_chunks(Side::Sell, BookChunkKind::Snapshot, &asks, chunk_size));
         if snapshot_chunks.is_empty() {
-            snapshot_chunks.push(one_chunk(Side::Buy, BookChunkKind::Snapshot, &[], false));
+            snapshot_chunks.push(partial_snapshot_chunk(0, Side::Buy, &[], 0));
         }
         let last = snapshot_chunks.len() - 1;
         snapshot_chunks[last].is_last_chunk = true;
@@ -203,7 +184,8 @@ proptest! {
 /// `AwaitingSnapshot` only on a chunk carrying the terminator. An emitter that produced nothing for
 /// an empty book would wedge the instrument there and drop every delta that followed, while the
 /// adapter believed it had gone live. Driven through the real emitter rather than a test-local
-/// cutter, because a hand-rolled oracle is exactly what hid this case.
+/// cutter, because a hand-written cutter can carry the same terminator mistake as the emitter and
+/// mask it.
 #[test]
 fn an_empty_snapshot_still_carries_the_terminator() {
     let mut normaliser = BookNormaliser::new(InstrumentId(0));
@@ -239,7 +221,7 @@ fn an_empty_snapshot_still_carries_the_terminator() {
     );
 }
 
-/// Log-spam fix: a locked top (best bid == best ask) is a benign complementary-binary state —
+/// A locked top (best bid == best ask) is a benign complementary-binary state —
 /// counted, never warned; a crossed top (best bid > best ask) is counted per event with the WARN
 /// episode-limited. The counters carry the classification; the WARN suppression mirrors the trim
 /// episode and is review-checked, not log-asserted.
@@ -247,21 +229,15 @@ fn an_empty_snapshot_still_carries_the_terminator() {
 fn locked_counts_silently_crossed_counts_each_event() {
     let mut book = Book::new(8);
     // Seed a proper book: best bid 50 < best ask 60.
-    let bids = one_chunk(Side::Buy, BookChunkKind::Snapshot, &[(50, 1)], false);
-    let asks = one_chunk(Side::Sell, BookChunkKind::Snapshot, &[(60, 1)], true);
+    let (bids, asks) = snapshot_pair(0, &[(50, 1)], &[(60, 1)], 0);
     assert_eq!(book.apply_snapshot_chunk(&bids), SnapshotOutcome::Clean);
     assert_eq!(book.apply_snapshot_chunk(&asks), SnapshotOutcome::Clean);
     assert_eq!((book.locked_count(), book.crossed_count()), (0, 0));
 
-    // A persistent lock at the touch (the 0.99/0.01 endgame shape): best ask down to 50 == best
-    // bid, re-quoted thrice. Each counts; none crosses, so the crossed/warn path never runs.
+    // A persistent lock at the touch (the 0.99/0.01 endgame shape): best ask down to 50, equal to
+    // the best bid, re-quoted thrice. Each counts; none crosses, so the crossed/warn path never runs.
     for qty in [1, 2, 3] {
-        book.apply_delta_chunk(&one_chunk(
-            Side::Sell,
-            BookChunkKind::Delta,
-            &[(50, qty)],
-            true,
-        ));
+        book.apply_delta_chunk(&delta_chunk(0, Side::Sell, &[(50, qty)], 0));
     }
     assert_eq!(book.locked_count(), 3, "each lock counted");
     assert_eq!(
@@ -272,18 +248,8 @@ fn locked_counts_silently_crossed_counts_each_event() {
 
     // A crossing stampede within one episode: best bid 55 > best ask 50, re-quoted — both counted,
     // the WARN fires once.
-    book.apply_delta_chunk(&one_chunk(
-        Side::Buy,
-        BookChunkKind::Delta,
-        &[(55, 1)],
-        true,
-    ));
-    book.apply_delta_chunk(&one_chunk(
-        Side::Buy,
-        BookChunkKind::Delta,
-        &[(55, 2)],
-        true,
-    ));
+    book.apply_delta_chunk(&delta_chunk(0, Side::Buy, &[(55, 1)], 0));
+    book.apply_delta_chunk(&delta_chunk(0, Side::Buy, &[(55, 2)], 0));
     assert_eq!(
         book.crossed_count(),
         2,
@@ -292,18 +258,8 @@ fn locked_counts_silently_crossed_counts_each_event() {
 
     // Return to a proper spread (best ask back to 60) ends the episode; the next crossing opens a
     // fresh one.
-    book.apply_delta_chunk(&one_chunk(
-        Side::Sell,
-        BookChunkKind::Delta,
-        &[(50, 0)],
-        true,
-    ));
-    book.apply_delta_chunk(&one_chunk(
-        Side::Buy,
-        BookChunkKind::Delta,
-        &[(65, 1)],
-        true,
-    ));
+    book.apply_delta_chunk(&delta_chunk(0, Side::Sell, &[(50, 0)], 0));
+    book.apply_delta_chunk(&delta_chunk(0, Side::Buy, &[(65, 1)], 0));
     assert_eq!(
         book.crossed_count(),
         3,

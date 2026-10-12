@@ -14,18 +14,15 @@ use polysim::adapters::polymarket::rotation::{
 };
 use polysim::ids::{InstrumentId, Price, Qty};
 use polysim::msg::inbound::{BookChunkKind, InboundMessage, Level};
-use polysim::time::TsUs;
+
+use crate::engine_support::ts_secs;
 
 const SECOND_US: i64 = 1_000_000;
 const WINDOW_SECS: i64 = 300;
-/// A grid-aligned even index → slot A; the next window (odd) → slot B.
+/// A grid-aligned even index maps to slot A; the next window (odd) maps to slot B.
 const OPEN_A: i64 = 1_784_439_000;
 const OPEN_B: i64 = OPEN_A + WINDOW_SECS;
 const CLOSE_A: i64 = OPEN_A + WINDOW_SECS;
-
-fn ts(secs: i64) -> TsUs {
-    TsUs::from_micros(secs * SECOND_US)
-}
 
 /// Slot A hosts `btc-updown-5m-a-{up,down}` (instruments 0/1); slot B the `-b-` pair (2/3).
 fn core() -> PolyDriverCore {
@@ -52,6 +49,10 @@ fn tokens(open_secs: i64) -> WindowTokens {
 }
 
 fn assignment(open_secs: i64) -> WindowAssignment {
+    let WindowTokens {
+        up: up_token,
+        down: down_token,
+    } = tokens(open_secs);
     let (up, down) = if (open_secs / WINDOW_SECS).rem_euclid(2) == 0 {
         (InstrumentId(0), InstrumentId(1))
     } else {
@@ -60,39 +61,22 @@ fn assignment(open_secs: i64) -> WindowAssignment {
     WindowAssignment {
         up: OutcomeLeg {
             instrument: up,
-            token: TokenId::from(format!("{open_secs}-up")),
+            token: up_token,
         },
         down: OutcomeLeg {
             instrument: down,
-            token: TokenId::from(format!("{open_secs}-down")),
+            token: down_token,
         },
-        window_open_ts_us: ts(open_secs),
-        window_close_ts_us: ts(open_secs + WINDOW_SECS),
+        window_open_ts_us: ts_secs(open_secs),
+        window_close_ts_us: ts_secs(open_secs + WINDOW_SECS),
         condition_id: Arc::from(format!("cond-{open_secs}").as_str()),
     }
 }
 
-/// A one-level-per-side book frame for `token`, in the venue-normalised best-first order parse emits.
-fn book_frame(token: &str, now_secs: i64) -> PolyFrame {
-    PolyFrame::Book(PolyBook {
-        asset_id: token.into(),
-        bids: vec![Level {
-            price: Price(50_000_000),
-            qty: Qty(100),
-        }],
-        asks: vec![Level {
-            price: Price(51_000_000),
-            qty: Qty(150),
-        }],
-        exchange_ts_us: ts(now_secs),
-        received_ts_us: ts(now_secs),
-    })
-}
-
-/// A two-level-per-side book frame in the venue's native order: bids best-first (descending),
-/// asks ascending. Depth matters — a one-level side reads the same in either order, which is
+/// A two-level-per-side book frame in the order parse emits: bids best-first (descending), asks
+/// ascending. Depth matters — a one-level side reads the same in either order, which is
 /// exactly what the bid-reversal regression below needs to rule out.
-fn deep_book_frame(token: &str, now_secs: i64) -> PolyFrame {
+fn book_frame(token: &str, now_secs: i64) -> PolyFrame {
     PolyFrame::Book(PolyBook {
         asset_id: token.into(),
         bids: vec![
@@ -115,20 +99,20 @@ fn deep_book_frame(token: &str, now_secs: i64) -> PolyFrame {
                 qty: Qty(250),
             },
         ],
-        exchange_ts_us: ts(now_secs),
-        received_ts_us: ts(now_secs),
+        exchange_ts_us: ts_secs(now_secs),
+        received_ts_us: ts_secs(now_secs),
     })
 }
 
 fn on_tick(core: &mut PolyDriverCore, now_secs: i64) -> Vec<DriverEffect> {
     let mut effects = Vec::new();
-    core.on_tick(ts(now_secs), &mut |effect| effects.push(effect));
+    core.on_tick(ts_secs(now_secs), &mut |effect| effects.push(effect));
     effects
 }
 
 fn on_resolved(core: &mut PolyDriverCore, now_secs: i64, open_secs: i64) -> Vec<DriverEffect> {
     let mut effects = Vec::new();
-    core.on_window_resolved(ts(now_secs), assignment(open_secs), &mut |effect| {
+    core.on_window_resolved(ts_secs(now_secs), assignment(open_secs), &mut |effect| {
         effects.push(effect)
     });
     effects
@@ -136,7 +120,7 @@ fn on_resolved(core: &mut PolyDriverCore, now_secs: i64, open_secs: i64) -> Vec<
 
 fn on_frame(core: &mut PolyDriverCore, now_secs: i64, frame: &PolyFrame) -> Vec<DriverEffect> {
     let mut effects = Vec::new();
-    core.on_frame(ts(now_secs), frame, &mut |effect| effects.push(effect));
+    core.on_frame(ts_secs(now_secs), frame, &mut |effect| effects.push(effect));
     effects
 }
 
@@ -147,9 +131,12 @@ fn on_probe(
     outcome: ProbeOutcome,
 ) -> Vec<DriverEffect> {
     let mut effects = Vec::new();
-    core.on_probe_result(ts(now_secs), tokens(open_secs), outcome, &mut |effect| {
-        effects.push(effect)
-    });
+    core.on_probe_result(
+        ts_secs(now_secs),
+        tokens(open_secs),
+        outcome,
+        &mut |effect| effects.push(effect),
+    );
     effects
 }
 
@@ -295,7 +282,7 @@ fn reconnect_re_baselines_every_live_leg() {
 
     // A fresh socket resets both live legs and emits a BookReset per instrument.
     let mut effects = Vec::new();
-    core.on_reconnect(ts(OPEN_A + 20), &mut |effect| effects.push(effect));
+    core.on_reconnect(ts_secs(OPEN_A + 20), &mut |effect| effects.push(effect));
     assert_eq!(tags(&effects), vec![Tag::BookReset(0), Tag::BookReset(1)]);
     assert_eq!(
         core.live_tokens(),
@@ -349,7 +336,7 @@ fn occupied_slot_is_force_torn_down_at_the_next_subscribe() {
 fn a_repeated_deep_book_validates_without_reset_churn() {
     let mut core = core();
     on_resolved(&mut core, OPEN_A + 10, OPEN_A);
-    let frame = deep_book_frame(&format!("{OPEN_A}-up"), OPEN_A + 11);
+    let frame = book_frame(&format!("{OPEN_A}-up"), OPEN_A + 11);
     let effects = on_frame(&mut core, OPEN_A + 11, &frame);
     assert!(
         tags(&effects).contains(&Tag::Snapshot(0)),

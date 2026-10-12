@@ -1,8 +1,8 @@
 //! `strategy.tables` is the LIB's authority over which tables a run has, not advice a strategy may
 //! forget: a row for a table the config never named reaches no ring and gets no sink, so no
-//! directory of it can appear on disk. Until this held, the gating lived only in strategy code and a
-//! strategy that skipped its own check silently recorded tables the operator never asked for — the
-//! quietest kind of wrong, because a file nobody expects still reads back perfectly.
+//! directory of it can appear on disk. Gating that lived only in strategy code would let a strategy
+//! that skipped its own check silently record tables the operator never asked for — the quietest
+//! kind of wrong, because a file nobody expects still reads back perfectly.
 //!
 //! The empty set is also how persistence-off is expressed (a config with no `persistence:` block
 //! cannot name tables), so this is the same test for both configurations.
@@ -21,8 +21,7 @@ use crate::engine_support::{
     ALL_TABLES, ONE, engine_without_warmup, instrument_row, metrics_ring, persist_ring_for, pop,
     strategy_log_ring, trade,
 };
-
-const BASE_TS_US: i64 = 3_600_000_000;
+use crate::parquet_readback::BASE_TS_US;
 
 /// Every configuration worth distinguishing: none, one, a subset, all.
 const CONFIGURATIONS: [&[TableKind]; 4] = [

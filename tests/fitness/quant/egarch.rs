@@ -3,27 +3,9 @@
 //! rescaling off by the interval, produces a σ that is plausible-looking and wrong in every
 //! research row it feeds.
 
+use super::Lcg;
 use polysim::hot::quant::volatility::Egarch;
 use polysim::time::DurationUs;
-
-/// Deterministic U(0,1) + normal: LCG + Box-Muller.
-struct Lcg(u64);
-
-impl Lcg {
-    fn next_unit(&mut self) -> f64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
-    }
-
-    fn next_normal(&mut self) -> f64 {
-        let u1 = self.next_unit().max(1e-12);
-        let u2 = self.next_unit();
-        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
-    }
-}
 
 /// Synthetic price path: log returns follow exact EGARCH(1,1) recursion with real optimum.
 fn synthetic_price_path(count: usize, params: [f64; 4], seed: u64) -> Vec<f64> {

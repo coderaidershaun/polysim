@@ -3,15 +3,12 @@
 //! market or double-books a slot — plus the T-60s handover the zero-gap rotation subscribes on.
 
 use polysim::adapters::polymarket::discovery::{PolySchedule, Slot};
-use polysim::time::TsUs;
 use proptest::prelude::*;
+
+use crate::engine_support::ts_secs;
 
 const SECOND_US: i64 = 1_000_000;
 const WINDOW_SECS: i64 = 300;
-
-fn ts_secs(secs: i64) -> TsUs {
-    TsUs::from_micros(secs * SECOND_US)
-}
 
 #[test]
 fn next_window_subscribe_matches_current_nominal_end_minus_lead() {
@@ -46,7 +43,7 @@ proptest! {
         prop_assert_eq!(slug_seconds % WINDOW_SECS, 0);
     }
 
-    /// FITNESS: slot is exactly the window index parity — even→A, odd→B — for any window on the grid.
+    /// FITNESS: slot is exactly the window index parity — even windows map to A, odd to B — for any window on the grid.
     #[test]
     fn slot_is_window_index_parity(index in 0i64..20_000_000i64) {
         let schedule = PolySchedule::BTC_5M;

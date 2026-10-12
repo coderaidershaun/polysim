@@ -9,6 +9,8 @@ use polysim::config::PolySeries;
 use polysim::ids::{Price, Qty};
 use polysim::time::TsUs;
 
+use crate::engine_support::ts_secs;
+
 const SERIES: PolySeries = PolySeries::BtcUpDown5m;
 
 const FALLBACK: &str = include_str!("../../fixtures/polymarket/gamma_fallback.json");
@@ -21,14 +23,9 @@ const EVENT: &str = r#"[{"slug":"btc-updown-5m-1784439600","markets":[{
   "outcomes":"[\"Up\", \"Down\"]",
   "orderPriceMinTickSize":0.01,"orderMinSize":5,"enableOrderBook":true,"negRisk":false}]}]"#;
 
-/// A grid-aligned window start as the typed `TsUs` the gamma API now takes.
-fn window(unix_seconds: i64) -> TsUs {
-    TsUs::from_micros(unix_seconds * 1_000_000)
-}
-
 #[test]
 fn double_parses_token_ids_and_window_from_slug() {
-    let market = parse_events(SERIES, EVENT, window(1_784_439_600)).expect("event parses");
+    let market = parse_events(SERIES, EVENT, ts_secs(1_784_439_600)).expect("event parses");
     assert_eq!(
         market,
         GammaMarket {
@@ -43,7 +40,8 @@ fn double_parses_token_ids_and_window_from_slug() {
                     .into(),
             tick_size: Price(1_000_000),
             min_order_size: Qty(500_000_000),
-            // window bounds are the slug grid ts, NOT startDate (creation) or end_date_iso (coarse)
+            // The window bounds come from the slug's grid timestamp, not from startDate (creation
+            // time) or end_date_iso (too coarse).
             window_open_ts_us: TsUs::from_micros(1_784_439_600_000_000),
             window_close_ts_us: TsUs::from_micros(1_784_439_900_000_000),
         }
@@ -71,16 +69,16 @@ fn parse_events_rejects_malformed_input() {
         ),
     ];
     for (name, raw, expect) in cases {
-        let error = parse_events(SERIES, raw, window(1_784_439_600)).expect_err(name);
+        let error = parse_events(SERIES, raw, ts_secs(1_784_439_600)).expect_err(name);
         assert!(expect(&error), "{name}: got {error:?}");
     }
 }
 
 #[test]
-fn fallback_url_formats_end_date_min_matching_the_dossier() {
+fn fallback_url_formats_end_date_min_as_iso_utc() {
     // 1784439540 = 2026-07-19T05:39:00Z; pins the no-chrono ISO formatter.
     assert!(
-        fallback_url(SERIES, window(1_784_439_540)).contains("end_date_min=2026-07-19T05:39:00Z"),
+        fallback_url(SERIES, ts_secs(1_784_439_540)).contains("end_date_min=2026-07-19T05:39:00Z"),
         "fallback query must time-filter with the mandatory end_date_min"
     );
 }
@@ -149,7 +147,7 @@ fn rate_limited_display_reads_for_some_and_none() {
         status: 429,
         retry_after_secs: None,
     };
-    // The old `{retry_after_secs:?}` rendered "Nones"; the header-absent case must read plainly.
+    // A missing header must read as plain words, not as a formatted `None`.
     assert!(
         without
             .to_string()

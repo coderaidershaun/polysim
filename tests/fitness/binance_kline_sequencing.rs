@@ -3,22 +3,14 @@
 
 use polysim::adapters::binance::kline::{KlineOutcome, KlineSequencer};
 use polysim::adapters::binance::parse::{
-    ParseContext, RestKlineTail, parse_combined_frame, parse_kline, parse_rest_klines,
+    RestKlineTail, parse_combined_frame, parse_kline, parse_rest_klines,
 };
 use polysim::config::KlineInterval;
-use polysim::ids::{InstrumentId, Price, Qty};
+use polysim::ids::{Price, Qty};
 use polysim::msg::inbound::{InboundMessage, KlineEvent};
 use polysim::time::TsUs;
 
-const INSTRUMENT: InstrumentId = InstrumentId(3);
-const RECEIVED: TsUs = TsUs::from_micros(1_784_410_630_000_000);
-
-fn ctx() -> ParseContext {
-    ParseContext {
-        instrument: INSTRUMENT,
-        received_ts_us: RECEIVED,
-    }
-}
+use crate::binance_depth_sequencing::{INSTRUMENT, ctx};
 
 const PERP_KLINE: &str = include_str!("../../fixtures/binance/perp_kline_1m.jsonl");
 const PERP_REST_KLINES: &str = include_str!("../../fixtures/binance/perp_klines.json");

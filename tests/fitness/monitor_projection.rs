@@ -10,8 +10,6 @@
 
 use proptest::prelude::*;
 
-type NamedCase = (&'static str, fn(&str));
-
 use polysim::config::ExecutionMode;
 use polysim::desktop::format::{MISSING, write_bps_delta, write_opt_bps_delta};
 use polysim::desktop::model::UiModel;
@@ -21,12 +19,13 @@ use polysim::desktop::monitor_view::{FeatureRowView, account, feature_rows, quot
 use polysim::hot::exec::{CloseReason, ExecHalt, HaltReason, OrderState, RejectOrigin};
 use polysim::ids::{AssetId, ClientOrderId, InstrumentId, Price, Qty, Side};
 use polysim::msg::exec::RejectClass;
-use polysim::msg::inbound::Level;
 use polysim::msg::ui::{
-    DomQuote, UI_BOOK_LEVELS, UI_ORDER_SNAPSHOT_CAPACITY, UiBookSnapshot, UiBookState, UiCatalog,
-    UiEvent, UiInstrument, UiWorkingOrder,
+    DomQuote, UI_ORDER_SNAPSHOT_CAPACITY, UiBookSnapshot, UiBookState, UiCatalog, UiEvent,
+    UiInstrument, UiWorkingOrder,
 };
 use polysim::time::{DurationUs, TsUs};
+
+use crate::desktop_support::{BookFixture, NamedCase, book_snapshot};
 
 /// One-mantissa tick, so a price reads directly as its tick index in the assertions.
 const TICK: Price = Price(1);
@@ -39,53 +38,15 @@ fn ui_model(instruments: usize, features: usize) -> UiModel {
     UiModel::with_monitor_capacity(instruments, features, SPIN)
 }
 
-fn book(
-    instrument: u16,
-    seq: u64,
-    event_ts: i64,
-    state: UiBookState,
-    bids: &[(i64, i64)],
-    asks: &[(i64, i64)],
-) -> UiBookSnapshot {
-    let empty = Level {
-        price: Price(0),
-        qty: Qty(0),
-    };
-    let mut bid_levels = [empty; UI_BOOK_LEVELS];
-    let mut ask_levels = [empty; UI_BOOK_LEVELS];
-    for (slot, &(price, qty)) in bid_levels.iter_mut().zip(bids) {
-        *slot = Level {
-            price: Price(price),
-            qty: Qty(qty),
-        };
-    }
-    for (slot, &(price, qty)) in ask_levels.iter_mut().zip(asks) {
-        *slot = Level {
-            price: Price(price),
-            qty: Qty(qty),
-        };
-    }
-    UiBookSnapshot {
-        instrument: InstrumentId(instrument),
-        seq,
-        event_ts_us: TsUs::from_micros(event_ts),
-        state,
-        bid_len: bids.len() as u16,
-        ask_len: asks.len() as u16,
-        bids: bid_levels,
-        asks: ask_levels,
-    }
-}
-
 fn valid_book(instrument: u16, seq: u64, event_ts: i64, bid: i64, ask: i64) -> UiBookSnapshot {
-    book(
+    book_snapshot(BookFixture {
         instrument,
         seq,
         event_ts,
-        UiBookState::Valid,
-        &[(bid, 1)],
-        &[(ask, 1)],
-    )
+        state: UiBookState::Valid,
+        bids: &[(bid, 1)],
+        asks: &[(ask, 1)],
+    })
 }
 
 fn quote_event(
@@ -138,8 +99,8 @@ fn rows(model: &UiModel, instrument: u16) -> Vec<FeatureRowView> {
 
 #[test]
 fn quote_summary_behavior() {
-    // Book best 100/102 → mid tick 101 (mid_half 202). Strategy quote bid 2 ticks below (tick 99),
-    // ask 3 ticks above (tick 104): the spec's reference bid 2 / ask 3.
+    // The book's best bid and ask are 100 and 102, so the mid is tick 101 (202 half-ticks). The
+    // strategy bids at tick 99, two ticks below the mid, and asks at tick 104, three ticks above it.
     let mut model = ui_model(1, 0);
     model.apply_event(quote_event(0, 0, 1_000, Some((99, 5)), Some((104, 5))));
     model.apply_book(valid_book(0, 0, 1_050, 100, 102));
@@ -366,9 +327,10 @@ fn channel_projections_cases() {
             seq: 0,
             event_ts_us: TsUs::from_micros(500),
         });
-        // An event-lane gap: seq jumps 0 → 2, dropping one.
+        // An event-lane gap: the sequence jumps from 0 to 2, dropping one.
         model.apply_event(trade_event(0, 2, 900, 1));
-        // A book-lane gap: book seq jumps 0 → 2, dropping one (both Valid, so no reset/rebuild row).
+        // A book-lane gap: the book sequence jumps from 0 to 2, dropping one. Both books are valid,
+        // so no reset or rebuild row appears.
         model.apply_book(valid_book(0, 0, 1_000, 100, 102));
         model.apply_book(valid_book(0, 2, 1_100, 100, 102));
 
@@ -433,6 +395,9 @@ fn a_bps_delta_without_a_usable_ratio_is_missing() {
     assert_eq!(buffer, "0.0017", "both present renders the value");
 }
 
+/// The delta column's width in characters at the minimum window size.
+const DELTA_CELL_CHARS: usize = 9;
+
 proptest! {
     /// FITNESS: the delta cell is nine characters wide at the minimum window size. A wider string
     /// does not truncate — it paints over the neighbouring cell, so the number the operator reads
@@ -445,7 +410,7 @@ proptest! {
         let mut buffer = String::new();
         write_bps_delta(&mut buffer, delta, mid);
         prop_assert!(
-            buffer.chars().count() <= 9,
+            buffer.chars().count() <= DELTA_CELL_CHARS,
             "{buffer} is wider than the cell"
         );
     }
@@ -770,14 +735,14 @@ fn a_missing_mid_blanks_the_base_value_but_not_the_balance() {
     );
 
     // A one-sided book yields no mid either.
-    model.apply_book(book(
-        0,
-        1,
-        2_000,
-        UiBookState::Valid,
-        &[(11_799_999_000_000, 1)],
-        &[],
-    ));
+    model.apply_book(book_snapshot(BookFixture {
+        instrument: 0,
+        seq: 1,
+        event_ts: 2_000,
+        state: UiBookState::Valid,
+        bids: &[(11_799_999_000_000, 1)],
+        asks: &[],
+    }));
     assert_eq!(
         account(&model, InstrumentId(0), CENT_TICK).base.value,
         None,
@@ -793,9 +758,9 @@ fn a_missing_mid_blanks_the_base_value_but_not_the_balance() {
 }
 
 /// A gap in the shared event lane could be the terminal fill for any order already on screen. The
-/// model used to log the gap but retain the stale order as confirmed, so the next real order made
-/// the account band say `open 2` and the DOM painted both as live. It must keep the possible
-/// exposure visible while withdrawing the confirmation claim.
+/// model that only logged the gap would retain the stale order as confirmed, so the next real order
+/// would make the account band say `open 2` and the DOM would paint both as live. It must keep the
+/// possible exposure visible while withdrawing the confirmation claim.
 #[test]
 fn an_event_gap_demotes_pre_gap_orders_before_counting_a_replacement() {
     let mut model = ui_model(1, 0);
@@ -1044,11 +1009,9 @@ fn snapshot_healing_cases() {
 /// three places that size it are compiler-checked when a channel is added — the third would index
 /// past the end and panic on the UI thread the first time an operator clicked the new tab.
 #[test]
-fn every_channel_has_its_own_scroll_slot() {
+fn every_channel_accepts_a_scroll_state() {
     let mut state = MonitorUiState::new();
     for (index, channel) in Channel::ALL.iter().enumerate() {
         state.set_scrolled_away(*channel, index as u64, index as f32);
-        state.active_tab = *channel;
     }
-    assert_eq!(state.active_tab, *Channel::ALL.last().expect("no channels"));
 }

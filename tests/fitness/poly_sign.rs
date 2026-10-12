@@ -30,13 +30,13 @@ fn vectors() -> Value {
     serde_json::from_str(VECTORS).expect("sign vector fixture is valid json")
 }
 
-fn text<'a>(value: &'a Value, field: &str) -> &'a str {
+pub(crate) fn text<'a>(value: &'a Value, field: &str) -> &'a str {
     value[field]
         .as_str()
         .unwrap_or_else(|| panic!("vector field {field} is a string"))
 }
 
-fn wallet_key(vector: &Value) -> SigningKey {
+pub(crate) fn wallet_key(vector: &Value) -> SigningKey {
     SigningKey::from_secret(&Secret::new(text(vector, "private_key")))
         .expect("throwaway vector key parses")
 }

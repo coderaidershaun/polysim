@@ -8,40 +8,16 @@
 //! event — fills the table with rows saying nothing changed, and a redelivered report then reads as a
 //! second fill in a table whose whole job is to be the durable record of what happened once.
 //!
-//! `persist_exec.rs` pins the round trip these rows take to Parquet. This pins which rows exist.
+//! A separate test pins the round trip these rows take to Parquet. This one pins which rows exist.
 
 use polysim::config::{RecordedTables, TableKind, TrackerSpec};
-use polysim::hot::strategy::Strategy;
 use polysim::ids::Side;
-use polysim::msg::persist::{FillRow, OrderLifecycle, OrderRow, OrderTransition, PersistRecord};
-use rtrb::Consumer;
+use polysim::msg::persist::{OrderLifecycle, OrderTransition};
 
 use crate::engine_support::{
-    FillPen, ONE, engine_without_warmup, instrument_row, metrics_ring, persist_ring_for, pop,
-    strategy_log_ring,
+    FillPen, Idle, ONE, drain_orders_and_fills, engine_without_warmup, instrument_row,
+    metrics_ring, persist_ring_for, pop, strategy_log_ring,
 };
-
-/// The audit trail is the ENGINE's, not a strategy's, so the probe contributes nothing.
-struct Idle;
-impl Strategy for Idle {}
-
-#[derive(Default)]
-struct Banked {
-    orders: Vec<OrderRow>,
-    fills: Vec<FillRow>,
-}
-
-fn drain(records: &mut Consumer<PersistRecord>) -> Banked {
-    let mut banked = Banked::default();
-    while let Ok(record) = records.pop() {
-        match record {
-            PersistRecord::Order(row) => banked.orders.push(row),
-            PersistRecord::Fill(row) => banked.fills.push(row),
-            other => panic!("only orders and fills are recorded here, got {other:?}"),
-        }
-    }
-    banked
-}
 
 #[test]
 fn a_fill_banks_an_order_row_beside_it_and_a_redelivery_banks_neither() {
@@ -61,7 +37,7 @@ fn a_fill_banks_an_order_row_beside_it_and_a_redelivery_banks_neither() {
         engine.dispatch(pop(0, 0), message);
     }
 
-    let banked = drain(&mut records);
+    let banked = drain_orders_and_fills(&mut records);
     assert_eq!(
         banked.fills.len(),
         1,
@@ -115,7 +91,7 @@ fn a_fill_banks_an_order_row_beside_it_and_a_redelivery_banks_neither() {
     for message in &batch {
         engine.dispatch(pop(0, 0), message);
     }
-    let redelivered = drain(&mut records);
+    let redelivered = drain_orders_and_fills(&mut records);
     assert!(
         redelivered.orders.is_empty() && redelivered.fills.is_empty(),
         "a redelivered report moved neither state nor totals and must record nothing, got {} \

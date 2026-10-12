@@ -6,6 +6,7 @@
 //! A liveness counter rides alongside the allocation assertion: an estimator that quietly gated
 //! every call to `None` would satisfy "allocated nothing" perfectly.
 
+use crate::quant::Lcg;
 use polysim::hot::quant::liquidity::{KylesLambda, KylesLambdaSpec};
 use polysim::ids::Price;
 
@@ -19,18 +20,6 @@ const PRIME: usize = 2 * WINDOW;
 
 /// Pushes inside the measured region, each followed by a refit.
 const MEASURED: usize = 50_000;
-
-struct Lcg(u64);
-
-impl Lcg {
-    fn unit(&mut self) -> f64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
-    }
-}
 
 /// One well-conditioned bar: two-sided flow around a λ = 0.0002 impact line with light noise.
 fn bar(lcg: &mut Lcg) -> (f64, f64) {

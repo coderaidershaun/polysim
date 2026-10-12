@@ -118,9 +118,9 @@ fn signed_query_is_the_signed_payload_and_rejects_caller_injected_fields() {
 /// percent-encoder applied after signing is how the two silently diverge, so the request is
 /// refused, and the rejection must name the param without echoing its value OR the offending
 /// character: the WS API signs `apiKey` as a param, so even one character of it is one character
-/// of a credential in a log line. Derive `Debug` on a signed request and the first
-/// `error!("rejected: {signed:?}")` writes a replayable request — and on the WS API, where
-/// `apiKey` is a signed param, the API key itself — into the strategy log file in plaintext.
+/// of a credential in a log line. A signed request's `Debug` output must carry no values, or a
+/// logged rejection would write a replayable request, and on the WS API the API key itself, into
+/// the log file in plaintext.
 #[test]
 fn credential_values_never_leak_into_an_error_or_a_debug_rendering() {
     // The pattern below binds every field with no `..`, so re-adding a value or character field

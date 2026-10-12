@@ -158,8 +158,7 @@ fn a_reading_too_wide_for_its_column_states_its_bound_instead() {
     write_slots(&mut buf, -(WIDEST_FITTING_NEGATIVE_MICROS as f64 + 1.0));
     assert_eq!(buf, UNDERFLOW);
 
-    // Past u64::MAX entirely: `as u64` saturates instead of wrapping, which is what let the
-    // writers' explicit `>= u64::MAX` guard branches go.
+    // Past u64::MAX entirely: `as u64` saturates, so a value this large reads as overflow.
     write_latency_micros(&mut buf, 1e20);
     assert_eq!(buf, OVERFLOW);
     write_latency_micros(&mut buf, -1e20);
@@ -210,8 +209,7 @@ proptest! {
 }
 
 /// Every string literal in the workstation is ASCII. The bundled default fonts carry no glyph for
-/// anything else and paint a tofu box in its place, which four separate source comments used to
-/// restate and nothing checked — a shipped `—` and a shipped `Δ` both reached the screen that way.
+/// anything else and paint a tofu box in its place, which is what a literal `—` or `Δ` would show.
 /// The rule covers the whole module rather than the painters alone, because a literal one file over
 /// is one copy-paste from a cell, and a log line or a window title loses nothing by obeying it.
 #[test]

@@ -97,9 +97,10 @@ fn only_the_quoting_phase_admits_a_new_order_from_every_direction() {
         1
     );
 
-    let mut cancelling = quoting_core();
-    effects_of(|emit| cancelling.begin_sweep(CancelReason::Shutdown, None, emit));
-    assert!(sent_requests(&effects_of(|emit| cancelling.on_command(place(4), emit))).is_empty());
+    let mut settled = quoting_core();
+    effects_of(|emit| settled.begin_sweep(CancelReason::Shutdown, None, emit));
+    assert_eq!(settled.phase(), Phase::Settled);
+    assert!(sent_requests(&effects_of(|emit| settled.on_command(place(4), emit))).is_empty());
 
     let mut reconnecting = quoting_core();
     effects_of(|emit| reconnecting.on_command(place(1), emit));
@@ -136,7 +137,9 @@ fn only_the_quoting_phase_admits_a_new_order_from_every_direction() {
 fn a_refused_amend_is_reported_back_rather_than_swallowed() {
     let mut down = ExecCore::with_limits(1, 2);
     let mut cancelling = quoting_core();
+    effects_of(|emit| cancelling.on_command(place(1), emit));
     effects_of(|emit| cancelling.begin_sweep(CancelReason::Shutdown, None, emit));
+    assert_eq!(cancelling.phase(), Phase::Cancelling);
 
     for core in [&mut down, &mut cancelling] {
         let phase = core.phase();

@@ -9,33 +9,25 @@ use polysim::hot::dispatch::HotEngine;
 use polysim::hot::quant::micro;
 use polysim::hot::series::FastQueue;
 use polysim::hot::strategy::{Registration, Strategy, StrategyConfig, StrategyCtx};
-use polysim::ids::{InstrumentId, Price, Qty, Side};
+use polysim::ids::{InstrumentId, Price, Side};
 use polysim::log::LogRecord;
-use polysim::msg::inbound::{InboundMessage, Level, SpinTick};
+use polysim::msg::inbound::{InboundMessage, SpinTick};
 use polysim::msg::persist::{FeatureId, PersistRecord};
 use polysim::time::DurationUs;
 use rtrb::Consumer;
 
 use crate::engine_support::{
     ONE, book_reset, delta_chunk, engine_view, engine_without_warmup, instrument_row,
-    last_snapshot_chunk, metrics_ring, partial_delta_chunk, partial_snapshot_chunk, persist_ring,
-    pop, recorder_feature_id, recorder_spec, snapshot_pair, spin, strategy_log_ring,
+    last_snapshot_chunk, level, metrics_ring, partial_delta_chunk, partial_snapshot_chunk,
+    persist_ring, pop, recorder_feature_id, recorder_spec, snapshot_pair, spin, strategy_log_ring,
     tracker_spec_all, trade,
 };
 use crate::micro_strategy::MicroRecorder;
 
+#[derive(Default)]
 struct SpinProbe {
     len: Option<FeatureId>,
     last: Option<FeatureId>,
-}
-
-impl SpinProbe {
-    fn new() -> Self {
-        Self {
-            len: None,
-            last: None,
-        }
-    }
 }
 
 impl Strategy for SpinProbe {
@@ -84,13 +76,6 @@ fn spin_state(
 fn apply(engine: &mut HotEngine, consumer: &mut Consumer<PersistRecord>, message: InboundMessage) {
     engine.dispatch(pop(0, 0), &message);
     while consumer.pop().is_ok() {}
-}
-
-fn level(price: i64, qty: i64) -> Level {
-    Level {
-        price: Price(price),
-        qty: Qty(qty),
-    }
 }
 
 /// Reads the newest sample of the three fields the microstructure recorder needs beyond the
@@ -235,7 +220,7 @@ fn spin_samples_committed_state_only() {
     let (metrics_producer, _metrics_consumer) = metrics_ring(64);
     let mut engine = engine_without_warmup(
         &instruments,
-        Box::new(SpinProbe::new()),
+        Box::new(SpinProbe::default()),
         sink,
         log_sink,
         metrics_producer,

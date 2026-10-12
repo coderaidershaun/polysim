@@ -16,27 +16,21 @@ use polysim::time::DurationUs;
 use rtrb::Consumer;
 
 use crate::engine_support::{
-    NOMINAL_SPIN, ONE, book_reset, delta_chunk, engine_view, engine_with_ui, engine_without_warmup,
-    instrument_row, kline, metrics_ring, persist_ring, pop, rotation, snapshot_pair, spin,
-    strategy_log_ring, tracker_spec_all, trade,
+    NOMINAL_SPIN, ONE, book_reset, call_codes, delta_chunk, engine_view, engine_with_ui,
+    engine_without_warmup, instrument_row, kline, metrics_ring, persist_ring, pop, rotation,
+    snapshot_pair, spin, strategy_log_ring, tracker_spec_all, trade,
 };
 use crate::raw_recorder::RecorderStrategy;
 
 /// One `call` feature per callback (value = a callback code), so the drained stream encodes the
 /// exact dispatch order; also re-emits `ewma_vol` on book updates to fold in its evolution.
+#[derive(Default)]
 struct Probe {
     call: Option<FeatureId>,
     ewma: Option<FeatureId>,
 }
 
 impl Probe {
-    fn new() -> Self {
-        Self {
-            call: None,
-            ewma: None,
-        }
-    }
-
     fn log(&self, ctx: &mut StrategyCtx<'_>, instrument: InstrumentId, code: f64) {
         ctx.emit(self.call.expect("features registered"), instrument, code);
         polysim::strategy_info!(ctx, "probe callback {code} on instrument {}", instrument.0);
@@ -87,18 +81,10 @@ impl Strategy for Probe {
 
 /// Emits the resident EWMA beside a flag for whether the tracker held a microprice at all, so a
 /// one-sided book is distinguishable from a book that simply produced no new value.
+#[derive(Default)]
 struct EwmaProbe {
     ewma: Option<FeatureId>,
     microprice_present: Option<FeatureId>,
-}
-
-impl EwmaProbe {
-    fn new() -> Self {
-        Self {
-            ewma: None,
-            microprice_present: None,
-        }
-    }
 }
 
 impl Strategy for EwmaProbe {
@@ -167,7 +153,7 @@ fn probe_sequence() -> Vec<InboundMessage> {
         )),
         InboundMessage::SpinTick(spin(1, 5)),
         InboundMessage::BookReset(book_reset(0, 6)),
-        // Slot sequence: rotation → reset → fresh snapshot. Rotation stamped at subscribe (7),
+        // Slot sequence: rotation, then reset, then fresh snapshot. Rotation stamped at subscribe (7),
         // its window opening later (300s).
         InboundMessage::MarketRotation(rotation(0, 300_000_000, 600_000_000, 7)),
         InboundMessage::BookReset(book_reset(0, 8)),
@@ -190,7 +176,7 @@ fn run_sequence(sequence: &[InboundMessage], warmup: DurationUs) -> Replayed {
     let (metrics_sink, _metrics_consumer) = metrics_ring(64);
     let (mut engine, _ui_books, _ui_events) = engine_with_ui(
         &instruments,
-        Box::new(Probe::new()),
+        Box::new(Probe::default()),
         persist_sink,
         strategy_log_sink,
         metrics_sink,
@@ -208,16 +194,6 @@ fn run_sequence(sequence: &[InboundMessage], warmup: DurationUs) -> Replayed {
         logs.push(record);
     }
     Replayed { persist, logs }
-}
-
-fn call_codes(records: &[PersistRecord]) -> Vec<f64> {
-    records
-        .iter()
-        .filter_map(|record| match record {
-            PersistRecord::Feature(row) if row.feature == FeatureId(0) => Some(row.value),
-            _ => None,
-        })
-        .collect()
 }
 
 #[test]
@@ -386,7 +362,7 @@ fn one_sided_book_does_not_perturb_ewma() {
     let (metrics_producer, _metrics_consumer) = metrics_ring(64);
     let mut engine = engine_without_warmup(
         &instruments,
-        Box::new(EwmaProbe::new()),
+        Box::new(EwmaProbe::default()),
         sink,
         log_sink,
         metrics_producer,

@@ -20,8 +20,9 @@ use polysim::shutdown::RunAssertion;
 use polysim::time::DurationUs;
 
 use crate::engine_support::{
-    LinkedEngine, LinkedSetup, ONE, delta_chunk, engine_with_link, idle_at, instrument_row, pop,
-    run_control, running_at, snapshot_pair, spin, tracker_spec_all, trade,
+    LinkedEngine, LinkedSetup, ONE, call_codes, delta_chunk, drain_persist, engine_with_link,
+    idle_at, instrument_row, pop, run_control, running_at, snapshot_pair, spin, tracker_spec_all,
+    trade,
 };
 
 /// One `call` feature per callback, so the drained stream encodes exactly which callbacks fired —
@@ -92,24 +93,6 @@ fn control_sequence() -> Vec<InboundMessage> {
     ]
 }
 
-fn drain(engine: &mut LinkedEngine) -> Vec<PersistRecord> {
-    let mut records = Vec::new();
-    while let Ok(record) = engine.persist.pop() {
-        records.push(record);
-    }
-    records
-}
-
-fn call_codes(records: &[PersistRecord]) -> Vec<f64> {
-    records
-        .iter()
-        .filter_map(|record| match record {
-            PersistRecord::Feature(row) if row.feature == FeatureId(0) => Some(row.value),
-            _ => None,
-        })
-        .collect()
-}
-
 fn run(sequence: &[InboundMessage]) -> Vec<PersistRecord> {
     let mut linked = linked();
     assert!(
@@ -120,7 +103,7 @@ fn run(sequence: &[InboundMessage]) -> Vec<PersistRecord> {
     for message in sequence {
         linked.engine.dispatch(pop(0, 0), message);
     }
-    drain(&mut linked)
+    drain_persist(&mut linked)
 }
 
 /// FITNESS: the recorded control markers alone decide what the strategy sees, so the same tape
@@ -177,13 +160,7 @@ fn a_dropped_control_marker_self_corrects_on_the_next_heartbeat() {
 
     let pending = linked.control.pending().expect("a marker is outstanding");
     assert_eq!(pending, park);
-    // The push is dropped: the ring was full, the datagram was lost, the actor never got to it —
-    // all the same to the hot thread, which simply never saw it.
-    assert_eq!(
-        linked.control.pending(),
-        Some(park),
-        "an unacknowledged marker is still outstanding on the next tick"
-    );
+    // The marker is never dispatched here, exactly as if its push had been dropped.
 
     linked.engine.dispatch(pop(0, 0), &run_control(park, 10));
     assert_eq!(
@@ -202,7 +179,7 @@ fn a_dropped_control_marker_self_corrects_on_the_next_heartbeat() {
     assert_eq!(linked.control.pending(), None);
     assert_eq!(linked.control.acknowledged().load(), park);
 
-    let records = drain(&mut linked);
+    let records = drain_persist(&mut linked);
     assert!(
         records.iter().all(|record| !matches!(
             record,
@@ -267,7 +244,7 @@ fn resuming_resets_derived_state_and_rearms_warmup() {
         linked.engine.dispatch(pop(0, 0), &message);
     }
     assert!(
-        has_vol(&drain(&mut linked)),
+        has_vol(&drain_persist(&mut linked)),
         "the pre-park spin carries an EwmaVol the suppressed prefix warmed"
     );
 
@@ -279,14 +256,14 @@ fn resuming_resets_derived_state_and_rearms_warmup() {
         linked.engine.dispatch(pop(0, 0), &message);
     }
     assert!(
-        call_codes(&drain(&mut linked)).is_empty(),
+        call_codes(&drain_persist(&mut linked)).is_empty(),
         "warmup re-armed on the resume, so the spin 5us later reaches no callback"
     );
 
     linked
         .engine
         .dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(3, 60)));
-    let past_warmup = drain(&mut linked);
+    let past_warmup = drain_persist(&mut linked);
     assert_eq!(
         call_codes(&past_warmup),
         vec![6.0],

@@ -1,4 +1,4 @@
-//! Hot→UI feed fitness: the engine emits a book snapshot at every commit boundary (and on
+//! Hot-to-UI feed fitness: the engine emits a book snapshot at every commit boundary (and on
 //! reset/rotation) with a per-instrument monotonic sequence, and tees the ordered event lane —
 //! quotes, per-print trades, real order transitions, feature rows, REAL venue fills and rotations —
 //! each stamped with one lane-wide sequence so a consumer counts ring-drop gaps across every kind.
@@ -15,31 +15,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use polysim::config::{RecordedTables, TableKind};
 #[cfg(feature = "ui")]
 use polysim::desktop::model::UiModel;
-use polysim::hot::dispatch::{ExecWiring, HotEngine, HotEngineSetup};
-use polysim::hot::exec::{
-    CloseReason, DesiredQuote, ExecHalt, ExecSettings, OrderState, QuoteLevel,
-};
+use polysim::hot::dispatch::{HotEngine, HotEngineSetup};
+use polysim::hot::exec::{CloseReason, DesiredQuote, ExecHalt, OrderState, QuoteLevel};
 use polysim::hot::strategy::{DomQuote, Registration, Strategy, StrategyCtx};
 use polysim::ids::{AssetId, InstrumentId, Price, Qty, Side};
-use polysim::msg::exec::{ExecKind, ExecLaneItem, Liquidity, OrderStyle, VenueOrderStatus};
-use polysim::msg::inbound::{InboundMessage, Level, SpinTick};
+use polysim::msg::exec::{ExecKind, Liquidity, OrderStyle, VenueOrderStatus};
+use polysim::msg::inbound::{InboundMessage, SpinTick};
 use polysim::msg::persist::FeatureId;
 use polysim::msg::ui::{UiBookSnapshot, UiBookState, UiEvent, UiLatencySummary};
-use polysim::sink::ExecSink;
 use polysim::time::{DurationUs, TsUs};
-use rtrb::{Consumer, RingBuffer};
+use rtrb::Consumer;
 
 use crate::engine_support::{
-    FillPen, ONE, book_reset, delta_chunk, detached_exposure, engine_with_ui, exec_event, idle_at,
-    instrument_row, metrics_ring, persist_ring, persist_ring_for, pop, rotation, run_control,
-    snapshot_pair, spin, spin_pop, strategy_log_ring, tracker_spec_all, trade, ts, ui_book_ring,
-    ui_event_ring,
+    FillPen, Idle, ONE, book_reset, delta_chunk, detached_exposure, engine_with_ui,
+    engine_with_ui_and_exec, exec_event, idle_at, instrument_row, level, metrics_ring,
+    persist_ring, persist_ring_for, pop, rotation, run_control, snapshot_pair, spin, spin_pop,
+    strategy_log_ring, tracker_spec_all, trade, ts, ui_book_ring, ui_event_ring,
 };
-
-/// A strategy that touches nothing — book snapshots are engine-driven, so the book tests need no
-/// callback behaviour.
-struct Idle;
-impl Strategy for Idle {}
 
 /// Counts strategy callbacks independently of the UI projection. A fill may tee two UI facts, but
 /// it remains exactly one strategy callback — otherwise a strategy which responds to both updates
@@ -130,17 +122,13 @@ impl Strategy for MixedProbe {
     }
 }
 
-fn pop_books(consumer: &mut Consumer<UiBookSnapshot>) -> Vec<UiBookSnapshot> {
-    std::iter::from_fn(|| consumer.pop().ok()).collect()
-}
-
-fn pop_events(consumer: &mut Consumer<UiEvent>) -> Vec<UiEvent> {
+fn drain<T>(consumer: &mut Consumer<T>) -> Vec<T> {
     std::iter::from_fn(|| consumer.pop().ok()).collect()
 }
 
 /// Every Position event on the lane as `(instrument, event time, exposure, PnL)`, in lane order.
 fn positions(consumer: &mut Consumer<UiEvent>) -> Vec<(InstrumentId, TsUs, f64, f64)> {
-    pop_events(consumer)
+    drain(consumer)
         .into_iter()
         .filter_map(|event| match event {
             UiEvent::Position {
@@ -153,13 +141,6 @@ fn positions(consumer: &mut Consumer<UiEvent>) -> Vec<(InstrumentId, TsUs, f64, 
             _ => None,
         })
         .collect()
-}
-
-fn level(price: i64, qty: i64) -> Level {
-    Level {
-        price: Price(price),
-        qty: Qty(qty),
-    }
 }
 
 /// A one-instrument engine wired to keep every UI feed consumer; `strategy` decides whether quotes
@@ -179,45 +160,8 @@ fn ui_engine(
     (engine, books, events)
 }
 
-/// The same engine WITH a command ring, i.e. execution wired.
-///
-/// `exec.sink` is the OUTBOUND command ring and nothing else, which is why [`ui_engine`] can fold
-/// real venue fills without one — a fill is money whether or not this engine is the one quoting. So
-/// "execution is off" is exactly `sink.is_none()`, and it is the only thing separating these two
-/// fixtures. Keep them apart: collapsing them back into one loses the ability to assert what an
-/// unwired engine must NOT say.
-fn ui_engine_with_exec(
-    strategy: Box<dyn Strategy>,
-) -> (HotEngine, Consumer<UiEvent>, Consumer<ExecLaneItem>) {
-    let instruments = [instrument_row(0, tracker_spec_all(1), 64)];
-    let (persist, _persist_out) = persist_ring(256);
-    let (log_sink, _logs) = strategy_log_ring(64);
-    let (metrics, _metrics) = metrics_ring(64);
-    let (book_sink, _books) = ui_book_ring(256);
-    let (event_sink, events) = ui_event_ring(1024);
-    let (commands_producer, commands) = RingBuffer::<ExecLaneItem>::new(256);
-    let engine = HotEngine::new(HotEngineSetup {
-        exec: Some(ExecWiring {
-            sink: ExecSink::new(commands_producer),
-            settings: ExecSettings::disabled(),
-            run_nonce: 0x5150_0001,
-        }),
-        exposure: detached_exposure(),
-        instruments: &instruments,
-        strategy,
-        persistence: Some(persist),
-        strategy_log_sink: log_sink,
-        metrics_sink: metrics,
-        ui_book_sink: book_sink,
-        ui_event_sink: event_sink,
-        link: None,
-        warmup: DurationUs::ZERO,
-    });
-    (engine, events, commands)
-}
-
 fn execution_frames(consumer: &mut Consumer<UiEvent>) -> Vec<ExecHalt> {
-    pop_events(consumer)
+    drain(consumer)
         .into_iter()
         .filter_map(|event| match event {
             UiEvent::Execution { halt, .. } => Some(halt),
@@ -244,12 +188,12 @@ fn book_snapshot_lifecycle_from_commit_through_reset_and_rotation() {
     );
     engine.dispatch(pop(0, 0), &InboundMessage::Book(bids));
     assert!(
-        pop_books(&mut books).is_empty(),
+        drain(&mut books).is_empty(),
         "a non-final chunk is mid-update — no snapshot until the commit"
     );
 
     engine.dispatch(pop(0, 0), &InboundMessage::Book(asks));
-    let snaps = pop_books(&mut books);
+    let snaps = drain(&mut books);
     assert_eq!(
         snaps.len(),
         1,
@@ -270,17 +214,17 @@ fn book_snapshot_lifecycle_from_commit_through_reset_and_rotation() {
         pop(0, 0),
         &InboundMessage::Book(delta_chunk(0, Side::Buy, &[(100 * ONE, 5 * ONE)], 20)),
     );
-    let snaps = pop_books(&mut books);
+    let snaps = drain(&mut books);
     assert_eq!(snaps.len(), 1, "a committed delta emits the next snapshot");
     assert_eq!(snaps[0].seq, 1, "per-instrument seq is strictly monotonic");
     assert_eq!(snaps[0].bids[0], level(100 * ONE, 5 * ONE));
     assert!(
-        pop_events(&mut events).is_empty(),
+        drain(&mut events).is_empty(),
         "an idle strategy tees no quote events"
     );
 
     engine.dispatch(pop(0, 0), &InboundMessage::BookReset(book_reset(0, 30)));
-    let snaps = pop_books(&mut books);
+    let snaps = drain(&mut books);
     assert_eq!(snaps.len(), 1, "a reset emits one snapshot");
     assert_eq!(snaps[0].state, UiBookState::AwaitingSnapshot);
     assert_eq!((snaps[0].bid_len, snaps[0].ask_len), (0, 0));
@@ -290,7 +234,7 @@ fn book_snapshot_lifecycle_from_commit_through_reset_and_rotation() {
         pop(0, 0),
         &InboundMessage::MarketRotation(rotation(0, 300 * ONE, 600 * ONE, 40)),
     );
-    let snaps = pop_books(&mut books);
+    let snaps = drain(&mut books);
     assert_eq!(snaps.len(), 1, "a rotation refreshes the UI book");
     assert_eq!(snaps[0].seq, 3);
 }
@@ -333,7 +277,7 @@ fn replay_produces_identical_feed() {
             pop(0, 0),
             &InboundMessage::MarketRotation(rotation(0, 300 * ONE, 600 * ONE, 200)),
         );
-        (pop_books(&mut books), pop_events(&mut events))
+        (drain(&mut books), drain(&mut events))
     };
     let (first_books, first_events) = run();
     let (second_books, second_events) = run();
@@ -457,7 +401,7 @@ impl Strategy for DeclareOnceProbe {
 
 /// Every Quote event on the lane as `(instrument, event time, quote)`, in lane order.
 fn quote_events(consumer: &mut Consumer<UiEvent>) -> Vec<(InstrumentId, TsUs, DomQuote)> {
-    pop_events(consumer)
+    drain(consumer)
         .into_iter()
         .filter_map(|event| match event {
             UiEvent::Quote {
@@ -485,7 +429,7 @@ fn feed_events_tee_ahead_of_the_warmup_gate() {
         pop(0, 0),
         &InboundMessage::Trade(trade(0, 100 * ONE, 3 * ONE, Side::Sell, 1_000_000)),
     );
-    let evs = pop_events(&mut events);
+    let evs = drain(&mut events);
     assert_eq!(evs.len(), 1, "trade: a print tees exactly one Trade event");
     let UiEvent::Trade {
         instrument,
@@ -514,7 +458,7 @@ fn feed_events_tee_ahead_of_the_warmup_gate() {
         pop(0, 0),
         &InboundMessage::MarketRotation(rotation(0, 300 * ONE, 600 * ONE, 30)),
     );
-    let evs = pop_events(&mut events);
+    let evs = drain(&mut events);
     assert_eq!(evs.len(), 1, "rotation: tees exactly one Rotation event");
     let UiEvent::Rotation {
         instrument,
@@ -604,7 +548,7 @@ fn features_tee_to_the_ui_even_when_they_are_not_recorded() {
 }
 
 fn teed_features(events: &mut Consumer<UiEvent>) -> Vec<(u64, FeatureId, f64)> {
-    pop_events(events)
+    drain(events)
         .into_iter()
         .filter_map(|event| match event {
             UiEvent::Feature {
@@ -629,11 +573,27 @@ fn teed_features(events: &mut Consumer<UiEvent>) -> Vec<(u64, FeatureId, f64)> {
 /// `gate` as `ARMED` in the positive colour, which an operator reads as "armed to trade". The run
 /// where that costs money is not the recorder: it is a `mode: live` config whose preflight or queue
 /// is missing, which WARNs once and disarms execution for the rest of the run (`runtime::exec`).
-/// Nothing can ever be sent, and a green ARMED is the only thing on screen — the same class of lie as
-/// the simulated-fill labels this milestone deleted, and worse, because those were true when written.
+/// Nothing can ever be sent, and a green ARMED is the only thing on screen.
+///
+/// `exec.sink` is the OUTBOUND command ring and nothing else, which is why the plain engine can fold
+/// real venue fills without one: a fill is money whether or not this engine is the one quoting. So
+/// "execution is off" is exactly `sink.is_none()`, and it is the only thing separating the wired
+/// build below from the unwired one. Keep them apart: collapsing them into one loses the ability to
+/// assert what an unwired engine must NOT say.
 #[test]
 fn the_execution_gate_tee_reflects_whether_a_command_ring_is_wired() {
-    let (mut engine, mut events, _commands) = ui_engine_with_exec(Box::new(Idle));
+    let instruments = [instrument_row(0, tracker_spec_all(1), 64)];
+    let (persist, _persist_out) = persist_ring(256);
+    let (log_sink, _logs) = strategy_log_ring(64);
+    let (metrics, _metrics) = metrics_ring(64);
+    let (mut engine, _books, mut events, _commands) = engine_with_ui_and_exec(
+        &instruments,
+        Box::new(Idle),
+        persist,
+        log_sink,
+        metrics,
+        0x5150_0001,
+    );
     for seq in 0..3u64 {
         engine.dispatch(
             pop(0, 0),
@@ -641,7 +601,7 @@ fn the_execution_gate_tee_reflects_whether_a_command_ring_is_wired() {
         );
     }
 
-    let emitted = pop_events(&mut events);
+    let emitted = drain(&mut events);
     let gates: Vec<ExecHalt> = emitted
         .iter()
         .filter_map(|event| match event {
@@ -716,7 +676,7 @@ fn spins_tee_engine_latency_on_the_one_lane() {
         );
     }
 
-    let evs = pop_events(&mut events);
+    let evs = drain(&mut events);
     let summaries: Vec<UiLatencySummary> = evs
         .iter()
         .filter_map(|event| match event {
@@ -796,7 +756,7 @@ fn a_partial_fill_updates_the_working_order_then_tees_one_fill() {
         engine.dispatch(pop(0, 0), &message);
     }
 
-    let evs = pop_events(&mut events);
+    let evs = drain(&mut events);
     // The pen seats the order before reporting against it, so the adoption tees an OrderUpdate
     // between the print and fill. The fill then tees the absolute post-fill order state ahead of its
     // tape delta: one venue event carries both facts, while the strategy still receives one callback.
@@ -883,10 +843,10 @@ fn a_partial_fill_updates_the_working_order_then_tees_one_fill() {
 
 /// FITNESS: a full fill retires the UI's working order on the fill's own message sequence.
 ///
-/// This is the production failure that made the workstation report OPEN 2 BID: the execution core
-/// closed the first bid, but the feed emitted only a Fill tape event. The model therefore retained
-/// the old live cell and counted the next genuine bid beside it. Driving the hot engine and then the
-/// desktop fold together pins the whole seam rather than merely checking that some event was sent.
+/// The defect it guards against is a workstation reporting OPEN 2 BID: if the execution core closes
+/// the first bid but the feed emits only a Fill tape event, the model retains the old live cell and
+/// counts the next genuine bid beside it. Driving the hot engine and then the desktop fold together
+/// pins the whole path rather than merely checking that some event was sent.
 #[test]
 fn a_full_fill_retires_the_working_order_in_the_ui_model() {
     let fill_callbacks = Arc::new(AtomicUsize::new(0));
@@ -920,7 +880,7 @@ fn a_full_fill_retires_the_working_order_in_the_ui_model() {
     });
     engine.dispatch(pop(0, 0), &full_fill);
 
-    let evs = pop_events(&mut events);
+    let evs = drain(&mut events);
     assert_eq!(
         evs.len(),
         3,
@@ -994,7 +954,7 @@ fn a_silent_venue_leaves_liquidity_absent() {
         &pen.silent_report(Side::Buy, 100 * ONE, ONE, 4_242),
     );
 
-    let fills: Vec<Option<Liquidity>> = pop_events(&mut events)
+    let fills: Vec<Option<Liquidity>> = drain(&mut events)
         .into_iter()
         .filter_map(|event| match event {
             UiEvent::Fill { liquidity, .. } => Some(liquidity),
@@ -1112,7 +1072,7 @@ fn position_tee_survives_gating() {
     for message in pen.fill(Side::Buy, 100 * ONE, 3 * ONE, 20) {
         engine.dispatch(pop(0, 0), &message);
     }
-    let _ = pop_events(&mut events);
+    let _ = drain(&mut events);
 
     engine.dispatch(pop(0, 0), &run_control(idle_at(1), 30));
     engine.dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(0, 40)));
@@ -1129,9 +1089,7 @@ fn position_tee_survives_gating() {
 ///
 /// It asserts the sequence and the kinds PRESENT, never a total. A count would make this fail the
 /// next time the engine gains an event kind or a transition gains a step — and it would fail here,
-/// in the monotonicity test, for a reason that has nothing to do with monotonicity. That already
-/// happened twice in one afternoon: once when a venue fill became two messages rather than one, and
-/// once when the execution frame correctly stopped being emitted on an unwired engine. A test that
+/// in the monotonicity test, for a reason that has nothing to do with monotonicity. A test that
 /// breaks whenever a kind is added is testing cardinality by accident.
 #[test]
 fn mixed_kind_lane_sequence_is_globally_monotonic() {
@@ -1151,7 +1109,7 @@ fn mixed_kind_lane_sequence_is_globally_monotonic() {
     }
     engine.dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(0, 30)));
 
-    let evs = pop_events(&mut events);
+    let evs = drain(&mut events);
     for (index, event) in evs.iter().enumerate() {
         assert_eq!(
             event.seq(),
@@ -1248,12 +1206,12 @@ fn saturated_event_ring_drops_then_heals() {
     );
 
     // Drain, then one more print: its Trade event lands, and its seq reflects every drop before it.
-    let _ = pop_events(&mut events);
+    let _ = drain(&mut events);
     engine.dispatch(
         pop(0, 0),
         &InboundMessage::Trade(trade(0, 100 * ONE, ONE, Side::Buy, 99)),
     );
-    let evs = pop_events(&mut events);
+    let evs = drain(&mut events);
     assert_eq!(evs.len(), 1, "after a drain the next event lands");
     assert_eq!(
         evs[0].seq(),

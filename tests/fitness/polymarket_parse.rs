@@ -14,6 +14,8 @@ use polysim::msg::inbound::{BookChunkKind, InboundMessage, Level};
 use polysim::time::TsUs;
 use proptest::prelude::*;
 
+use crate::engine_support::level;
+
 const INSTRUMENT: InstrumentId = InstrumentId(9);
 const BOOK_CAPACITY: usize = 128;
 const RECEIVED_US: i64 = 1_784_439_700_000_000;
@@ -33,14 +35,14 @@ fn parse(text: &str) -> PolyFrame {
     parse_market_frame(text, received()).expect("frame parses")
 }
 
-fn apply(book: &mut Book, messages: &[InboundMessage]) {
+pub(crate) fn apply(book: &mut Book, messages: &[InboundMessage]) {
     for message in messages {
         let InboundMessage::Book(chunk) = message else {
             continue;
         };
         match chunk.kind {
-            // A re-emitted snapshot on a still-valid book is a legitimate ImplicitReset here; this
-            // replay tracks no book-derived state, so either outcome is fine.
+            // A re-emitted snapshot on a still-valid book is a legitimate ImplicitReset; the replays
+            // using this helper track no book-derived state, so either outcome is fine.
             BookChunkKind::Snapshot => match book.apply_snapshot_chunk(chunk) {
                 SnapshotOutcome::Clean | SnapshotOutcome::ImplicitReset => {}
             },
@@ -66,7 +68,7 @@ mod book_snapshot {
         assert_eq!(&*book.asset_id, "TOKEN_UP");
         assert_eq!(book.best_bid(), Some(level(50_000_000, 30_000_000_000)));
         assert_eq!(book.best_ask(), Some(level(51_000_000, 2_000_000_000)));
-        // full ordering: bids high→low, asks low→high
+        // full ordering: bids from high to low, asks from low to high
         assert_eq!(
             book.bids,
             vec![
@@ -155,7 +157,7 @@ mod price_change {
 
 mod chunk_stamp {
     //! The frame `timestamp` must reach every chunk it produced without a snapshot inheriting a
-    //! later delta's stamp, or exchange→received latency silently reads blank for Polymarket.
+    //! later delta's stamp, or exchange-to-receipt latency silently reads blank for Polymarket.
     use super::*;
 
     const CHANGE: &str = r#"{"event_type":"price_change","market":"0xMKT","timestamp":"1784439696100",
@@ -300,7 +302,7 @@ mod decimals {
 
     #[test]
     fn six_decimal_size_is_exact() {
-        let PolyFrame::Trade(trade) = trade_size("112122.43").expect("parses") else {
+        let PolyFrame::Trade(trade) = trade_size("112122.430000").expect("parses") else {
             panic!("trade");
         };
         assert_eq!(trade.qty, Qty(11_212_243_000_000));
@@ -335,7 +337,7 @@ mod decimals {
                 size: "1.123456789",
                 side: "BUY",
                 fatal: false,
-                matches: |_| true,
+                matches: |e| matches!(e, ParseError::Decode(DecimalFault::Decimal { .. })),
             },
             Case {
                 name: "unknown_side",
@@ -380,7 +382,8 @@ mod stamp_clamp {
     }
 
     proptest! {
-        /// Any millisecond stamp string stays inside the receipt window — the parse defends `TsUs::diff`.
+        /// Any millisecond stamp string stays inside the receipt window, because the parse defends
+        /// `TsUs::diff`.
         #[test]
         fn clamp_stays_inside_window(ms in 0i64..=99_999_999_999_999i64) {
             let clamped = trade_at(&ms.to_string()).micros();
@@ -391,7 +394,8 @@ mod stamp_clamp {
 }
 
 /// FITNESS: a book reconstructed from a snapshot + absolute-size deltas equals a naive `BTreeMap`
-/// model applying the same levels (replace, `size == 0` removes). Divergence = silent book corruption.
+/// model applying the same levels (replace, `size == 0` removes). Any divergence is silent book
+/// corruption.
 mod delta_model {
     use super::*;
 
@@ -492,12 +496,5 @@ mod delta_model {
             PolyFrame::Book(book) => book,
             _ => panic!("book frame"),
         }
-    }
-}
-
-fn level(price: i64, qty: i64) -> Level {
-    Level {
-        price: Price(price),
-        qty: Qty(qty),
     }
 }

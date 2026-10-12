@@ -109,9 +109,8 @@ const FROZEN_FEATURE_NAMES: [&str; 88] = [
     "kyle_one_bp_notional",
 ];
 
-/// The digest every `poly_up` frame carries, captured from the running code the day the pin landed.
-/// A change here means every Parquet file written by a peer on the old build decodes its `poly_*`
-/// columns from a schema this build rejects.
+/// The digest every `poly_up` frame carries. A change here means every Parquet file written by a
+/// peer on the old build decodes its `poly_*` columns from a schema this build rejects.
 const FROZEN_LINK_SCHEMA_HASH: LinkHash = LinkHash(0x277c_c7cf_6091_fcd5);
 
 #[test]

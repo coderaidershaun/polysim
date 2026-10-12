@@ -5,38 +5,29 @@
 //! market may be recovered by the position moving, so the engine withdraws the side that would ADD
 //! to it and keeps the reducing side quoting: withdrawing both is a deadlock, since the only thing
 //! that unwinds a position is a fill and the only thing that produces a fill is a quote
-//! (`risk_gate.rs` is that property's own file). A loss booked into closed round trips and paid fees
-//! is gone, and no price can hand it back — so it halts.
+//! (a separate test covers that property). A loss booked into closed round trips and paid fees is
+//! gone, and no price can hand it back — so it halts.
 //!
 //! Reading "realised" off an exactly-zero position is what this file exists to stop. One satoshi of
-//! residue — the ordinary state after any partial fill — turned the kill switch into a permanent
-//! side restriction, and losses then kept growing on the side that was still admitted.
+//! residue — the ordinary state after any partial fill — would turn the kill switch into a
+//! permanent side restriction, and losses would keep growing on the side that was still admitted.
 
 use polysim::config::{RecordedTables, TableKind, TrackerSpec};
 use polysim::exposure::InstrumentExposure;
-use polysim::hot::dispatch::{ExecWiring, ExposureWiring, HotEngine, HotEngineSetup};
-use polysim::hot::exec::{
-    ExecLimits, ExecSettings, FeeModel, LossVerdict, OrderBudget, SessionPnl, assess_loss,
-};
-use polysim::hot::strategy::Strategy;
+use polysim::hot::exec::{ExecSettings, LossVerdict, SessionPnl, assess_loss};
 use polysim::ids::{InstrumentId, Qty, Side};
-use polysim::msg::exec::{CancelReason, ExecCommand, ExecLaneItem};
 use polysim::msg::inbound::InboundMessage;
-use polysim::registry::InstrumentRow;
-use polysim::sink::ExecSink;
-use polysim::time::DurationUs;
-use rtrb::{Consumer, RingBuffer};
 
-use crate::engine_support::{
-    FillPen, ONE, book_reset, exposure_ring, instrument_row, metrics_ring, persist_ring_for, pop,
-    rotation, snapshot_pair, spin, strategy_log_ring, ui_book_ring, ui_event_ring,
+use crate::engine_support::{FillPen, Idle, ONE, instrument_row, pop, rotation, spin};
+use crate::risk_gate::{
+    QuotingEngine, QuotingSetup, built_quoting_engine, exec_settings, has_halted, reseat_book,
 };
 
 /// The shipped config's budget, at the shipped scale.
 const BUDGET: i64 = 5 * ONE;
 
-/// One mantissa of base: the residue a partial fill leaves, and the value that used to be the
-/// difference between a kill switch and a side restriction.
+/// One mantissa of base: the residue a partial fill leaves, and the smallest amount that could
+/// turn a kill switch into a side restriction.
 const DUST: Qty = Qty(1);
 
 fn session(
@@ -183,122 +174,45 @@ fn assess_loss_verdicts_match_named_cases() {
     }
 }
 
-/// Reads nothing and declares nothing: every command the tests below assert on is the ENGINE's.
-struct Idle;
-impl Strategy for Idle {}
-
-struct Fixture {
-    engine: HotEngine,
-    commands: Consumer<ExecLaneItem>,
-}
-
-fn fixture(max_session_loss_quote: i64) -> Fixture {
+fn fixture(max_session_loss_quote: i64) -> QuotingEngine {
     fixture_restoring(max_session_loss_quote, &[])
 }
 
-/// Every limit except the session budget set so wide it cannot be what stops a quote, so a halt in
-/// the command stream can only have come from the loss gate.
-fn fixture_restoring(max_session_loss_quote: i64, restored: &[InstrumentExposure]) -> Fixture {
-    let instruments: [InstrumentRow; 1] = [instrument_row(0, TrackerSpec::default(), 64)];
-    let (exposure_sink, _snapshots) = exposure_ring(16);
-    let (persistence, _records) =
-        persist_ring_for(1_024, RecordedTables::new(&[TableKind::Orders]));
-    let (strategy_log_sink, _logs) = strategy_log_ring(64);
-    let (metrics_sink, _metrics) = metrics_ring(64);
-    let (ui_book_sink, _ui_books) = ui_book_ring(64);
-    let (ui_event_sink, _ui_events) = ui_event_ring(256);
-    let (commands_producer, commands) = RingBuffer::<ExecLaneItem>::new(256);
-    let engine = HotEngine::new(HotEngineSetup {
-        instruments: &instruments,
+fn fixture_restoring(
+    max_session_loss_quote: i64,
+    restored: &[InstrumentExposure],
+) -> QuotingEngine {
+    built_quoting_engine(QuotingSetup {
+        row: instrument_row(0, TrackerSpec::default(), 64),
         strategy: Box::new(Idle),
-        persistence: Some(persistence),
-        strategy_log_sink,
-        metrics_sink,
-        ui_book_sink,
-        ui_event_sink,
-        link: None,
-        warmup: DurationUs::ZERO,
-        exec: Some(ExecWiring {
-            sink: ExecSink::new(commands_producer),
-            settings: ExecSettings {
-                limits: ExecLimits {
-                    requote_threshold_ticks: 1,
-                    max_quote_distance_centi_bps: 100_000_000,
-                    max_book_age: DurationUs::from_secs(3_600),
-                    max_order_notional_quote: 1_000_000 * ONE,
-                },
-                max_orders_per_side: 1,
-                min_base_balance: 0,
-                min_quote_balance: 0,
-                max_consecutive_rejects: 5,
-                max_session_loss_quote,
-                inflight_timeout: DurationUs::from_secs(3_600),
-                // No silence sweep: a reconciliation request in the command stream would be noise
-                // to filter rather than a behaviour these tests are about.
-                exec_silence_spins: u32::MAX,
-                order_reap_window: DurationUs::from_secs(3_600),
-                quote_stop_margin: DurationUs::ZERO,
-                flatten_slack_ticks: 0,
-                order_budget: OrderBudget::NONE,
-                fee_model: FeeModel::None,
-                taker_fee_rate: 0,
-                holds_reservations_until_settled: true,
-            },
-            run_nonce: 0,
-        }),
-        exposure: ExposureWiring {
-            restored,
-            sink: exposure_sink,
+        restored,
+        // Every limit except the session budget is set so wide it cannot be what stops a quote, so
+        // a halt in the command stream can only have come from the loss gate.
+        settings: ExecSettings {
+            max_session_loss_quote,
+            ..exec_settings()
         },
-    });
-    Fixture { engine, commands }
+        tables: RecordedTables::new(&[TableKind::Orders]),
+        run_nonce: 0,
+    })
 }
 
-/// Drop the book and restate it whole, so the mark moves with no transient crossing to reason about.
-fn reseat_book(bid: i64, ask: i64, when: i64) -> [InboundMessage; 3] {
-    let (bids, asks) = snapshot_pair(0, &[(bid, ONE)], &[(ask, ONE)], when);
-    [
-        InboundMessage::BookReset(book_reset(0, when)),
-        InboundMessage::Book(bids),
-        InboundMessage::Book(asks),
-    ]
-}
-
-fn dispatch_all(fixture: &mut Fixture, messages: &[InboundMessage]) {
+fn dispatch_all(fixture: &mut QuotingEngine, messages: &[InboundMessage]) {
     for message in messages {
         fixture.engine.dispatch(pop(0, 0), message);
     }
 }
 
-fn spin_at(fixture: &mut Fixture, seq: u64, when: i64) {
+fn spin_at(fixture: &mut QuotingEngine, seq: u64, when: i64) {
     fixture
         .engine
         .dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(seq, when)));
 }
 
-/// Whether the engine pulled every order it owns because the kill switch tripped. That command is
-/// what a halt DOES, so it is the honest way to observe one from outside.
-fn has_halted(commands: &mut Consumer<ExecLaneItem>) -> bool {
-    let mut halted = false;
-    while let Ok(item) = commands.pop() {
-        let ExecLaneItem::Command(stamped) = item else {
-            continue;
-        };
-        halted |= matches!(
-            stamped.command,
-            ExecCommand::CancelOurs {
-                reason: CancelReason::Halt,
-                ..
-            }
-        );
-    }
-    halted
-}
-
-/// FITNESS: a round trip that loses more than the budget and leaves one mantissa behind HALTS. This
-/// is the whole finding: at `signum() == 0` the residue read as an open position, the verdict
-/// downgraded to a side restriction, and the budget stopped being a kill switch for the rest of the
-/// run while losses kept growing on the side that was still admitted.
+/// FITNESS: a round trip that loses more than the budget and leaves one mantissa behind HALTS. The
+/// risk is a gate that tests `signum() == 0`: the residue would read as an open position, the
+/// verdict would downgrade to a side restriction, and the budget would stop being a kill switch for
+/// the rest of the run while losses kept growing on the side that was still admitted.
 #[test]
 fn a_round_trip_that_breaches_the_budget_halts_even_holding_dust() {
     let mut fixture = fixture(BUDGET);
@@ -492,7 +406,7 @@ fn restored_ledger_boundaries_match_named_cases() {
 
 /// A rotation, far enough from its close that nothing in the quote-stop path fires — the only thing
 /// under test here is what the ledger reset does to the budget.
-fn rotate(fixture: &mut Fixture, when: i64) {
+fn rotate(fixture: &mut QuotingEngine, when: i64) {
     fixture.engine.dispatch(
         pop(0, 0),
         &InboundMessage::MarketRotation(rotation(0, when, when + 300 * 1_000_000, when)),

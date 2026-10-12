@@ -8,25 +8,21 @@
 //! the flatten case at the bottom is the one that would cost money if it inverted.
 //!
 //! Every number here comes from message stamps: the meter advances on the spin tick and counts the
-//! placements the spin minted, so a replayed tape refuses at exactly the same point. The last case
-//! drives the same sequence twice and pins that.
+//! placements the spin minted, so a replayed tape refuses at exactly the same point.
 
 use polysim::config::RecordedTables;
 use polysim::exposure::InstrumentExposure;
 use polysim::hot::dispatch::HotEngine;
 use polysim::hot::exec::{
-    DesiredQuote, ExecSettings, OrderBudget, OrderBudgetWindow, QuoteLevel, RejectOrigin,
-    RejectReason,
+    DesiredQuote, ExecSettings, OrderBudget, OrderBudgetWindow, QuoteLevel, RejectReason,
 };
 use polysim::hot::strategy::{Strategy, StrategyCtx};
 use polysim::ids::{Price, Qty, Side};
 use polysim::msg::exec::{ExecCommand, ExecEvent, ExecKind, OrderStyle, VenueOrderStatus};
 use polysim::msg::inbound::{InboundMessage, SpinTick};
-use polysim::msg::ui::UiEvent;
 use polysim::time::DurationUs;
-use rtrb::Consumer;
 
-use crate::engine_support::{ALL_TABLES, ONE, exec_event, pop};
+use crate::engine_support::{ALL_TABLES, ONE, exec_event, local_refusals, pop};
 use crate::risk_gate::{
     ASK, BID, CEILING, INSTRUMENT, QUOTE_QTY, QuotingEngine, QuotingSetup, TwoSidedQuoter,
     built_quoting_engine, drain_commands, exec_settings, make_ready, reseat_book, row_with_ceiling,
@@ -55,10 +51,19 @@ fn budget_of(max_places: u32) -> OrderBudget {
 }
 
 fn budgeted_engine(budget: OrderBudget, strategy: Box<dyn Strategy>) -> QuotingEngine {
+    ready_engine(budget, strategy, &[], CEILING)
+}
+
+fn ready_engine(
+    budget: OrderBudget,
+    strategy: Box<dyn Strategy>,
+    restored: &[InstrumentExposure],
+    ceiling: i64,
+) -> QuotingEngine {
     let mut built = built_quoting_engine(QuotingSetup {
-        row: row_with_ceiling(CEILING),
+        row: row_with_ceiling(ceiling),
         strategy,
-        restored: &[],
+        restored,
         settings: ExecSettings {
             order_budget: budget,
             ..exec_settings()
@@ -132,20 +137,6 @@ fn quotable_spin(built: &mut QuotingEngine, spin: u64, when: i64) {
         built.engine.dispatch(pop(0, 0), &message);
     }
     spin_at(&mut built.engine, spin, when);
-}
-
-fn local_refusals(ui_events: &mut Consumer<UiEvent>) -> Vec<RejectReason> {
-    let mut reasons = Vec::new();
-    while let Ok(event) = ui_events.pop() {
-        if let UiEvent::Reject {
-            origin: RejectOrigin::Local(reason),
-            ..
-        } = event
-        {
-            reasons.push(reason);
-        }
-    }
-    reasons
 }
 
 fn total_places(transcript: &[SpinOutcome]) -> usize {
@@ -233,23 +224,7 @@ fn engine_holding_a_position(budget: OrderBudget, strategy: Box<dyn Strategy>) -
         cash_quote: -100 * ONE,
         basis_quote: 100 * ONE,
     }];
-    let mut built = built_quoting_engine(QuotingSetup {
-        row: row_with_ceiling(1_000_000 * ONE),
-        strategy,
-        restored: &restored,
-        settings: ExecSettings {
-            order_budget: budget,
-            ..exec_settings()
-        },
-        tables: RecordedTables::new(&ALL_TABLES),
-        run_nonce: 0,
-    });
-    make_ready(&mut built.engine, 0);
-    for message in reseat_book(BID, ASK, 0) {
-        built.engine.dispatch(pop(0, 0), &message);
-    }
-    drain_commands(&mut built.commands);
-    built
+    ready_engine(budget, strategy, &restored, 1_000_000 * ONE)
 }
 
 /// Quotes both sides until `flatten_from`, then asks to get out. Two phases rather than two

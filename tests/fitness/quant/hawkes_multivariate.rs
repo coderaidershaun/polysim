@@ -3,12 +3,9 @@
 //! Perron root. The radius is the stationarity gate — reading it high or low silently reclassifies
 //! an explosive fit as usable.
 
+use super::ts;
 use polysim::hot::quant::hawkes::{MultivariateEvents, MultivariateHawkes, MultivariateParams};
-use polysim::time::{DurationUs, TsUs};
-
-fn ts(secs: f64) -> TsUs {
-    TsUs::from_micros((secs * 1e6).round() as i64)
-}
+use polysim::time::DurationUs;
 
 fn params() -> MultivariateParams {
     MultivariateParams::new(

@@ -260,23 +260,11 @@ fn arb_book() -> impl Strategy<Value = LinkBody> {
         )
 }
 
-/// Every order state, including all six close reasons: the wire flattens `Closed(_)` into the same
+/// Every order state, including all five close reasons: the wire flattens `Closed(_)` into the same
 /// byte as the open states to fit the tail, so a reason that failed to round-trip would silently
 /// report a cancel as a fill.
 fn arb_order_state() -> impl Strategy<Value = OrderState> {
-    prop_oneof![
-        Just(OrderState::Free),
-        Just(OrderState::PendingNew),
-        Just(OrderState::Live),
-        Just(OrderState::CancelInFlight),
-        Just(OrderState::AmendInFlight),
-        Just(OrderState::Unknown),
-        Just(OrderState::Closed(CloseReason::Filled)),
-        Just(OrderState::Closed(CloseReason::Canceled)),
-        Just(OrderState::Closed(CloseReason::Rejected)),
-        Just(OrderState::Closed(CloseReason::Expired)),
-        Just(OrderState::Closed(CloseReason::ReconciledGone)),
-    ]
+    prop::sample::select(EVERY_ORDER_STATE.to_vec())
 }
 
 fn arb_quote_level() -> impl Strategy<Value = Option<QuoteLevel>> {
@@ -734,9 +722,11 @@ fn arb_datagram() -> impl Strategy<Value = LinkDatagram> {
 }
 
 proptest! {
-    /// FITNESS: a decoded frame equals the frame that was encoded, for every kind including the
-    /// reserved MAC bytes. A drift here corrupts a UI's book, a peer's signal or a subscription
-    /// silently — nothing crashes, the numbers are just wrong.
+    /// FITNESS: a decoded frame equals the frame that was encoded, for the frame kinds the
+    /// generator draws, including the reserved MAC bytes. The order-snapshot event is not drawn
+    /// here: the named cases below round-trip it and refuse its malformed forms. A drift here
+    /// corrupts a UI's book, a peer's signal or a subscription silently — nothing crashes, the
+    /// numbers are just wrong.
     #[test]
     fn round_trips_every_frame_kind(datagram in arb_datagram()) {
         let decoded = round_trip(&datagram).expect("a canonical frame decodes");
@@ -1045,8 +1035,9 @@ fn every_topic_the_engine_can_stamp_indexes_inside_its_sequence_array() {
     }
 }
 
-/// Every `OrderState`, listed rather than generated. A thirteenth arm added to `state_tag` without a
-/// matching arm in `read_state` has to fail HERE, on the run that adds it.
+/// Every `OrderState`, listed by hand. It feeds both the generator and the deterministic pin below,
+/// so it protects exactly the states named here. A variant added to `OrderState` is not picked up
+/// until it is listed.
 const EVERY_ORDER_STATE: [OrderState; 11] = [
     OrderState::Free,
     OrderState::PendingNew,
@@ -1095,10 +1086,10 @@ fn full_quote_ladder() -> UiEvent {
 /// every run.
 ///
 /// `OrderUpdate` is the widest event kind and its tail is EXACTLY the budget — `ORDER_UPDATE_LEN`
-/// and `EVENT_TAIL_LEN` are both 36, so there is no slack to absorb a mistake. The room came from
-/// flattening `Closed(_)` into the same byte as the open states, which turned six close reasons into
-/// six wire discriminants in one thirteen-arm match — and a thirteen-arm match is where a
-/// copy-pasted tag hides.
+/// and `EVENT_TAIL_LEN` are both 36, so there is no slack to absorb a mistake. The room exists
+/// because the wire flattens `Closed(_)` into the same byte as the open states, which turns five
+/// close reasons into five wire discriminants in one eleven-state table — and a table of eleven
+/// near-identical tags is where a copy-pasted tag hides.
 ///
 /// [`round_trips_every_frame_kind`] generates these states too, so this is deliberately NOT a second
 /// round-trip: it is the DETERMINISM the generator cannot give. One state sits behind four nested

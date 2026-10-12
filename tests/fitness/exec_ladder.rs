@@ -155,6 +155,43 @@ fn acknowledge(
     client_id
 }
 
+fn place_and_ack(engine: &mut HotEngine, commands: &mut Consumer<ExecLaneItem>) -> ExecCommand {
+    make_ready(engine, 0);
+    for message in reseat_book(BID, ASK, 1) {
+        engine.dispatch(pop(0, 0), &message);
+    }
+    spin_at(engine, 1, 10);
+    let place = only(commands);
+    acknowledge(engine, place, ExecKind::AckPlaced, 11);
+    place
+}
+
+fn restate_free_balance(engine: &mut HotEngine, venue_update_ts_ms: u64, when: i64) {
+    let mut balances = [AssetBalance {
+        asset: AssetId::UNKNOWN,
+        free: 0,
+        locked: 0,
+    }; ACCOUNT_CHUNK_ASSETS];
+    balances[0] = AssetBalance {
+        asset: AssetId(1),
+        free: 1_000_000 * ONE,
+        locked: 0,
+    };
+    engine.dispatch(
+        pop(0, 0),
+        &InboundMessage::Account(AccountChunk {
+            kind: AccountChunkKind::Update,
+            balances,
+            len: 1,
+            is_last_chunk: true,
+            venue_update_ts_ms,
+            exchange_ts_us: TsUs::from_micros(when),
+            received_ts_us: TsUs::from_micros(when),
+            queued_ts_us: TsUs::from_micros(when),
+        }),
+    );
+}
+
 fn only(commands: &mut Consumer<ExecLaneItem>) -> ExecCommand {
     let commands = drain_commands(commands);
     assert_eq!(
@@ -165,27 +202,23 @@ fn only(commands: &mut Consumer<ExecLaneItem>) -> ExecCommand {
     commands[0]
 }
 
-fn level_of(command: ExecCommand) -> QuoteLevel {
-    let client_id = match command {
+fn client_id_of(command: ExecCommand) -> ClientOrderId {
+    match command {
         ExecCommand::Place { client_id, .. } | ExecCommand::Cancel { client_id, .. } => client_id,
         other => panic!("command has no order identity: {other:?}"),
-    };
-    level_of_slot(ClientIdLayout::slot_of(client_id))
+    }
+}
+
+fn level_of(command: ExecCommand) -> QuoteLevel {
+    level_of_slot(ClientIdLayout::slot_of(client_id_of(command)))
 }
 
 #[test]
 fn ladder_serialises_and_requotes_only_after_terminal_confirmation() {
     let (mut engine, mut commands) = ladder_engine();
-    make_ready(&mut engine, 0);
-    for message in reseat_book(BID, ASK, 1) {
-        engine.dispatch(pop(0, 0), &message);
-    }
-
-    spin_at(&mut engine, 1, 10);
-    let first = only(&mut commands);
+    let first = place_and_ack(&mut engine, &mut commands);
     assert!(matches!(first, ExecCommand::Place { .. }));
     assert_eq!(level_of(first), QuoteLevel::ZERO);
-    acknowledge(&mut engine, first, ExecKind::AckPlaced, 11);
 
     spin_at(&mut engine, 2, 20);
     let second = only(&mut commands);
@@ -237,14 +270,7 @@ fn a_newer_account_snapshot_retries_a_held_reservation_release() {
         }),
         1,
     );
-    make_ready(&mut engine, 0);
-    for message in reseat_book(BID, ASK, 1) {
-        engine.dispatch(pop(0, 0), &message);
-    }
-
-    spin_at(&mut engine, 1, 10);
-    let place = only(&mut commands);
-    acknowledge(&mut engine, place, ExecKind::AckPlaced, 11);
+    place_and_ack(&mut engine, &mut commands);
 
     // The ack beat a newer absolute balance, so its release is deliberately held.
     spin_at(&mut engine, 2, 20);
@@ -253,29 +279,7 @@ fn a_newer_account_snapshot_retries_a_held_reservation_release() {
         "the ack released against a stale account balance"
     );
 
-    let mut balances = [AssetBalance {
-        asset: AssetId::UNKNOWN,
-        free: 0,
-        locked: 0,
-    }; ACCOUNT_CHUNK_ASSETS];
-    balances[0] = AssetBalance {
-        asset: AssetId(1),
-        free: 1_000_000 * ONE,
-        locked: 0,
-    };
-    engine.dispatch(
-        pop(0, 0),
-        &InboundMessage::Account(AccountChunk {
-            kind: AccountChunkKind::Update,
-            balances,
-            len: 1,
-            is_last_chunk: true,
-            venue_update_ts_ms: 2,
-            exchange_ts_us: polysim::time::TsUs::from_micros(21),
-            received_ts_us: polysim::time::TsUs::from_micros(21),
-            queued_ts_us: polysim::time::TsUs::from_micros(21),
-        }),
-    );
+    restate_free_balance(&mut engine, 2, 21);
     spin_at(&mut engine, 3, 30);
     assert_eq!(
         observed.lock().expect("reservation probe")[2],
@@ -285,8 +289,8 @@ fn a_newer_account_snapshot_retries_a_held_reservation_release() {
 }
 
 /// A quoter over a venue that does NOT lock an order's funds on placement (Polymarket). The release
-/// policy differs from the gated-watermark one the tests above pin, and both directions of the C1
-/// fix are exercised against it.
+/// policy differs from the gated-watermark one the tests above pin, and the tests below exercise
+/// both directions of that difference against it.
 fn non_locking_reservation_engine(
     observed: Arc<Mutex<Vec<i64>>>,
 ) -> (HotEngine, Consumer<ExecLaneItem>) {
@@ -297,23 +301,16 @@ fn non_locking_reservation_engine(
     engine_with_settings(Box::new(ReservationQuoter { observed }), settings)
 }
 
-/// The mirror of `a_newer_account_snapshot_retries_a_held_reservation_release`, and one half of C1.
-/// On a venue that never locked an open order's funds, a resting order moved no balance, so a later
-/// restatement — a fill on some OTHER order — must NOT release the resting order's reservation.
-/// Releasing it would overstate spendable while the order still rests and admit orders against money
-/// already committed; on the shipped ladder that surfaces as an oversell the day a second slot exists.
+/// The mirror of `a_newer_account_snapshot_retries_a_held_reservation_release`. On a venue that
+/// never locked an open order's funds, a resting order moved no balance, so a later restatement — a
+/// fill on some OTHER order — must NOT release the resting order's reservation. Releasing it would
+/// overstate spendable while the order still rests and admit orders against money already committed;
+/// on the shipped ladder that surfaces as an oversell the day a second slot exists.
 #[test]
 fn a_non_locking_resting_reservation_survives_a_newer_snapshot() {
     let observed = Arc::new(Mutex::new(Vec::new()));
     let (mut engine, mut commands) = non_locking_reservation_engine(Arc::clone(&observed));
-    make_ready(&mut engine, 0);
-    for message in reseat_book(BID, ASK, 1) {
-        engine.dispatch(pop(0, 0), &message);
-    }
-
-    spin_at(&mut engine, 1, 10);
-    let place = only(&mut commands);
-    acknowledge(&mut engine, place, ExecKind::AckPlaced, 11);
+    place_and_ack(&mut engine, &mut commands);
 
     spin_at(&mut engine, 2, 20);
     let reserved_while_resting = observed.lock().expect("reservation probe")[1];
@@ -324,29 +321,7 @@ fn a_non_locking_resting_reservation_survives_a_newer_snapshot() {
 
     // A fill elsewhere restates balances at a later stamp — the exact event that frees a held release
     // on Binance. Here the resting order is untouched.
-    let mut balances = [AssetBalance {
-        asset: AssetId::UNKNOWN,
-        free: 0,
-        locked: 0,
-    }; ACCOUNT_CHUNK_ASSETS];
-    balances[0] = AssetBalance {
-        asset: AssetId(1),
-        free: 1_000_000 * ONE,
-        locked: 0,
-    };
-    engine.dispatch(
-        pop(0, 0),
-        &InboundMessage::Account(AccountChunk {
-            kind: AccountChunkKind::Update,
-            balances,
-            len: 1,
-            is_last_chunk: true,
-            venue_update_ts_ms: 2,
-            exchange_ts_us: TsUs::from_micros(21),
-            received_ts_us: TsUs::from_micros(21),
-            queued_ts_us: TsUs::from_micros(21),
-        }),
-    );
+    restate_free_balance(&mut engine, 2, 21);
     spin_at(&mut engine, 3, 30);
     assert_eq!(
         observed.lock().expect("reservation probe")[2],
@@ -355,24 +330,16 @@ fn a_non_locking_resting_reservation_survives_a_newer_snapshot() {
     );
 }
 
-/// The other half of C1, the wedge the live run would have hit. On a non-locking venue a cancelled
-/// quote that never filled must free its reservation the SAME spin, with no restatement to wait for —
-/// the venue moved no money, so the release is ungated. Under the gated (Binance) release the
-/// reservation is held forever, because the fill-driven restatement that would clear it never comes:
-/// the shipped exit reserves, its offer is cancelled, and every subsequent flatten then reads
-/// Underfunded and the position rides to resolution.
+/// On a non-locking venue a cancelled quote that never filled must free its reservation the SAME
+/// spin, with no restatement to wait for — the venue moved no money, so the release is ungated.
+/// Under the gated (Binance) release the reservation would be held forever, because the fill-driven
+/// restatement that would clear it never comes: the exit reserves, its offer is cancelled, and every
+/// subsequent flatten then reads Underfunded and the position rides to resolution.
 #[test]
 fn a_non_locking_zero_fill_cancel_frees_its_reservation_ungated() {
     let observed = Arc::new(Mutex::new(Vec::new()));
     let (mut engine, mut commands) = non_locking_reservation_engine(Arc::clone(&observed));
-    make_ready(&mut engine, 0);
-    for message in reseat_book(BID, ASK, 1) {
-        engine.dispatch(pop(0, 0), &message);
-    }
-
-    spin_at(&mut engine, 1, 10);
-    let place = only(&mut commands);
-    let client_id = acknowledge(&mut engine, place, ExecKind::AckPlaced, 11);
+    let client_id = client_id_of(place_and_ack(&mut engine, &mut commands));
 
     spin_at(&mut engine, 2, 20);
     assert!(
@@ -437,14 +404,7 @@ fn feed(engine: &mut HotEngine, chunks: Vec<AccountChunk>) {
 fn a_filled_reservation_waits_for_the_venues_own_settlement() {
     let observed = Arc::new(Mutex::new(Vec::new()));
     let (mut engine, mut commands) = non_locking_reservation_engine(Arc::clone(&observed));
-    make_ready(&mut engine, 0);
-    for message in reseat_book(BID, ASK, 1) {
-        engine.dispatch(pop(0, 0), &message);
-    }
-
-    spin_at(&mut engine, 1, 10);
-    let place = only(&mut commands);
-    let client_id = acknowledge(&mut engine, place, ExecKind::AckPlaced, 11);
+    let client_id = client_id_of(place_and_ack(&mut engine, &mut commands));
 
     spin_at(&mut engine, 2, 20);
     let one_order = observed.lock().expect("reservation probe")[1];

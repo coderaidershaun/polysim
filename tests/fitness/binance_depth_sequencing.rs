@@ -6,24 +6,19 @@ use polysim::adapters::binance::parse::{
     DepthDiff, DepthSnapshot, ParseContext, parse_combined_frame, parse_perp_depth_diff,
     parse_spot_depth_diff,
 };
-use polysim::ids::{InstrumentId, Price, Qty, Side};
-use polysim::msg::inbound::{BOOK_CHUNK_LEVELS, BookChunkKind, InboundMessage, Level};
+use polysim::ids::{InstrumentId, Side};
+use polysim::msg::inbound::{BOOK_CHUNK_LEVELS, BookChunkKind, InboundMessage};
 use polysim::time::TsUs;
 
-const INSTRUMENT: InstrumentId = InstrumentId(3);
-const RECEIVED: TsUs = TsUs::from_micros(1_784_410_630_000_000);
+use crate::engine_support::level;
 
-fn ctx() -> ParseContext {
+pub(crate) const INSTRUMENT: InstrumentId = InstrumentId(3);
+pub(crate) const RECEIVED: TsUs = TsUs::from_micros(1_784_410_630_000_000);
+
+pub(crate) fn ctx() -> ParseContext {
     ParseContext {
         instrument: INSTRUMENT,
         received_ts_us: RECEIVED,
-    }
-}
-
-fn level(price: i64, qty: i64) -> Level {
-    Level {
-        price: Price(price),
-        qty: Qty(qty),
     }
 }
 
@@ -120,6 +115,7 @@ fn synthetic_diff(
 
 mod depth_golden {
     use super::*;
+    use polysim::msg::inbound::VenueMeta;
 
     const PERP_DEPTH: &str = include_str!("../../fixtures/binance/perp_depth.jsonl");
     const SPOT_DEPTH: &str = include_str!("../../fixtures/binance/spot_depth.jsonl");
@@ -141,13 +137,27 @@ mod depth_golden {
 
         for diff in &diffs[1..] {
             let mut emitted = Vec::new();
-            let outcome = sequencer.on_diff(diff.clone(), &mut |message, _| emitted.push(message));
+            let mut stamps = Vec::new();
+            let outcome = sequencer.on_diff(diff.clone(), &mut |message, venue_meta| {
+                emitted.push(message);
+                stamps.push(venue_meta);
+            });
             assert_eq!(
                 outcome,
                 DiffOutcome::Applied,
                 "chain broke at update id {}",
                 diff.final_update_id
             );
+            for venue_meta in stamps {
+                assert_eq!(
+                    venue_meta,
+                    VenueMeta::DepthDelta {
+                        exchange_ts_us: diff.exchange_ts_us
+                    },
+                    "delta stamped with the wrong exchange time at update id {}",
+                    diff.final_update_id
+                );
+            }
             assert_event_chunks(
                 &emitted,
                 BookChunkKind::Delta,
@@ -385,31 +395,5 @@ mod venue_metadata {
             ),
             "reset: got {stamped:?}"
         );
-    }
-
-    #[test]
-    fn the_recorded_perp_stream_never_emits_a_delta_without_its_evidence() {
-        let diffs = parse_depth_diffs(
-            include_str!("../../fixtures/binance/perp_depth.jsonl"),
-            ChainRule::Perp,
-        );
-        let mut sequencer = DepthSequencer::new(ChainRule::Perp, INSTRUMENT, 512);
-        sequencer.on_diff(diffs[0].clone(), &mut |_, _| {});
-        sequencer.apply_snapshot(synthetic_snapshot(diffs[0].first_update_id), &mut |_, _| {});
-
-        let mut seen = 0usize;
-        for diff in &diffs[1..] {
-            sequencer.on_diff(diff.clone(), &mut |message, venue_meta| {
-                seen += 1;
-                assert!(matches!(message, InboundMessage::Book(_)), "{message:?}");
-                assert_eq!(
-                    venue_meta,
-                    VenueMeta::DepthDelta {
-                        exchange_ts_us: diff.exchange_ts_us
-                    }
-                );
-            });
-        }
-        assert!(seen > 100, "the whole recorded window was replayed");
     }
 }

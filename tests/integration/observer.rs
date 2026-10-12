@@ -8,7 +8,8 @@ use polysim::hot::book::{Book, BookState};
 use polysim::msg::inbound::{BookChunkKind, InboundMessage, Level};
 use polysim::registry::Registry;
 
-const US: f64 = 1_000_000.0;
+use crate::US;
+
 /// A leg counts as live if it produced a frame within this window (the venue re-emits books ~150ms).
 const LIVE_WINDOW_US: i64 = 5_000_000;
 
@@ -22,7 +23,6 @@ struct Leg {
     /// A `BookReset` for this leg without a preceding `MarketRotation` is a teardown/reconnect reset,
     /// not the rotation's own. Set by `MarketRotation`, consumed by the next `BookReset`.
     pending_rotation_reset: bool,
-    trades: u64,
 }
 
 impl Leg {
@@ -33,7 +33,6 @@ impl Leg {
             last_msg_us: None,
             valid_since_rotation: None,
             pending_rotation_reset: false,
-            trades: 0,
         }
     }
 
@@ -177,7 +176,6 @@ impl RotationObserver {
             }
             InboundMessage::Trade(trade) => {
                 let index = trade.instrument.0 as usize;
-                self.legs[index].trades += 1;
                 self.legs[index].last_msg_us = Some(now);
             }
             InboundMessage::Kline(_)
@@ -479,7 +477,7 @@ pub fn book_line(book: &Book) -> String {
     )
 }
 
-/// `btc-updown-5m-a-up` → `a-up`; the venue-symbol prefix is constant across the four slots.
+/// Turns `btc-updown-5m-a-up` into `a-up`; the venue-symbol prefix is constant across the four slots.
 fn slot_label(venue_symbol: &str) -> String {
     venue_symbol
         .strip_prefix("btc-updown-5m-")

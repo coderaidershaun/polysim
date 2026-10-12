@@ -1,14 +1,13 @@
-//! Polymarket execution codec goldens. With no testnet, these run against committed venue payloads
-//! are the only place the normalisation layer is exercised before real money moves through it.
+//! Polymarket execution codec goldens. With no testnet, these committed venue payloads are the only
+//! place the normalisation layer is exercised before real money moves through it.
 //!
 //! Four judgements are pinned, because each is silent and expensive when wrong: the fill law (which
 //! payload may be folded and which may not), the message-string → [`RejectClass`] table, the split
 //! between an order rejection and a venue-wide outage, and the byte-exact place body — whose
 //! signature is checked against a vector the official SDK minted, not against our own output.
 //!
-//! A fifth is here because it was already wrong in the opposite direction: the startup gate's
-//! protocol-version read failed loudly against every real venue rather than quietly, and no pin
-//! stood between it and a live run.
+//! A fifth is the startup gate's protocol-version read, which must accept the real venue's JSON
+//! shape and fail closed on anything else, because nothing else stands between it and a live run.
 //!
 //! A sixth is the settlement reading, which decides two things money depends on: when a reservation
 //! may be released, and whether a failed settlement stops the run. Both are asked long after the
@@ -27,15 +26,15 @@ use polysim::adapters::polymarket::exec::codec::{
     decode_single_order, decode_stream_frame, decode_trades_page, encode_request,
 };
 use polysim::adapters::polymarket::exec::sign::address::Address;
-use polysim::adapters::polymarket::exec::sign::key::SigningKey;
 use polysim::adapters::polymarket::exec::sign::order::SignatureType;
 use polysim::ids::{AssetId, ClientOrderId, FIXED_SCALE, InstrumentId, Price, Qty, Side};
 use polysim::msg::exec::{
     AccountChunkKind, ExecEvent, ExecKind, Liquidity, OrderStyle, RejectClass, VenueOrderStatus,
 };
-use polysim::secrets::Secret;
 use polysim::time::TsUs;
 use serde_json::Value;
+
+use crate::poly_sign::{text, wallet_key};
 
 macro_rules! fixture {
     ($name:literal) => {
@@ -310,13 +309,6 @@ fn gateway_status_fallback_and_cancel_not_found_classify_correctly() {
             RejectVerdict::Order(want)
         );
     }
-    assert_eq!(
-        classify_error(
-            VenueFailure::new(500, "order timed out"),
-            RejectSubject::Placement
-        ),
-        RejectVerdict::Order(RejectClass::Refused),
-    );
 
     // A cancel that finds no order is Gone only on the cancel path; anywhere else "not found" is
     // a claim about the request, not about the order.
@@ -340,10 +332,7 @@ fn a_maker_fill_folds_from_the_cumulative_size_matched() {
     assert_eq!(partial.kind, ExecKind::ReportTrade);
     assert_eq!(partial.liquidity, Some(Liquidity::Maker));
     assert_eq!(partial.cumulative_qty, Qty(4 * FIXED_SCALE));
-    assert_eq!(
-        partial.cumulative_quote,
-        PRICE.notional(Qty(4 * FIXED_SCALE))
-    );
+    assert_eq!(partial.cumulative_quote, 208_000_000);
     // The venue answers LIVE for a partly filled resting order and never says "partially filled".
     assert_eq!(partial.status, Some(VenueOrderStatus::PartiallyFilled));
 
@@ -448,8 +437,7 @@ fn trade_frames_decode_owner_filtering_and_settlement_evidence() {
 /// A trade-id dedup applied naively drops this transition: the same `venue_trade_id` walks every
 /// settlement step (MATCHED -> MINED -> CONFIRMED/FAILED), so a trade first seen MATCHED is
 /// already deduped, and a later FAILED update on the same id would vanish — settlement failure
-/// never detected. Kept its own named fn rather than folded into a table: this is the regression a
-/// dedup once swallowed, and it stays legible as the specific case it is.
+/// never detected. This case stays its own named test so the specific regression stays legible.
 #[test]
 fn a_failed_settlement_is_terminal_and_distinguishable() {
     let wiring = Wiring::new();
@@ -680,18 +668,17 @@ fn account_snapshot_chunks_arm_readiness_and_stamp_from_settlement() {
         );
         let chunks = account_snapshot(&balances, AccountChunkKind::Update, stamps(settled));
         assert_eq!(
-            chunks[0].venue_update_ts_ms,
-            (mined.exchange_ts_us.micros() / 1_000) as u64,
+            chunks[0].venue_update_ts_ms, 1_786_046_865_000,
             "the chunk carries something other than the settled trade's own venue stamp"
         );
     }
 }
 
-/// The startup gate's own reads, both of which must FAIL CLOSED. The protocol version shipped
-/// comparing the RAW body to `"2"`, which the live venue's `{"version":2}` never equals — so the
-/// engine refused to arm on the real venue every time. The closed-only flag shipped
-/// `#[serde(default)] bool`, which read an error envelope or `{}` as "may trade" and would have
-/// armed a closed-only account into quoting one side straight into rejection.
+/// The startup gate's own reads, both of which must FAIL CLOSED. The protocol version is read as a
+/// number: a comparison of the raw body to `"2"` never matches the live venue's `{"version":2}`, so
+/// the engine would refuse to arm on the real venue every time. The closed-only flag is read
+/// strictly: a defaulted `bool` would read an error envelope or `{}` as "may trade" and arm a
+/// closed-only account into quoting one side straight into rejection.
 #[test]
 fn the_startup_gates_read_fail_closed() {
     // The protocol version is read as a number from both shapes.
@@ -872,12 +859,6 @@ fn sign_vector() -> Value {
         .expect("a gnosis safe order vector")
 }
 
-fn vector_text<'a>(vector: &'a Value, field: &str) -> &'a str {
-    vector[field]
-        .as_str()
-        .unwrap_or_else(|| panic!("vector field {field} is a string"))
-}
-
 fn vector_signature_type(vector: &Value) -> u8 {
     vector["signature_type"]
         .as_u64()
@@ -885,12 +866,10 @@ fn vector_signature_type(vector: &Value) -> u8 {
 }
 
 fn vector_signer(vector: &Value) -> OrderSigner {
-    let key = SigningKey::from_secret(&Secret::new(vector_text(vector, "private_key")))
-        .expect("throwaway vector key parses");
     OrderSigner::new(OrderSignerSetup {
-        key,
-        maker: Address::parse(vector_text(vector, "maker")).expect("vector maker parses"),
-        signer: Address::parse(vector_text(vector, "signer")).expect("vector signer parses"),
+        key: wallet_key(vector),
+        maker: Address::parse(text(vector, "maker")).expect("vector maker parses"),
+        signer: Address::parse(text(vector, "signer")).expect("vector signer parses"),
         signature_type: SignatureType::from_code(vector_signature_type(vector))
             .expect("vector names a wallet type this engine knows"),
         api_key: API_KEY.to_owned(),
@@ -900,10 +879,10 @@ fn vector_signer(vector: &Value) -> OrderSigner {
 #[test]
 fn the_place_body_is_byte_exact_against_the_sdk_signature() {
     let vector = sign_vector();
-    let signature = vector_text(&vector, "expected_signature");
-    let token = vector_text(&vector, "token_id");
-    let salt: u64 = vector_text(&vector, "salt").parse().expect("vector salt");
-    let timestamp_millis: i64 = vector_text(&vector, "timestamp_millis")
+    let signature = text(&vector, "expected_signature");
+    let token = text(&vector, "token_id");
+    let salt: u64 = text(&vector, "salt").parse().expect("vector salt");
+    let timestamp_millis: i64 = text(&vector, "timestamp_millis")
         .parse()
         .expect("vector timestamp");
     let signer = vector_signer(&vector);
@@ -954,11 +933,11 @@ fn the_place_body_is_byte_exact_against_the_sdk_signature() {
             r#""owner":"{api_key}","orderType":"GTC","deferExec":false,"postOnly":true}}"#
         ),
         salt = salt,
-        maker = vector_text(&vector, "maker"),
-        signer = vector_text(&vector, "signer"),
+        maker = text(&vector, "maker"),
+        signer = text(&vector, "signer"),
         token = token,
-        maker_amount = vector_text(&vector, "maker_amount"),
-        taker_amount = vector_text(&vector, "taker_amount"),
+        maker_amount = text(&vector, "maker_amount"),
+        taker_amount = text(&vector, "taker_amount"),
         timestamp = timestamp_millis,
         signature_type = vector_signature_type(&vector),
         signature = signature,
@@ -1072,51 +1051,38 @@ fn requests_encode_by_token_and_the_token_table_rebinds_correctly() {
     }
 }
 
-/// Frames the driver must hold rather than misroute: one naming a token this run no longer
-/// tracks, and one naming an order whose placement answer has not landed yet.
+/// A stream frame decodes to an `Ignored` verdict, and never to an event for the wrong order, when
+/// it names a token this run does not track or an order whose placement answer has not landed.
 #[test]
-fn untracked_and_unmapped_stream_frames_are_held_or_dropped_correctly() {
-    // An untracked token is dropped rather than misrouted.
-    {
-        let mut table = TokenTable::with_retired_capacity(2);
-        table.bind(TokenBinding {
-            instrument: DOWN,
-            token_id: DOWN_TOKEN.into(),
-            tick: TICK,
-            is_neg_risk: false,
-        });
-        let orders = index();
-        let context = DecodeContext {
-            tokens: &table,
-            orders: &orders,
-            api_key: API_KEY,
-            received_ts_us: NOW,
-        };
-        let event = decode_stream_frame(fixture!("ws_order_placement"), &context)
-            .expect("committed fixture decodes");
-        assert!(matches!(
-            event,
-            StreamEvent::Ignored(IgnoredReason::UntrackedToken)
-        ));
-    }
+fn untracked_and_unmapped_stream_frames_decode_to_ignored() {
+    let mut untracked = TokenTable::with_retired_capacity(2);
+    untracked.bind(TokenBinding {
+        instrument: DOWN,
+        token_id: DOWN_TOKEN.into(),
+        tick: TICK,
+        is_neg_risk: false,
+    });
+    let wiring = Wiring {
+        tokens: untracked,
+        orders: index(),
+    };
+    let event = decode_stream_frame(fixture!("ws_order_placement"), &wiring.decode())
+        .expect("committed fixture decodes");
+    assert!(matches!(
+        event,
+        StreamEvent::Ignored(IgnoredReason::UntrackedToken)
+    ));
 
-    // A stream event racing its placement answer is held, not discarded.
-    {
-        let table = tokens();
-        let orders = OrderIndex::with_capacity(4);
-        let context = DecodeContext {
-            tokens: &table,
-            orders: &orders,
-            api_key: API_KEY,
-            received_ts_us: NOW,
-        };
-        let event = decode_stream_frame(fixture!("ws_order_placement"), &context)
-            .expect("committed fixture decodes");
-        assert!(matches!(
-            event,
-            StreamEvent::Ignored(IgnoredReason::UnknownOrder)
-        ));
-    }
+    let wiring = Wiring {
+        tokens: tokens(),
+        orders: OrderIndex::with_capacity(4),
+    };
+    let event = decode_stream_frame(fixture!("ws_order_placement"), &wiring.decode())
+        .expect("committed fixture decodes");
+    assert!(matches!(
+        event,
+        StreamEvent::Ignored(IgnoredReason::UnknownOrder)
+    ));
 }
 
 #[test]

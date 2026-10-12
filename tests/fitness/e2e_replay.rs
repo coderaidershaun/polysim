@@ -3,7 +3,7 @@
 //! deterministic), drained like a SIGTERM, and read back. Covers schema, footer, rotation,
 //! drain-flush completeness, and cross-run determinism.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use rtrb::RingBuffer;
 use tokio::sync::mpsc;
@@ -24,7 +24,9 @@ use crate::engine_support::{
     ALL_TABLES, NOMINAL_SPIN, engine_view, engine_without_warmup, instrument_row, metrics_ring,
     persist_ring, recorder_spec, strategy_log_ring, tracker_spec_all,
 };
-use crate::parquet_readback::{Cell, FileData, TempDir, parquet_files, read_parquet_file};
+use crate::parquet_readback::{
+    Cell, FileData, TempDir, drain_blocking, parquet_files, read_parquet_file, run_dir,
+};
 use crate::raw_recorder::RecorderStrategy;
 
 /// What a clean run must produce: column names, the rotation-timestamp column, and the exact row
@@ -328,12 +330,7 @@ fn run_e2e(dir_root: &Path) -> RunOutcome {
     drain.request();
     hot.join().expect("hot thread panicked");
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("build a current-thread runtime for the persistence drain");
-    runtime
-        .block_on(persistence.drain())
-        .expect("persistence drains and closes every file");
+    drain_blocking(persistence).expect("persistence drains and closes every file");
 
     let mut snapshots = Vec::new();
     while let Ok(snapshot) = metrics_consumer.pop() {
@@ -346,12 +343,7 @@ fn run_e2e(dir_root: &Path) -> RunOutcome {
     }
 }
 
-/// The `{strategy-id}/{te-id}` pair the writer keys the tree by — a run's own root.
-fn run_dir(dir_root: &Path) -> PathBuf {
-    dir_root.join("recorder").join("te-recorder")
-}
-
-/// Read a table's files (path-sorted = hour order within a run) back through the arrow reader.
+/// Read a table's files (path-sorted order is hour order within a run) back through the arrow reader.
 fn read_table(dir_root: &Path, table: &str) -> Vec<FileData> {
     let dir = run_dir(dir_root).join(table);
     parquet_files(&dir)

@@ -106,9 +106,6 @@ pub enum Delivery {
     Ambiguous,
     /// Binance redelivers. Every event arrives twice, and the fold must move the ledger once.
     Duplicated,
-    /// Both arrive, with the natural order reversed. Two messages have only two permutations, so on
-    /// a single ack/report pair this coincides with [`Delivery::ReportFirst`] by construction.
-    Reordered,
 }
 
 pub struct FakeVenue {
@@ -363,11 +360,6 @@ impl FakeVenue {
             Delivery::ReportOnly => streamed,
             Delivery::Ambiguous => Vec::new(),
             Delivery::Duplicated => [acks.clone(), streamed.clone(), acks, streamed].concat(),
-            Delivery::Reordered => {
-                let mut all = [acks, streamed].concat();
-                all.reverse();
-                all
-            }
         }
     }
 
@@ -389,12 +381,6 @@ impl FakeVenue {
 
     fn stream_messages(&self, payloads: &[String], at: TsUs) -> Vec<InboundMessage> {
         stream_messages(payloads, self.decode_context(at))
-    }
-}
-
-impl Default for FakeVenue {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

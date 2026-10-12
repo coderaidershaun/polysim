@@ -1,9 +1,10 @@
-//! Golden replay of the committed live capture. Two invariants on real venue bytes: (1) every book
-//! snapshot normalises to best_bid = highest bid / best_ask = lowest ask (the ascending best=last
-//! trap, exact); (2) the delta-reconstructed touch tracks the venue's own inline best_bid/best_ask.
-//! FINDING (fixture-confirmed): the venue's inline touch LEADS its removal deltas by 1-2 frames (no
-//! sequence numbers) — a handful of transient leads converge, which the shadow-book
-//! validator re-baselines. The collapse fixture is asserted to carry the teardown burst.
+//! Golden replay of the committed live capture. Two invariants on real venue bytes: every book
+//! snapshot normalises so that best_bid is the highest bid and best_ask the lowest ask (the venue
+//! sends prices ascending, so its best level is last), and the delta-reconstructed touch tracks the
+//! venue's own inline best_bid and best_ask. The inline touch leads its removal deltas by 1-2
+//! frames (there are no sequence numbers), so a handful of transient leads occur and converge,
+//! which the shadow-book validator re-baselines. The collapse fixture is asserted to carry the
+//! teardown burst.
 
 use std::collections::HashMap;
 
@@ -13,10 +14,11 @@ use polysim::adapters::polymarket::parse::{
 };
 use polysim::adapters::polymarket::rest::parse_events;
 use polysim::config::PolySeries;
-use polysim::hot::book::{Book, BookState, SnapshotOutcome};
+use polysim::hot::book::{Book, BookState};
 use polysim::ids::{InstrumentId, Price};
-use polysim::msg::inbound::{BookChunkKind, InboundMessage};
 use polysim::time::TsUs;
+
+use crate::polymarket_parse::apply;
 
 const SERIES: PolySeries = PolySeries::BtcUpDown5m;
 
@@ -45,27 +47,11 @@ impl TokenBook {
         }
     }
 
-    fn apply_emitted(&mut self, messages: &[InboundMessage]) {
-        for message in messages {
-            let InboundMessage::Book(chunk) = message else {
-                continue;
-            };
-            match chunk.kind {
-                // A re-emitted snapshot on a still-valid book is a legitimate ImplicitReset in this
-                // live replay; this reconstruction tracks no book-derived state, so either is fine.
-                BookChunkKind::Snapshot => match self.book.apply_snapshot_chunk(chunk) {
-                    SnapshotOutcome::Clean | SnapshotOutcome::ImplicitReset => {}
-                },
-                BookChunkKind::Delta => self.book.apply_delta_chunk(chunk),
-            }
-        }
-    }
-
     fn on_snapshot(&mut self, book: &PolyBook) {
         let mut messages = Vec::new();
         self.normaliser
             .emit_snapshot(book, &mut |m| messages.push(m));
-        self.apply_emitted(&messages);
+        apply(&mut self.book, &messages);
     }
 
     fn on_delta(&mut self, delta: &PolyDelta, exchange_ts_us: TsUs) {
@@ -78,7 +64,7 @@ impl TokenBook {
             .emit_price_change(std::slice::from_ref(delta), stamps, &mut |m| {
                 messages.push(m)
             });
-        self.apply_emitted(&messages);
+        apply(&mut self.book, &messages);
     }
 }
 
@@ -415,7 +401,7 @@ mod collapse {
         );
         assert!(
             replay.zero_removals >= 50,
-            "the collapse burst (size-0 level removals) must be present for the deferred detector stitch: {} removals",
+            "the collapse burst (size-0 level removals) must be present: {} removals",
             replay.zero_removals
         );
     }

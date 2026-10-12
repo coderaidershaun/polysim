@@ -1,7 +1,7 @@
-//! Parquet read-back + temp-dir helpers for the E2E fitness test. Decodes any persisted
+//! Parquet read-back + temp-dir helpers for the persistence fitness tests. Decodes any persisted
 //! table's files back into comparable rows through the arrow reader, exposes their footer
 //! key-values, and holds a scratch tree removed on drop — no `tempfile` dependency is worth adding
-//! just to give a test a working directory.
+//! just to give a test a working directory. Also holds the writer-spawn fixtures those tests share.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -14,6 +14,13 @@ use arrow_array::{
 };
 use arrow_schema::DataType;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use rtrb::RingBuffer;
+use tokio::sync::mpsc;
+
+use polysim::config::{ExecutionMode, RecordedTables, StrategyId, TradingEngineId};
+use polysim::ids::FIXED_SCALE;
+use polysim::msg::persist::PersistRecord;
+use polysim::persist::{PersistConfig, PersistError, PersistHandle, PersistWriter, RunMeta};
 
 /// `f64` is stored as bits so cells compare exactly — deterministic replay is bit-for-bit equal.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,4 +158,61 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+/// Arbitrary in-range receipt time; the partition it picks doesn't affect the assertions.
+pub(crate) const BASE_TS_US: i64 = 3_600_000_000;
+
+/// The `{strategy-id}/{te-id}` pair the writer keys the tree by — a run's own root.
+pub(crate) fn run_dir(dir_root: &Path) -> PathBuf {
+    dir_root.join("recorder").join("te-recorder")
+}
+
+/// Footer metadata for a writer these tests spawn; its feature dictionary is not asserted on.
+pub(crate) fn run_meta() -> RunMeta {
+    RunMeta {
+        strategy_id: StrategyId::new("recorder").expect("valid strategy id"),
+        te_id: TradingEngineId::new("te-recorder").expect("valid trading engine id"),
+        execution_mode: Some(ExecutionMode::Live),
+        fixed_scale: FIXED_SCALE,
+        engine_version: "test".into(),
+        feature_names: vec!["ewma_vol".into()],
+        instrument_symbols: vec!["btcusdt".into()],
+        asset_symbols: vec!["btc".into(), "usdt".into()],
+    }
+}
+
+/// Preloads the ring so the actor sees a producer that has already quiesced — the records are all
+/// available the moment it starts pumping.
+pub(crate) fn spawn_writer(
+    dir_root: &Path,
+    tables: RecordedTables,
+    records: Vec<PersistRecord>,
+) -> PersistHandle {
+    let (mut producer, consumer) = RingBuffer::<PersistRecord>::new(records.len() + 1);
+    for record in records {
+        producer
+            .push(record)
+            .expect("persist test ring has capacity");
+    }
+    // No rotation lineage in these tests: the sender drops immediately, so the side-channel stays
+    // empty.
+    let (_, rotations_rx) = mpsc::channel(1);
+    PersistWriter::spawn(
+        PersistConfig {
+            dir: dir_root.to_path_buf(),
+            tables,
+        },
+        run_meta(),
+        consumer,
+        rotations_rx,
+    )
+}
+
+/// Drain exactly as the runtime does on SIGTERM.
+pub(crate) fn drain_blocking(handle: PersistHandle) -> Result<(), PersistError> {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("build a current-thread runtime for the persistence drain")
+        .block_on(handle.drain())
 }

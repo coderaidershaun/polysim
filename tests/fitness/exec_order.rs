@@ -51,6 +51,19 @@ fn event(kind: ExecKind, client_id: ClientOrderId) -> ExecEvent {
     }
 }
 
+fn buy_claim(level: QuoteLevel, price: i64, qty: i64) -> OrderClaim {
+    OrderClaim {
+        instrument: InstrumentId(0),
+        side: Side::Buy,
+        level,
+        price: Price(price),
+        qty: Qty(qty),
+        style: OrderStyle::PostOnly,
+        claimed_ts_us: TsUs::from_micros(1),
+        recon_seq: 0,
+    }
+}
+
 fn live_slot() -> OrderSlot {
     OrderSlot {
         client_id: ClientOrderId(1),
@@ -220,16 +233,7 @@ fn a_client_id_addresses_only_the_slot_and_generation_it_was_encoded_for() {
 
     let mut table = OrderTable::new(RUN_NONCE);
     let (index, first) = table
-        .claim(OrderClaim {
-            instrument: InstrumentId(0),
-            side: Side::Buy,
-            level: QuoteLevel::ZERO,
-            price: Price(0),
-            qty: Qty(0),
-            style: OrderStyle::PostOnly,
-            claimed_ts_us: TsUs::from_micros(1),
-            recon_seq: 0,
-        })
+        .claim(buy_claim(QuoteLevel::ZERO, 0, 0))
         .expect("a fresh side has free slots");
     assert_eq!(table.find(first), Some(index));
 
@@ -243,14 +247,8 @@ fn a_client_id_addresses_only_the_slot_and_generation_it_was_encoded_for() {
 
     let (reused, second) = table
         .claim(OrderClaim {
-            instrument: InstrumentId(0),
-            side: Side::Buy,
-            level: QuoteLevel::ZERO,
-            price: Price(0),
-            qty: Qty(0),
-            style: OrderStyle::PostOnly,
             claimed_ts_us: TsUs::from_micros(100),
-            recon_seq: 0,
+            ..buy_claim(QuoteLevel::ZERO, 0, 0)
         })
         .expect("the reaped slot is free again");
 
@@ -274,20 +272,8 @@ fn a_client_id_addresses_only_the_slot_and_generation_it_was_encoded_for() {
 #[test]
 fn side_level_bookkeeping_stays_conservative_until_a_terminal_fact_proves_otherwise() {
     let mut awaiting_table = OrderTable::new(RUN_NONCE);
-    let level_zero = OrderClaim {
-        instrument: InstrumentId(0),
-        side: Side::Buy,
-        level: QuoteLevel::ZERO,
-        price: Price(100 * TICK),
-        qty: Qty(10),
-        style: OrderStyle::PostOnly,
-        claimed_ts_us: TsUs::from_micros(1),
-        recon_seq: 0,
-    };
-    let level_one = OrderClaim {
-        level: QuoteLevel::new(1).expect("level one"),
-        ..level_zero
-    };
+    let level_zero = buy_claim(QuoteLevel::ZERO, 100 * TICK, 10);
+    let level_one = buy_claim(QuoteLevel::new(1).expect("level one"), 100 * TICK, 10);
     let (live, _) = awaiting_table
         .claim(level_zero)
         .expect("level zero has capacity");
@@ -317,16 +303,11 @@ fn side_level_bookkeeping_stays_conservative_until_a_terminal_fact_proves_otherw
     let mut indexes = Vec::new();
     for level_index in 0..3u8 {
         let (index, _) = count_table
-            .claim(OrderClaim {
-                instrument: InstrumentId(0),
-                side: Side::Buy,
-                level: QuoteLevel::new(level_index).expect("test level"),
-                price: Price((100 - i64::from(level_index)) * TICK),
-                qty: Qty(10),
-                style: OrderStyle::PostOnly,
-                claimed_ts_us: TsUs::from_micros(1),
-                recon_seq: 0,
-            })
+            .claim(buy_claim(
+                QuoteLevel::new(level_index).expect("test level"),
+                (100 - i64::from(level_index)) * TICK,
+                10,
+            ))
             .expect("each keyed level has its own generation slots");
         indexes.push(index);
     }
@@ -368,16 +349,7 @@ fn side_level_bookkeeping_stays_conservative_until_a_terminal_fact_proves_otherw
 fn a_pending_cancel_answer_never_resolves_the_cancel_it_was_asked_about() {
     let mut table = OrderTable::new(RUN_NONCE);
     let (index, client_id) = table
-        .claim(OrderClaim {
-            instrument: InstrumentId(0),
-            side: Side::Buy,
-            level: QuoteLevel::ZERO,
-            price: Price(100 * TICK),
-            qty: Qty(10),
-            style: OrderStyle::PostOnly,
-            claimed_ts_us: TsUs::from_micros(1),
-            recon_seq: 0,
-        })
+        .claim(buy_claim(QuoteLevel::ZERO, 100 * TICK, 10))
         .expect("a fresh side has free slots");
     apply_exec_event(
         table.slot_mut(index),

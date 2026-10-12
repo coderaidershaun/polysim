@@ -2,6 +2,7 @@
 //! slope, or an infinity leaking out of a degenerate window, poisons every downstream sizing model
 //! without ever failing a run.
 
+use super::Lcg;
 use polysim::hot::quant::liquidity::{KylesLambda, KylesLambdaSpec};
 use polysim::ids::Price;
 
@@ -9,19 +10,6 @@ const TICK: Price = Price(1_000_000); // $0.01 at the 1e-8 fixed-point scale.
 
 fn approx(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() <= tol
-}
-
-// Deterministic uniform draws (LCG, no `rand`).
-struct Lcg(u64);
-
-impl Lcg {
-    fn unit(&mut self) -> f64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
-    }
 }
 
 fn spec(window: usize, min_observations: usize) -> KylesLambdaSpec {
@@ -79,7 +67,8 @@ fn slope_recovery_matches_a_known_worked_example() {
         estimate.intercept
     );
 
-    // Mirrored (same flow, negated response) -> negated lambda, refuses invert.
+    // Mirrored input (same flow, negated response) gives a negated lambda, and the inversion is
+    // refused.
     let mirrored: Vec<(f64, f64)> = bars
         .iter()
         .map(|&(flow, mid_change)| (flow, -mid_change))
@@ -100,7 +89,7 @@ fn slope_recovery_matches_a_known_worked_example() {
 
 #[test]
 fn overflowed_sums_and_subnormal_slopes_never_leak_infinity() {
-    // Flow magnitudes overflow centred sums -> window garbage, refuse estimate.
+    // Flow magnitudes overflow the centred sums, so the window is garbage and no estimate is given.
     let overflowing: Vec<(f64, f64)> = [1e160, -1e160, 1e160, -1e160]
         .iter()
         .map(|&flow| (flow, 1e-162 * flow))
@@ -110,7 +99,8 @@ fn overflowed_sums_and_subnormal_slopes_never_leak_infinity() {
         "an overflowed window produced an estimate"
     );
 
-    // Subnormal positive λ reportable, but reciprocal overflows -> refuse invert.
+    // A subnormal positive λ is reportable, but its reciprocal overflows, so the inversion is
+    // refused.
     let faint = [
         (10.0, 5e-311),
         (-10.0, -5e-311),

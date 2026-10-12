@@ -1,26 +1,10 @@
 //! Risk-gate fitness: the exposure ceiling must never trap a position it cannot unwind.
 //!
-//! Exposure became mark-to-market on 2026-07-26, and that quietly broke a property the superseded
-//! fixed-step ledger held by construction. `|exposure|` can now pass the ceiling on a price move
-//! with NO fill at all — the old ledger moved only in whole Δ steps the gate itself refused to take
-//! past the ceiling, so it could not happen. A gate that withdrew both sides there would deadlock:
-//! nothing quoted means nothing fills, nothing filling means the position cannot come down, and only
-//! a favourable mark would release it.
-//!
-//! The rest of the suite cannot see this. Every test that drives the recorder lives in the
-//! flat-price limit, where mark-to-market exposure and the fixed-step ledger agree exactly — which
-//! is why the migration passed every pinned test without one of them being edited. This file is the
-//! first thing that moves the mark independently of the prices fills got.
-//!
-//! The ENGINE grew its own ceiling on 2026-07-27 (`gates::assess_exposure`), and the second half of
-//! this file pins it. Two layers now hold the same line for different reasons: the strategy's shapes
-//! the quotes it declares, the engine's is the one a strategy bug cannot bypass — so both are here,
-//! and the deadlock property above binds both. The engine's is the better number, because it holds
-//! the price and size of the order about to be placed rather than a fixed per-fill step.
-//!
-//! The last case here is the engine's OTHER control a strategy cannot bypass — the consecutive
-//! hard-reject kill switch — pinned on the one thing that can silently disarm it: an event the
-//! engine synthesised for itself being counted as the venue accepting something.
+//! A gate that withdrew both sides would deadlock: nothing quoting means nothing fills, and nothing
+//! filling means the position never comes down. Exposure is marked to market, so a price move alone
+//! can carry it past the ceiling with no fill at all, and only a test that moves the mark apart from
+//! the fills can see that. The engine's own ceiling and its consecutive-reject kill switch live here
+//! too, because they are the controls a strategy bug cannot bypass.
 
 use polysim::adapters::exec::open_orders_snapshot_end;
 use polysim::config::{RecordedTables, TrackerSpec};
@@ -522,9 +506,9 @@ pub(crate) fn make_ready(engine: &mut HotEngine, when: i64) {
     open_orders_snapshot(engine, when);
 }
 
-/// Two of the three legs. Split out so `exec_resync` can withhold the third and prove it is load
-/// bearing — an engine that quotes without it would make the marker's absence undetectable, which
-/// is exactly how the closed loop this arms went unnoticed.
+/// Two of the three legs. Split out so the resync test that withholds the third leg can prove
+/// it is load bearing: an engine that quotes without it would make the marker's absence
+/// undetectable.
 pub(crate) fn stream_and_balances(engine: &mut HotEngine, when: i64) {
     engine.dispatch(
         pop(0, 0),
@@ -563,9 +547,8 @@ pub(crate) fn stream_and_balances(engine: &mut HotEngine, when: i64) {
     );
 }
 
-/// The third leg, built by the SAME constructor the Binance actor sends it with. Synthesising the
-/// marker here instead would let every readiness-dependent test below stay green while production
-/// produced no such event at all — which is precisely what happened.
+/// The third leg, built by the SAME constructor the Binance actor sends it with. A hand-built marker
+/// would let every readiness-dependent test stay green while production sent none.
 pub(crate) fn open_orders_snapshot(engine: &mut HotEngine, when: i64) {
     engine.dispatch(
         pop(0, 0),
@@ -798,7 +781,7 @@ fn dispatch_exec(engine: &mut HotEngine, event: ExecEvent) {
 
 /// Whether the engine pulled every order it owns because a kill switch tripped. That command is what
 /// a halt DOES, so it is the honest way to observe one from outside.
-fn has_halted(commands: &mut Consumer<ExecLaneItem>) -> bool {
+pub(crate) fn has_halted(commands: &mut Consumer<ExecLaneItem>) -> bool {
     drain_commands(commands).iter().any(|command| {
         matches!(
             command,

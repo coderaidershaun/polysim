@@ -25,6 +25,8 @@ mod chart_projection;
 mod config_guards;
 #[cfg(feature = "ui")]
 mod desktop_format;
+#[cfg(feature = "ui")]
+mod desktop_support;
 mod dispatch_replay;
 #[cfg(feature = "ui")]
 mod dom_grouping;
@@ -110,6 +112,7 @@ mod position_projection;
 mod quant;
 mod raw_recorder;
 mod reconnect_backoff;
+mod recorder_fixture;
 mod recorder_min_distance;
 mod recorder_quotes;
 mod rest_quiet;

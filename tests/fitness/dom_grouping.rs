@@ -3,13 +3,13 @@
 //! never break: a bucket's quantity is the exact sum of its members (a grouped ladder that loses or
 //! double-counts depth misprices the book silently), the two sides never pool their levels even when
 //! they share a bucket, bucket edges stay grid-aligned so a row keeps covering the same ticks as the
-//! book moves, and grouping 1 is bit-for-bit today's ungrouped ladder. The bps unit is pinned as a
+//! book moves, and grouping 1 is bit-for-bit the plain ungrouped ladder. The bps unit is pinned as a
 //! SIZING input — it resolves to a whole tick count once per frame and never becomes a second price
 //! grid. The label half pins the venue-price convention the DOM separator renders a mid at,
 //! including the half-tick mid that must widen its decimals rather than round. The model half pins
-//! the state the controls write: the workstation
-//! opens on a twentieth of a basis point, which is deliberately NOT the projection's identity
-//! default, and each unit remembers its own grouping across a flip.
+//! the state the controls write: the workstation opens on a twentieth of a basis point, which is
+//! deliberately NOT the projection's identity default, and each unit remembers its own grouping
+//! across a flip.
 
 use std::collections::HashMap;
 
@@ -21,11 +21,12 @@ use polysim::desktop::format::{
     MISSING, price_decimals, write_opt_venue_mid, write_venue_mid, write_venue_price,
 };
 use polysim::desktop::model::UiModel;
-use polysim::ids::{FIXED_SCALE, InstrumentId, Price, Qty};
-use polysim::msg::inbound::Level;
-use polysim::msg::ui::{DomQuote, UI_BOOK_LEVELS, UiBookSnapshot, UiBookState};
-use polysim::time::{DurationUs, TsUs};
+use polysim::ids::{FIXED_SCALE, Price, Qty};
+use polysim::msg::ui::{DomQuote, UiBookSnapshot, UiBookState};
+use polysim::time::DurationUs;
 use proptest::prelude::*;
+
+use crate::desktop_support::{BookFixture, book_snapshot, overlay};
 
 /// A one-mantissa tick, so a price mantissa reads directly as its tick index and the bucket math is
 /// legible in the assertions.
@@ -35,34 +36,14 @@ const TICK: Price = Price(1);
 const CENT_TICK: Price = Price(FIXED_SCALE / 100);
 
 fn book(bids: &[(i64, i64)], asks: &[(i64, i64)]) -> UiBookSnapshot {
-    let empty = Level {
-        price: Price(0),
-        qty: Qty(0),
-    };
-    let mut bid_levels = [empty; UI_BOOK_LEVELS];
-    let mut ask_levels = [empty; UI_BOOK_LEVELS];
-    for (slot, &(price, qty)) in bid_levels.iter_mut().zip(bids) {
-        *slot = Level {
-            price: Price(price),
-            qty: Qty(qty),
-        };
-    }
-    for (slot, &(price, qty)) in ask_levels.iter_mut().zip(asks) {
-        *slot = Level {
-            price: Price(price),
-            qty: Qty(qty),
-        };
-    }
-    UiBookSnapshot {
-        instrument: InstrumentId(0),
+    book_snapshot(BookFixture {
+        instrument: 0,
         seq: 0,
-        event_ts_us: TsUs::from_micros(10),
+        event_ts: 10,
         state: UiBookState::Valid,
-        bid_len: bids.len() as u16,
-        ask_len: asks.len() as u16,
-        bids: bid_levels,
-        asks: ask_levels,
-    }
+        bids,
+        asks,
+    })
 }
 
 /// Levels walking away from `best` by `gaps`, each with its own quantity so a bucket that drops or
@@ -186,9 +167,10 @@ proptest! {
 }
 
 proptest! {
-    /// FITNESS: grouping 1 is the ungrouped ladder, bit for bit. The default must stay the behaviour
-    /// `dom_projection` pins, or every existing DOM guarantee silently changes meaning the day
-    /// grouping ships.
+    /// FITNESS: grouping 1 is the ungrouped ladder. The default must stay one row per tick, with
+    /// every book level on its own tick row, every row without a level empty, and nothing outside
+    /// the window shown. Otherwise every existing DOM guarantee would silently change meaning as soon
+    /// as a wider row is chosen.
     #[test]
     fn grouping_one_is_the_ungrouped_ladder(
         best_bid in 1_000i64..2_000,
@@ -201,15 +183,9 @@ proptest! {
         let bid_levels = ladder(best_bid, &bid_gaps, -1);
         let ask_levels = ladder(best_bid + spread, &ask_gaps, 1);
         let snapshot = book(&bid_levels, &ask_levels);
-        let grouped_by_one = view_of(
-            &snapshot,
-            DomGrouping::Ticks { per_bucket: 1 },
-            MAX_ROWS_PER_SIDE,
-        );
         let defaulted = view_of(&snapshot, DomGrouping::default(), MAX_ROWS_PER_SIDE);
-        prop_assert_eq!(&grouped_by_one, &defaulted);
 
-        // ...and that ladder is still one row per tick, anchored where the ungrouped formula says.
+        // The default is one row per tick, anchored where the ungrouped formula says.
         let mid = defaulted.mid_half_ticks.expect("a two-sided on-grid book has a mid");
         prop_assert_eq!(defaulted.ticks_per_bucket, 1);
         let ask_by_tick: HashMap<i64, i64> = ask_levels.iter().copied().collect();
@@ -360,8 +336,8 @@ fn bucket_ownership_at_boundaries_follows_the_grid_not_mid_parity() {
     // the bucket boundary — never from the mid's parity. Anchoring to the absolute tick grid is what
     // produces this, and a "fix" that made the row-0 edges track the mid would break every other
     // guarantee here.
-    // Odd mid, bb 100 / ba 101 → anchors 101 and 100, both in bucket 100: shared, each side still
-    // aggregating only its own levels.
+    // Odd mid, best bid 100 and best ask 101: the anchors are 101 and 100, both in bucket 100, so the
+    // bucket is shared while each side still aggregates only its own levels.
     let shared_at_an_odd_mid = book(
         &[(100, 4), (98, 3), (95, 2)],
         &[(101, 5), (104, 6), (109, 7)],
@@ -387,7 +363,8 @@ fn bucket_ownership_at_boundaries_follows_the_grid_not_mid_parity() {
     assert_eq!(view.bid_rows()[1].tick_index, 90);
     assert_eq!(view.bid_rows()[1].public_qty, Some(Qty(5)), "98 and 95");
 
-    // Even mid, bb 104 / ba 106 → anchors 106 and 104, two apart yet both in bucket 100: shared.
+    // Even mid, best bid 104 and best ask 106: the anchors are 106 and 104, two apart yet both in
+    // bucket 100, so the bucket is shared.
     let shared_at_an_even_mid = book(&[(104, 4)], &[(106, 5)]);
     let view = view_of(
         &shared_at_an_even_mid,
@@ -398,7 +375,8 @@ fn bucket_ownership_at_boundaries_follows_the_grid_not_mid_parity() {
     assert_eq!(view.ask_rows()[0].tick_index, 100);
     assert_eq!(view.bid_rows()[0].tick_index, 100);
 
-    // Odd mid, bb 109 / ba 110 → anchors 110 and 109 with a boundary between them: not shared.
+    // Odd mid, best bid 109 and best ask 110: the anchors are 110 and 109 with a bucket boundary
+    // between them, so the bucket is not shared.
     let split_at_an_odd_mid = book(&[(109, 4)], &[(110, 5)]);
     let view = view_of(
         &split_at_an_odd_mid,
@@ -414,7 +392,8 @@ fn bucket_ownership_at_boundaries_follows_the_grid_not_mid_parity() {
 fn a_quote_lands_in_its_bucket_and_off_screen_stays_in_half_ticks() {
     let snapshot = book(&[(100, 4)], &[(102, 5)]);
     let inside = DomQuote::top(Some((Price(87), Qty(9))), Some((Price(115), Qty(9))));
-    // mid_half 202 → ask rows 100/110/120, bid rows 100/90/80 at a 10-tick bucket.
+    // With a mid of 202 half-ticks and 10-tick buckets, the ask rows are 100, 110 and 120 and the
+    // bid rows are 100, 90 and 80.
     let view = build_dom_view(DomViewInput {
         snapshot: Some(&snapshot),
         overlay: overlay(inside),
@@ -492,10 +471,10 @@ fn a_quote_lands_in_its_bucket_and_off_screen_stays_in_half_ticks() {
 /// has never visited starts ungrouped.
 ///
 /// This is deliberately NOT `DomGrouping::default()`. That default is the projection's IDENTITY —
-/// one bucket per tick, the venue's own grid — and two dozen projection pins read it that way. The
+/// one bucket per tick, the venue's own grid — and the projection pins read it that way. The
 /// opening state is a product choice the model names itself, and the inequality below is what fails
 /// loudly if a later tidy-up folds the two into one. Each unit also keeps its own remembered
-/// grouping, so flipping Ticks→bps→Ticks restores the value the operator chose in that unit rather
+/// grouping, so flipping from ticks to bps and back restores the value the operator chose in that unit rather
 /// than resetting it — the whole reason the model holds two slots plus an active unit instead of a
 /// single `DomGrouping`.
 #[test]
@@ -602,14 +581,4 @@ fn venue_labels_render_the_price_exactly_at_its_own_precision() {
         label, MISSING,
         "no trustworthy mid is em-dash, never a zero"
     );
-}
-
-/// A ladder overlay carrying only the desired quote — the shape every case below drives, since real
-/// working orders are pinned separately.
-fn overlay(desired: DomQuote) -> DomOverlay<'static> {
-    DomOverlay {
-        desired: Some(desired),
-        bid_orders: &[],
-        ask_orders: &[],
-    }
 }

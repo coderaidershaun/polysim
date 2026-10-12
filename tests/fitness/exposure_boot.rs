@@ -15,28 +15,21 @@
 //! must not be so generous that the limit stops working, because a baseline captured at CONSTRUCTION
 //! would also let the engine quote — while silently carrying the whole restored position's cost as
 //! headroom, so no session loss could ever trip it. They need a seeded ledger, which is why they live
-//! here beside the restore rather than in `risk_gate.rs`.
+//! here beside the restore rather than with the other risk-gate tests.
 //!
 //! The last two are the other end of the same promise. Restoring a position is worth nothing unless
 //! the run that takes fills WRITES one, so they drive the whole path — engine, snapshot, ring, writer
 //! thread, file — and pin that the final snapshot survives the sink's owner going away.
 
-use polysim::adapters::exec::open_orders_snapshot_end;
-use polysim::config::{ExecutionMode, TrackerSpec};
+use polysim::config::TrackerSpec;
 use polysim::exposure::{
-    ExposureError, ExposureSnapshot, ExposureState, ExposureWriter, ExposureWriterConfig,
-    InstrumentExposure, MAX_EXPOSURE_INSTRUMENTS, load,
+    ExposureError, ExposureSnapshot, ExposureState, InstrumentExposure, MAX_EXPOSURE_INSTRUMENTS,
 };
 use polysim::hot::dispatch::{ExecWiring, ExposureWiring, HotEngine, HotEngineSetup};
-use polysim::hot::exec::{
-    DesiredQuote, ExecLimits, ExecSettings, FeeModel, OrderBudget, QuoteLevel,
-};
+use polysim::hot::exec::{DesiredQuote, ExecSettings, QuoteLevel};
 use polysim::hot::strategy::{Strategy, StrategyCtx};
-use polysim::ids::{AssetId, ClientOrderId, InstrumentId, Qty, Side};
-use polysim::msg::exec::{
-    AccountChunk, AccountChunkKind, AssetBalance, ExecCommand, ExecEvent, ExecKind, ExecLaneItem,
-    OrderStyle,
-};
+use polysim::ids::{ClientOrderId, InstrumentId, Qty, Side};
+use polysim::msg::exec::{ExecCommand, ExecEvent, ExecKind, ExecLaneItem, OrderStyle};
 use polysim::msg::inbound::{InboundMessage, SpinTick};
 use polysim::registry::InstrumentRow;
 use polysim::sink::{ExecSink, ExposureSink};
@@ -45,14 +38,15 @@ use rtrb::{Consumer, RingBuffer};
 
 use crate::engine_support::{
     FillPen, ONE, book_reset, exec_event, exposure_ring, instrument_row, metrics_ring,
-    persist_ring, pop, snapshot_pair, spin, strategy_log_ring, ts,
+    persist_ring, pop, snapshot_pair, strategy_log_ring,
 };
-use crate::exposure_state::{BINANCE_SOURCE, identity, registry_for};
+use crate::exposure_state::{
+    BINANCE_SOURCE, drain_writer, load_live, registry_for, spawn_live_writer,
+};
 use crate::parquet_readback::TempDir;
+use crate::risk_gate::{drain_commands, exec_settings, make_ready, spin_at};
 
 const INSTRUMENT: InstrumentId = InstrumentId(0);
-const BASE_ASSET: AssetId = AssetId(0);
-const QUOTE_ASSET: AssetId = AssetId(1);
 
 /// One whole base unit bought at 60,000 — the shape a restart while holding inventory actually has.
 const RESTORED_POSITION: i64 = ONE;
@@ -97,35 +91,6 @@ impl Strategy for TwoSidedQuoter {
     }
 }
 
-fn exec_settings() -> ExecSettings {
-    ExecSettings {
-        limits: ExecLimits {
-            requote_threshold_ticks: 1,
-            // Wide band and a long book age: these tests are about the LOSS gate, and a quote
-            // refused by the price band or a stale book would read the same as one the gate pulled.
-            max_quote_distance_centi_bps: 100_000_000,
-            max_book_age: DurationUs::from_secs(3_600),
-            max_order_notional_quote: 1_000_000 * ONE,
-        },
-        max_orders_per_side: 1,
-        min_base_balance: 0,
-        min_quote_balance: 0,
-        max_consecutive_rejects: 5,
-        max_session_loss_quote: MAX_SESSION_LOSS,
-        inflight_timeout: DurationUs::from_secs(3_600),
-        // No silence sweep: a reconciliation request in the command stream would be noise these
-        // tests would have to filter rather than a behaviour they are about.
-        exec_silence_spins: u32::MAX,
-        order_reap_window: DurationUs::from_secs(3_600),
-        quote_stop_margin: DurationUs::ZERO,
-        flatten_slack_ticks: 0,
-        order_budget: OrderBudget::NONE,
-        fee_model: FeeModel::None,
-        taker_fee_rate: 0,
-        holds_reservations_until_settled: true,
-    }
-}
-
 /// A run that inherits `restored` and writes its own changes nowhere — the shape every test below
 /// wants, because they are about what the ledger DOES with a restored position.
 fn restored_engine(
@@ -158,63 +123,17 @@ fn engine_with_exposure(
         warmup: DurationUs::ZERO,
         exec: Some(ExecWiring {
             sink: ExecSink::new(commands_producer),
-            settings: exec_settings(),
+            // Wide band and a long book age: these tests are about the LOSS gate, and a quote
+            // refused by the price band or a stale book would read the same as one the gate pulled.
+            settings: ExecSettings {
+                max_session_loss_quote: MAX_SESSION_LOSS,
+                ..exec_settings()
+            },
             run_nonce: 0,
         }),
         exposure,
     });
     (engine, commands)
-}
-
-/// The three facts that must hold before ONE order may be sent: the stream is up, the open-order
-/// snapshot has landed, and balances are known. Without them nothing quotes and every assertion
-/// below would pass for the wrong reason.
-fn make_ready(engine: &mut HotEngine, when: i64) {
-    let lifecycle = |kind: ExecKind| {
-        InboundMessage::Exec(ExecEvent {
-            kind,
-            ..exec_event(INSTRUMENT, ClientOrderId(0), Side::Buy, 0, when)
-        })
-    };
-    dispatch(engine, &lifecycle(ExecKind::StreamReady));
-    // The constructor the Binance actor sends this with, never a hand-built copy — see
-    // `exec_resync` for the closed loop a synthesised marker hid for a milestone.
-    dispatch(
-        engine,
-        &InboundMessage::Exec(open_orders_snapshot_end(INSTRUMENT, ts(when))),
-    );
-    dispatch(
-        engine,
-        &InboundMessage::Account(AccountChunk {
-            kind: AccountChunkKind::Snapshot,
-            balances: balances(),
-            len: 2,
-            is_last_chunk: true,
-            venue_update_ts_ms: 1,
-            exchange_ts_us: ts(when),
-            received_ts_us: ts(when),
-            queued_ts_us: ts(when),
-        }),
-    );
-}
-
-fn balances() -> [AssetBalance; polysim::msg::exec::ACCOUNT_CHUNK_ASSETS] {
-    let mut balances = [AssetBalance {
-        asset: AssetId::UNKNOWN,
-        free: 0,
-        locked: 0,
-    }; polysim::msg::exec::ACCOUNT_CHUNK_ASSETS];
-    balances[0] = AssetBalance {
-        asset: BASE_ASSET,
-        free: 10 * ONE,
-        locked: 0,
-    };
-    balances[1] = AssetBalance {
-        asset: QUOTE_ASSET,
-        free: 1_000_000 * ONE,
-        locked: 0,
-    };
-    balances
 }
 
 fn dispatch(engine: &mut HotEngine, message: &InboundMessage) {
@@ -227,20 +146,6 @@ fn reseat_book(engine: &mut HotEngine, bid: i64, ask: i64, when: i64) {
     dispatch(engine, &InboundMessage::BookReset(book_reset(0, when)));
     dispatch(engine, &InboundMessage::Book(bids));
     dispatch(engine, &InboundMessage::Book(asks));
-}
-
-fn spin_at(engine: &mut HotEngine, seq: u64, when: i64) {
-    dispatch(engine, &InboundMessage::SpinTick(spin(seq, when)));
-}
-
-fn drain_commands(commands: &mut Consumer<ExecLaneItem>) -> Vec<ExecCommand> {
-    let mut drained = Vec::new();
-    while let Ok(item) = commands.pop() {
-        if let ExecLaneItem::Command(stamped) = item {
-            drained.push(stamped.command);
-        }
-    }
-    drained
 }
 
 fn placed(commands: &[ExecCommand], wanted: Side) -> Option<ClientOrderId> {
@@ -291,7 +196,7 @@ fn restored_long() -> [InstrumentExposure; 1] {
 /// FITNESS: an engine that boots holding inventory quotes, and the session limit still bites once it
 /// does.
 ///
-/// The two go together deliberately: both are the loss gate's baseline-at-mark fix read from its two
+/// The two go together deliberately: both are the loss gate's baseline-at-first-mark rule read from its two
 /// directions. The restored cost basis is 60,000 against a 5-unit loss budget, so any gate reading
 /// raw PnL — or taking its baseline before the first mark — withdraws both sides on boot and never
 /// places an order again; a construction-time baseline would swallow that same 60,000 units as
@@ -405,15 +310,7 @@ fn a_restored_position_without_a_mark_is_not_flat() {
 fn a_fill_reaches_the_file_the_next_boot_reads() {
     let root = TempDir::new("exposure-write-through");
     let registry = registry_for(BINANCE_SOURCE);
-    let (writer, sink) = ExposureWriter::spawn(
-        ExposureWriterConfig::new(
-            root.path().to_path_buf(),
-            identity(),
-            Some(ExecutionMode::Live),
-            &registry,
-        ),
-        &ExposureState::default(),
-    );
+    let (writer, sink) = spawn_live_writer(root.path(), &registry, &ExposureState::default());
     let (mut engine, _commands) = engine_with_exposure(
         registry.instruments(),
         ExposureWiring {
@@ -434,21 +331,11 @@ fn a_fill_reaches_the_file_the_next_boot_reads() {
         dispatch(&mut engine, &message);
     }
     // The hot thread ending: dropping the engine drops the sink, which flushes anything it was still
-    // holding — the ordering `runtime.rs` gets by joining the hot thread before draining the writer.
+    // holding. The runtime gets the same ordering by joining the hot thread before draining the writer.
     drop(engine);
-    tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("build a current-thread runtime for the exposure drain")
-        .block_on(writer.drain())
-        .expect("the final write succeeds");
+    drain_writer(writer).expect("the final write succeeds");
 
-    let state = load(
-        root.path(),
-        &identity(),
-        &registry,
-        Some(ExecutionMode::Live),
-    )
-    .expect("the run's own file loads");
+    let state = load_live(root.path(), &registry).expect("the run's own file loads");
     assert_eq!(
         state.instruments(),
         [InstrumentExposure {
@@ -522,15 +409,7 @@ fn the_last_snapshot_leaves_the_sink_when_its_owner_does() {
 fn a_writer_that_died_cannot_report_a_clean_drain() {
     let root = TempDir::new("exposure-writer-panic");
     let registry = registry_for(BINANCE_SOURCE);
-    let (writer, mut sink) = ExposureWriter::spawn(
-        ExposureWriterConfig::new(
-            root.path().to_path_buf(),
-            identity(),
-            Some(ExecutionMode::Live),
-            &registry,
-        ),
-        &ExposureState::default(),
-    );
+    let (writer, mut sink) = spawn_live_writer(root.path(), &registry, &ExposureState::default());
 
     // More rows than the fixed array holds is corrupt state, and the writer must die on it rather
     // than serialise it. The writer thread's own panic dump on stderr is part of a green run.
@@ -539,10 +418,7 @@ fn a_writer_that_died_cannot_report_a_clean_drain() {
     sink.push(corrupt);
     drop(sink);
 
-    let outcome = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("build a current-thread runtime for the exposure drain")
-        .block_on(writer.drain());
+    let outcome = drain_writer(writer);
     assert!(
         matches!(outcome, Err(ExposureError::WriterPanicked { .. })),
         "a panicked writer must surface as WriterPanicked so the exit is non-graceful, got {outcome:?}"

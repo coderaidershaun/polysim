@@ -13,22 +13,20 @@
 
 use std::path::{Path, PathBuf};
 
-use rtrb::RingBuffer;
-use tokio::sync::mpsc;
-
-use polysim::config::{ExecutionMode, RecordedTables, StrategyId, TableKind, TradingEngineId};
+use polysim::config::{RecordedTables, TableKind};
 use polysim::hot::exec::QuoteLevel;
 use polysim::ids::{
     AssetId, ClientOrderId, FIXED_SCALE, InstrumentId, Price, Qty, Side, TradeId, VenueOrderId,
 };
 use polysim::msg::exec::{Liquidity, OrderStyle, Provenance, RejectClass};
 use polysim::msg::persist::{FillRow, OrderLifecycle, OrderRow, OrderTransition, PersistRecord};
-use polysim::persist::{PersistConfig, PersistWriter, RunMeta};
 use polysim::time::TsUs;
 
-use crate::parquet_readback::{Cell, FileData, TempDir, parquet_files, read_parquet_file};
+use crate::parquet_readback::{
+    BASE_TS_US, Cell, FileData, TempDir, drain_blocking, parquet_files, read_parquet_file, run_dir,
+    spawn_writer,
+};
 
-const BASE_TS_US: i64 = 3_600_000_000;
 const QUOTE_ASSET: AssetId = AssetId(1);
 
 /// One BTC at $60,000 in 1e-8 mantissas, so a scale slip anywhere shows as a factor of 1e8 rather
@@ -443,7 +441,11 @@ fn reject_str(reject: Option<RejectClass>) -> &'static str {
 }
 
 fn style_str(style: Option<OrderStyle>) -> &'static str {
-    style.map_or("unknown", OrderStyle::as_str)
+    match style {
+        None => "unknown",
+        Some(OrderStyle::PostOnly) => "post_only",
+        Some(OrderStyle::Immediate) => "immediate",
+    }
 }
 
 fn liquidity_str(liquidity: Option<Liquidity>) -> &'static str {
@@ -464,24 +466,7 @@ fn side_str(side: Side) -> &'static str {
 /// Spawn the real actor over preloaded records and drain it exactly as the runtime does, so the only
 /// variable between cases is the configured table set.
 fn drain(dir_root: &Path, tables: RecordedTables, records: Vec<PersistRecord>) {
-    let (mut producer, consumer) = RingBuffer::<PersistRecord>::new(records.len() + 1);
-    for record in records {
-        producer.push(record).expect("test ring is sized for them");
-    }
-    let (_, rotations_rx) = mpsc::channel(1);
-    let handle = PersistWriter::spawn(
-        PersistConfig {
-            dir: dir_root.to_path_buf(),
-            tables,
-        },
-        run_meta(),
-        consumer,
-        rotations_rx,
-    );
-    tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("build a current-thread runtime for the persistence drain")
-        .block_on(handle.drain())
+    drain_blocking(spawn_writer(dir_root, tables, records))
         .expect("a row with no sink to land in is a drop, never a drain failure");
 }
 
@@ -505,21 +490,4 @@ fn footer_value(footer: &[(String, Option<String>)], key: &str) -> String {
 
 fn table_dir(dir_root: &Path, table: TableKind) -> PathBuf {
     run_dir(dir_root).join(table.as_str())
-}
-
-fn run_dir(dir_root: &Path) -> PathBuf {
-    dir_root.join("recorder").join("te-recorder")
-}
-
-fn run_meta() -> RunMeta {
-    RunMeta {
-        strategy_id: StrategyId::new("recorder").expect("valid strategy id"),
-        te_id: TradingEngineId::new("te-recorder").expect("valid trading engine id"),
-        execution_mode: Some(ExecutionMode::Live),
-        fixed_scale: FIXED_SCALE,
-        engine_version: "test".into(),
-        feature_names: vec!["probe".into()],
-        instrument_symbols: vec!["btcusdt".into()],
-        asset_symbols: vec!["btc".into(), "usdt".into()],
-    }
 }

@@ -5,18 +5,18 @@
 //! asks for until the venue drops the connection 23 hours later. The first property forbids that: a
 //! pass still waiting on a read always has something outstanding or something scheduled.
 //!
-//! The second half is the other way the same silence was reached. The pass converged perfectly and
-//! told nobody, so the hot side's readiness gate — which arms on the pass's end marker and on
-//! nothing else — could never arm on a cold start, and an armed engine placed nothing for the life
-//! of the process with no diagnostic at all. Green tests did not notice because every one of them
-//! synthesised the marker by hand. So these drive the real constructor, and the last of them pins
-//! the diagnostic that would have made the original bug a one-minute read.
+//! The second half is the other way the same silence is reached. A pass can converge perfectly and
+//! tell nobody: the hot side's readiness gate arms on the pass's end marker and on nothing else, so
+//! without the marker a cold start never arms and an armed engine places nothing for the life of the
+//! process, with no diagnostic at all. A test that synthesises the marker by hand cannot see that,
+//! so these drive the real constructor, and the last of them pins the diagnostic that turns the
+//! failure into a one-minute read.
 
 use polysim::adapters::exec::{
     MAX_RESYNC_ATTEMPTS, ResyncPass, ResyncStep, open_orders_snapshot_end,
 };
 use polysim::hot::exec::{
-    OrderClaim, OrderTable, QuoteLevel, ReadinessGap, ReconcilePass, RejectOrigin, RejectReason,
+    OrderClaim, OrderTable, QuoteLevel, ReadinessGap, ReconcilePass, RejectReason,
 };
 use polysim::ids::{Price, Qty, Side};
 use polysim::msg::exec::{ExecKind, OrderStyle};
@@ -25,7 +25,7 @@ use polysim::time::TsUs;
 
 use proptest::prelude::*;
 
-use crate::engine_support::pop;
+use crate::engine_support::{local_refusals, pop};
 use crate::risk_gate::{
     ASK, BID, CEILING, INSTRUMENT, drain_commands, is_placing, open_orders_snapshot,
     quoting_engine, quoting_engine_with_ui, reseat_book, spin_at, stream_and_balances,
@@ -101,9 +101,9 @@ fn an_undecodable_read_survives_to_completion_and_retries_are_finite() {
 /// FITNESS: a cold start must reach the quoting state. The pass does not only settle the mirror —
 /// it is the ONLY producer of the marker the hot table's readiness gate arms on, and the read the
 /// hot table would ask for itself is issued only once a working order exists, which cannot happen
-/// before a first placement readiness refuses. Nothing in the suite noticed for a milestone because
-/// every readiness-dependent test synthesised the marker by hand; both halves below are driven by
-/// the constructor the actor actually sends.
+/// before a first placement readiness refuses. A readiness-dependent test that synthesises the marker
+/// by hand hides its absence, so both halves below are driven by the constructor the actor actually
+/// sends.
 #[test]
 fn a_cold_start_quotes_only_once_the_resync_marker_lands() {
     let (mut engine, mut commands) = quoting_engine(CEILING, &[]);
@@ -210,7 +210,7 @@ fn balances_are_restated_every_spin_so_a_late_consumer_learns_them() {
 /// FITNESS: a side that is not quoting says WHY, once per answer.
 ///
 /// The silent-refusal failure is the expensive one — an engine reporting `ARMED` and placing nothing
-/// looks identical to an engine with nothing to quote — so every gate now names its reason. It has
+/// looks identical to an engine with nothing to quote — so every gate names its reason. It has
 /// to be edge-triggered to be readable: the spin is one second, so a level-triggered report is two
 /// rows a second and the transition that matters drowns in repeats of the one before it.
 #[test]
@@ -220,7 +220,7 @@ fn a_refusal_is_reported_when_the_reason_changes_and_not_again() {
     // Nothing yet: no stream, no balances, no snapshot. The first gap is the stream.
     spin_at(&mut engine, 1, 10);
     spin_at(&mut engine, 2, 20);
-    let first = local_reasons(&mut events);
+    let first = local_refusals(&mut events);
     assert_eq!(
         first,
         vec![
@@ -234,7 +234,7 @@ fn a_refusal_is_reported_when_the_reason_changes_and_not_again() {
     stream_and_balances(&mut engine, 30);
     spin_at(&mut engine, 3, 40);
     spin_at(&mut engine, 4, 50);
-    let second = local_reasons(&mut events);
+    let second = local_refusals(&mut events);
     assert_eq!(
         second,
         vec![
@@ -251,22 +251,9 @@ fn a_refusal_is_reported_when_the_reason_changes_and_not_again() {
     }
     spin_at(&mut engine, 5, 70);
     assert!(
-        local_reasons(&mut events).is_empty(),
+        local_refusals(&mut events).is_empty(),
         "a side that started quoting reported a refusal"
     );
-}
-
-/// Every local refusal reason the engine teed, in order.
-fn local_reasons(events: &mut rtrb::Consumer<UiEvent>) -> Vec<RejectReason> {
-    std::iter::from_fn(|| events.pop().ok())
-        .filter_map(|event| match event {
-            UiEvent::Reject {
-                origin: RejectOrigin::Local(reason),
-                ..
-            } => Some(reason),
-            _ => None,
-        })
-        .collect()
 }
 
 /// One instrument's read, as the driver's loop sees it: which pass asked for it, so an answer can

@@ -23,6 +23,8 @@ use polysim::ids::{ClientOrderId, InstrumentId, Price, Qty, Side};
 use polysim::msg::exec::{ExecCommand, ExecEvent, ExecKind, Provenance, VenueOrderStatus};
 use polysim::time::{DurationUs, TsUs};
 
+use crate::engine_support::exec_event;
+
 const UP: InstrumentId = InstrumentId(0);
 const DOWN: InstrumentId = InstrumentId(1);
 const CONDITION: &str = "0xcondition";
@@ -424,7 +426,8 @@ fn a_cancel_inside_the_taker_hold_is_withheld_and_released_once() {
     assert!(delayed.held_until(client_id, at(1_000_000)).is_none());
 }
 
-/// A placement whose POST is still outstanding: mine, no venue id, not yet ambiguous.
+/// A placement whose POST is still outstanding: it is ours, has no venue id and is not yet
+/// ambiguous.
 fn mine(client_id: u64, side: Side, price: i64, qty: i64) -> MirroredOrder {
     MirroredOrder {
         instrument: UP,
@@ -544,7 +547,7 @@ fn classify_unmapped_decides_by_placement_state_and_match() {
 /// At boot the token table is empty until the first rotation lands, so a prior run's order rests on
 /// a token this run cannot map. Dropped, it would fill behind an armed engine spending real balance
 /// the ledger never sees. The codec must SURFACE it — id and side, which is all a cancel needs — so
-/// the boot branch can sweep it by venue id; the previous behaviour returned it as nothing.
+/// the boot branch can sweep it by venue id instead of never seeing it.
 #[test]
 fn an_order_on_an_unbound_token_is_surfaced_for_the_boot_sweep_not_dropped() {
     let tokens = TokenTable::with_retired_capacity(4);
@@ -585,36 +588,6 @@ fn an_order_on_an_unbound_token_is_surfaced_for_the_boot_sweep_not_dropped() {
             .all(|event| event.kind == ExecKind::SnapshotEnd),
         "nothing was mappable, so the only event is the readiness marker"
     );
-}
-
-fn event(kind: ExecKind, last_qty: i64, cumulative_qty: i64) -> ExecEvent {
-    ExecEvent {
-        instrument: UP,
-        client_id: ClientOrderId(0xa1),
-        venue_order_id: None,
-        trade_id: None,
-        kind,
-        status: None,
-        reject: None,
-        provenance: Provenance::Mine,
-        side: Side::Buy,
-        liquidity: None,
-        price: Price(45_000_000),
-        qty: Qty(500_000_000),
-        last_price: Price(45_000_000),
-        last_qty: Qty(last_qty),
-        cumulative_qty: Qty(cumulative_qty),
-        cumulative_quote: 0,
-        commission: 0,
-        commission_asset: polysim::ids::AssetId::UNKNOWN,
-        reject_code: 0,
-        amends_remaining: 0,
-        recon_seq: 0,
-        exchange_ts_us: at(0),
-        request_sent_ts_us: None,
-        received_ts_us: at(0),
-        queued_ts_us: at(0),
-    }
 }
 
 /// The hot account table releases a fill's reservation only against a balance stamped LATER than
@@ -664,9 +637,20 @@ fn restates_balances_classifies_every_exec_kind() {
         },
     ];
 
+    let base = || exec_event(UP, ClientOrderId(0xa1), Side::Buy, 45_000_000, 0);
     for case in cases {
-        let got = restates_balances(&event(case.kind, case.last_qty, case.cumulative_qty));
-        assert_eq!(got, case.expected, "case: {}", case.name);
+        let event = ExecEvent {
+            kind: case.kind,
+            last_qty: Qty(case.last_qty),
+            cumulative_qty: Qty(case.cumulative_qty),
+            ..base()
+        };
+        assert_eq!(
+            restates_balances(&event),
+            case.expected,
+            "case: {}",
+            case.name
+        );
     }
 
     for quiet in [
@@ -681,7 +665,10 @@ fn restates_balances_classifies_every_exec_kind() {
         ExecKind::StreamReset,
     ] {
         assert!(
-            !restates_balances(&event(quiet, 0, 0)),
+            !restates_balances(&ExecEvent {
+                kind: quiet,
+                ..base()
+            }),
             "{quiet:?} moves nothing"
         );
     }

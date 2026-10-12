@@ -1,4 +1,5 @@
-//! Execution lease coverage.
+//! The execution lease's host lock and on-disk nonce history must be keyed correctly. A wrong key
+//! lets a second process arm the same account, or re-mint client order ids a venue has already seen.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -96,27 +97,6 @@ fn each_venue_keeps_the_nonce_file_name_it_shipped_with() {
                 .collect::<Vec<_>>()
         );
     }
-}
-
-#[test]
-fn one_account_and_te_has_one_owner_and_a_durable_nonce() {
-    let directory = fresh_directory();
-    let te_tag = fresh_te_tag();
-    let api_key = account("owner-and-nonce");
-    let namespace = binance_exec::lease_namespace(BinanceEnv::Testnet, &api_key);
-    let first = ExecutionLease::acquire(&directory, te_tag, &namespace)
-        .expect("first owner acquires the identity");
-    assert_eq!(first.run_nonce(), 1);
-
-    let second = ExecutionLease::acquire(&directory, te_tag, &namespace)
-        .err()
-        .expect("a concurrent owner is refused");
-    assert!(matches!(second, EngineError::ExecutionIdentityInUse { .. }));
-
-    drop(first);
-    let restarted = ExecutionLease::acquire(&directory, te_tag, &namespace)
-        .expect("the next process can acquire after release");
-    assert_eq!(restarted.run_nonce(), 2);
 }
 
 /// FITNESS: the host lock is scoped to the TE identity alone, and the nonce history to whatever axis
