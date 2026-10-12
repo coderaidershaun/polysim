@@ -21,8 +21,8 @@ pub fn microprice(best_bid: Level, best_ask: Level) -> f64 {
 }
 
 /// Equilibrium = microprice; Π = M + λ(d−s) where λ = spread/(2(d+s)).
-/// Deliberately an alias, not a pass-through to delete: the OU resilience model is written in Π, and
-/// [`ResilienceSample::equilibrium`] is fed from here, so the name carries the model's own vocabulary.
+/// Deliberately an alias, not a pass-through to delete: the OU resilience model is written in Π, so
+/// the name carries the model's own vocabulary for whatever feeds [`ResilienceSample::equilibrium`].
 #[inline]
 pub fn orderbook_equilibrium(best_bid: Level, best_ask: Level) -> f64 {
     microprice(best_bid, best_ask)
