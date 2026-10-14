@@ -449,8 +449,9 @@ fn the_shipped_configs_run_their_strategies_and_ship_disarmed() {
         .expect("the shipped config carries an execution block");
     assert_eq!(
         micro_execution.mode,
-        ExecutionMode::Off,
-        "the reference config ships disarmed; an operator may opt into deterministic sim or live"
+        ExecutionMode::Sim,
+        "the reference config ships paper-trading against the simulator; real money needs an \
+         explicit live"
     );
     let micro_link = micro
         .link
