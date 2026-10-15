@@ -1,10 +1,6 @@
 //! Framework-free vocabulary: lifecycle phases, instrument catalog, live book/quote feed.
 //! Zero egui -> engine independent of GUI toolkit. Transport types live here, survive out-of-process workstation.
 
-// No CONSUMER without ui feature -> workstation separate process. Engine produces unconditionally:
-// hot path never knows if listening. ui gate still lints, catches dead code.
-#![cfg_attr(not(feature = "ui"), allow(dead_code))]
-
 mod latency;
 
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};

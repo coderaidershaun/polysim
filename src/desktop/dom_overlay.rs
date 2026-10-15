@@ -3,14 +3,14 @@
 use eframe::egui;
 
 use super::dom::{DomFrame, DomLayout};
-use super::dom_view::{DomRow, DomStatus, DomView, QuotePlacement};
+use super::dom_view::{DomRow, DomView, QuotePlacement};
 use super::format;
+use super::text;
 use super::theme::{DARK, METRICS};
-use crate::time::DurationUs;
 
 pub(crate) fn paint_offscreen(painter: &egui::Painter, layout: &DomLayout, view: &DomView) {
-    let ask = offscreen_of(view.ask_order_placement, view.ask_placement);
-    let bid = offscreen_of(view.bid_order_placement, view.bid_placement);
+    let ask = text::offscreen_of(view.ask_order_placement, view.ask_placement);
+    let bid = text::offscreen_of(view.bid_order_placement, view.bid_placement);
     for placement in [ask, bid] {
         match placement {
             QuotePlacement::OffScreenAbove { delta_half_ticks } => {
@@ -21,13 +21,6 @@ pub(crate) fn paint_offscreen(painter: &egui::Painter, layout: &DomLayout, view:
             }
             QuotePlacement::Visible | QuotePlacement::None => {}
         }
-    }
-}
-
-fn offscreen_of(order: QuotePlacement, desired: QuotePlacement) -> QuotePlacement {
-    match order {
-        QuotePlacement::OffScreenAbove { .. } | QuotePlacement::OffScreenBelow { .. } => order,
-        _ => desired,
     }
 }
 
@@ -218,14 +211,12 @@ pub(crate) fn paint_status(
     view: &DomView,
     frame: &DomFrame<'_>,
 ) {
-    let (text, color) = match view.status {
-        DomStatus::Live => return,
-        DomStatus::Stale => (stale_label(frame.stale_age), DARK.stale),
-        DomStatus::AwaitingBook => ("AWAITING BOOK".to_owned(), DARK.warning),
-        DomStatus::Disconnected => ("DISCONNECTED".to_owned(), DARK.invalid),
+    let Some((label, tone)) = text::status_pill(view.status, frame.stale_age) else {
+        return;
     };
+    let color = DARK.tone(tone);
     let galley = painter.layout_no_wrap(
-        text,
+        label,
         egui::FontId::proportional(METRICS.dom_qty_font),
         color,
     );
@@ -235,16 +226,6 @@ pub(crate) fn paint_status(
     let pill = egui::Rect::from_center_size(center, size);
     fill_pill(painter, pill, color);
     painter.galley(pill.min + egui::vec2(pad, pad / 2.0), galley, color);
-}
-
-fn stale_label(age: Option<DurationUs>) -> String {
-    let Some(ms) = age.map(|age| age.micros() / 1_000) else {
-        return "STALE".to_owned();
-    };
-    if ms < 1_000 {
-        return format!("STALE {ms} ms");
-    }
-    format!("STALE {}.{} s", ms / 1_000, (ms % 1_000) / 100)
 }
 
 pub(crate) fn fill_pill(painter: &egui::Painter, rect: egui::Rect, border: egui::Color32) {

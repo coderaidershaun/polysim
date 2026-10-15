@@ -1,41 +1,15 @@
 //! Center panel: five bands (account/quote/features/tabs/channel). Account fixed+visible. Caller-owned state.
 
-use std::fmt::Write;
-
 use eframe::egui;
 
-use crate::ids::{InstrumentId, Price};
-use crate::labelled_enum::labelled_enum;
-
-use super::dom_view::DomUnit;
-use super::format;
-use super::model::UiModel;
 use super::monitor_account;
 use super::monitor_channels;
 use super::monitor_summary;
 use super::monitor_view::{FeatureRowView, feature_rows};
+use super::text::{feature_hover, feature_name, write_feature_cell};
 use super::theme::{self, DARK, METRICS};
 
-labelled_enum! {
-    /// Monitor channels in tab order; System is the tab a fresh session opens on.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum Channel {
-        System = "System",
-        Orders = "Orders",
-        PubTrades = "Pub trades",
-        TradeFills = "Trade fills",
-    }
-    /// Tab label (Pub trades/Trade fills keep space for at-a-glance reading).
-    pub fn label;
-    /// All channels in fixed tab order (tab strip + cycler walk this).
-    pub const ALL;
-}
-
-impl Channel {
-    pub(super) fn index(self) -> usize {
-        self as usize
-    }
-}
+pub use super::monitor_view::{Channel, MonitorFrame};
 
 /// Scroll state: following=pinned (seen tracks appended), away=freeze (pending offset forces scroll).
 #[derive(Debug, Clone, Copy)]
@@ -111,33 +85,6 @@ impl MonitorUiState {
 
     pub(super) fn channel(&mut self, channel: Channel) -> &mut ChannelSeen {
         &mut self.channels[channel.index()]
-    }
-}
-
-/// Monitor paint frame: model, instrument, tick/qty scale, selected unit, name dicts. Names as
-/// slices (no catalog type leak).
-pub struct MonitorFrame<'a> {
-    pub model: &'a UiModel,
-    pub instrument: InstrumentId,
-    pub tick: Price,
-    pub qty_scale: i64,
-    pub qty_decimals: usize,
-    /// The DOM's unit selector, which the summary deltas follow.
-    pub dom_unit: DomUnit,
-    pub feature_names: &'a [Box<str>],
-    pub instrument_names: &'a [Box<str>],
-}
-
-impl MonitorFrame<'_> {
-    /// Display name or compact i{n} fallback (no alloc in-range case).
-    pub(super) fn instrument_label(&self, id: InstrumentId, scratch: &mut String) {
-        scratch.clear();
-        match self.instrument_names.get(id.0 as usize) {
-            Some(name) => scratch.push_str(name),
-            None => {
-                let _ = write!(scratch, "i{}", id.0);
-            }
-        }
     }
 }
 
@@ -337,35 +284,6 @@ fn paint_feature_row(
         egui::FontId::monospace(METRICS.monitor_feature_font),
         if row.value.is_some() { value_color } else { DARK.text_secondary },
     );
-}
-
-fn feature_hover(row: &FeatureRowView, names: &[Box<str>]) -> String {
-    let mut hover = String::from(feature_name(row, names));
-    hover.push_str("  =  ");
-    let mut value = String::new();
-    write_feature_cell(&mut value, row);
-    hover.push_str(&value);
-    if row.stale {
-        hover.push_str("   (stale)");
-    }
-    hover
-}
-
-/// An id past the catalog's name table renders as no reading, the same as every other absent value
-/// in the panel — including this row's own value cell.
-fn feature_name<'a>(row: &FeatureRowView, names: &'a [Box<str>]) -> &'a str {
-    names
-        .get(row.feature.0 as usize)
-        .map_or(format::MISSING, |name| name.as_ref())
-}
-
-fn write_feature_cell(buf: &mut String, row: &FeatureRowView) {
-    match row.value {
-        Some(value) => format::write_feature_value(buf, value),
-        None => {
-            format::write_missing(buf);
-        }
-    }
 }
 
 /// Paint text left-aligned, truncated with ellipsis (feature names, channel descriptions).

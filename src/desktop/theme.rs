@@ -2,8 +2,7 @@
 
 use eframe::egui;
 
-use crate::msg::exec::RejectClass;
-use crate::time::DurationUs;
+use super::text::Tone;
 
 /// Semantic palette: field names describe role (not hue), design system decides value. Gamma-space sRGBA.
 #[derive(Clone, Copy)]
@@ -50,6 +49,24 @@ pub(crate) const DARK: Palette = Palette {
     selected: egui::Color32::from_rgb(76, 139, 245),
     focus: egui::Color32::from_rgb(126, 178, 255),
 };
+
+impl Palette {
+    pub(crate) fn tone(&self, tone: Tone) -> egui::Color32 {
+        match tone {
+            Tone::Text => self.text_primary,
+            Tone::Text2 => self.text_secondary,
+            Tone::Bid => self.bid,
+            Tone::Ask => self.ask,
+            Tone::SellFill => self.sell_fill,
+            Tone::Positive => self.positive,
+            Tone::Negative => self.negative,
+            Tone::Warning => self.warning,
+            Tone::Invalid => self.invalid,
+            Tone::Stale => self.stale,
+            Tone::Selected => self.selected,
+        }
+    }
+}
 
 /// Layout metrics in logical points; authored alongside palette for unified scale.
 #[derive(Clone, Copy)]
@@ -174,20 +191,6 @@ pub(crate) const METRICS: Metrics = Metrics {
     chart_axis_gutter: 72.0,
     chart_axis_font: 11.0,
 };
-
-/// DOM stale threshold (feed stall indicator).
-pub(crate) const DOM_STALE_THRESHOLD: DurationUs = DurationUs::from_millis(2_000);
-
-/// How alarming a venue refusal is, stated once. The account band and the Orders channel report the
-/// same rejection at the same moment, so a severity that lived in two tables could disagree on screen.
-/// A post-only cross is an ordinary cost of quoting as maker, and `Gone` is the reconciler working.
-pub(crate) fn reject_color(class: RejectClass) -> egui::Color32 {
-    match class {
-        RejectClass::Refused | RejectClass::Gone => DARK.text_secondary,
-        RejectClass::StillLive | RejectClass::Ambiguous => DARK.warning,
-        RejectClass::Fatal => DARK.invalid,
-    }
-}
 
 /// One physical pixel in logical points.
 pub(crate) fn one_physical_pixel(painter: &egui::Painter) -> f32 {

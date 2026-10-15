@@ -19,11 +19,12 @@ use std::path::Path;
 
 /// Targets outside `strategies/` that name no eframe type, and so must NOT gate on `ui` — gating
 /// them would make an operator pass `--features ui` to run a headless tool, building the whole GUI
-/// stack to do it.
+/// stack to do it. `polysim-bridge` is the headless renderer of the workstation: the same model, as
+/// protocol lines instead of a window.
 ///
 /// Named one at a time on purpose. The guard below exists so that a new target cannot quietly
 /// re-link eframe everywhere, and any rule shaped like "examples are exempt" would hand that back.
-const NON_UI_TARGETS: [&str; 1] = ["poly-probe"];
+const NON_UI_TARGETS: [&str; 2] = ["poly-probe", "polysim-bridge"];
 
 /// Targets outside `strategies/` that gate on a feature other than `ui`, with the exact
 /// `required-features` value each must declare. Every other non-strategy target names eframe.

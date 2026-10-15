@@ -6,6 +6,7 @@ use eframe::egui;
 
 use crate::config::ExecutionMode;
 
+use super::text::{self, Tone};
 use super::theme::{self, DARK, METRICS};
 
 const EXECUTION_MODE_BADGE_WIDTH: f32 = 60.0;
@@ -19,18 +20,18 @@ pub(crate) fn paint_execution_mode_badge(
         egui::pos2(strip.right() - EXECUTION_MODE_BADGE_WIDTH, strip.top()),
         egui::pos2(strip.right(), strip.bottom()),
     );
-    let (fill, text) = match mode {
-        None | Some(ExecutionMode::Off) => (DARK.border, DARK.text_primary),
-        Some(ExecutionMode::Sim) => (DARK.warning, DARK.canvas),
-        Some(ExecutionMode::Live) => (DARK.negative, DARK.canvas),
+    let (badge, tone) = text::execution_badge(mode);
+    let (fill, text_color) = match tone {
+        Tone::Text => (DARK.border, DARK.text_primary),
+        other => (DARK.tone(other), DARK.canvas),
     };
     painter.rect_filled(rect, 0.0, fill);
     painter.text(
         egui::pos2(rect.center().x, theme::crisp(painter, rect.center().y)),
         egui::Align2::CENTER_CENTER,
-        ExecutionMode::badge(mode),
+        badge,
         egui::FontId::proportional(METRICS.segment_font),
-        text,
+        text_color,
     );
 }
 

@@ -172,6 +172,20 @@ impl ChartModel {
             .flat_map(|chart| chart.fills.iter_oldest_first())
     }
 
+    /// Buckets ever pushed for the instrument. A rotation rebuilds the ring, so it restarts at zero.
+    pub(crate) fn buckets_appended(&self, instrument: InstrumentId) -> u64 {
+        self.charts
+            .get(instrument.0 as usize)
+            .map_or(0, |chart| chart.buckets.appended())
+    }
+
+    /// Fills ever pushed for the instrument. A rotation rebuilds the ring, so it restarts at zero.
+    pub(crate) fn fills_appended(&self, instrument: InstrumentId) -> u64 {
+        self.charts
+            .get(instrument.0 as usize)
+            .map_or(0, |chart| chart.fills.appended())
+    }
+
     pub fn capacity(&self) -> usize {
         self.bucket_capacity
     }

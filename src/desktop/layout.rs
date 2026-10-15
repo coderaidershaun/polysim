@@ -4,20 +4,19 @@
 
 use eframe::egui;
 
-use crate::ids::{InstrumentId, Side};
-use crate::time::DurationUs;
+use crate::ids::Side;
 
 use super::chart_stack::{self, ChartStackFrame};
 use super::chart_view::ChartMode;
 use super::controls;
 use super::dom::{self, DomFrame};
-use super::dom_view::{
-    DomGrouping, DomOverlay, DomUnit, FeedStatus, MAX_ROWS_PER_SIDE, MIN_ROWS_PER_SIDE,
-};
+use super::dom_view::{DomOverlay, DomUnit, FeedStatus, MAX_ROWS_PER_SIDE, MIN_ROWS_PER_SIDE};
 use super::format;
 use super::latency::{self, LatencyFrame};
 use super::model::UiModel;
 use super::monitor::{self, MonitorFrame, MonitorUiState};
+use super::monitor_view::instrument_names;
+use super::text::{grouping_label, grouping_table};
 use super::theme::{self, DARK, METRICS};
 
 const CHART_MODES: [(ChartMode, &str); 2] =
@@ -31,36 +30,6 @@ const CHART_MODE_WIDTH: f32 = 112.0;
 const DOM_UNIT_WIDTH: f32 = 96.0;
 const DOM_GROUPING_WIDTH: f32 = 88.0;
 const DOM_LEVELS_WIDTH: f32 = 128.0;
-
-/// The groupings offered per unit, in dropdown order: tick multiples here, fractions of the mid
-/// in [`BPS_GROUPINGS`].
-const TICK_GROUPINGS: [(DomGrouping, &str); 7] = [
-    (DomGrouping::Ticks { per_bucket: 1 }, "x1"),
-    (DomGrouping::Ticks { per_bucket: 2 }, "x2"),
-    (DomGrouping::Ticks { per_bucket: 5 }, "x5"),
-    (DomGrouping::Ticks { per_bucket: 10 }, "x10"),
-    (DomGrouping::Ticks { per_bucket: 25 }, "x25"),
-    (DomGrouping::Ticks { per_bucket: 50 }, "x50"),
-    (DomGrouping::Ticks { per_bucket: 100 }, "x100"),
-];
-
-const BPS_GROUPINGS: [(DomGrouping, &str); 8] = [
-    (bps(1, 100), "0.01 bp"),
-    (bps(1, 20), "0.05 bp"),
-    (bps(1, 10), "0.1 bp"),
-    (bps(1, 4), "0.25 bp"),
-    (bps(1, 2), "0.5 bp"),
-    (bps(1, 1), "1 bp"),
-    (bps(2, 1), "2 bp"),
-    (bps(5, 1), "5 bp"),
-];
-
-const fn bps(numerator: i64, denominator: i64) -> DomGrouping {
-    DomGrouping::Bps {
-        numerator,
-        denominator,
-    }
-}
 
 struct ShellRects {
     left: egui::Rect,
@@ -311,29 +280,8 @@ fn paint_monitor(
     model: &UiModel,
     monitor_state: &mut MonitorUiState,
 ) {
-    let selected = model.selected();
-    let catalog = model.catalog();
-    let scales = model.instrument_scales();
-
-    let feature_names: &[Box<str>] = catalog.map_or(&[], |catalog| &catalog.feature_names);
-    let instrument_names: Vec<Box<str>> = catalog.map_or_else(Vec::new, |catalog| {
-        catalog
-            .instruments
-            .iter()
-            .map(|instrument| instrument.display.clone())
-            .collect()
-    });
-
-    let frame = MonitorFrame {
-        model,
-        instrument: selected,
-        tick: scales.tick,
-        qty_scale: scales.qty_scale,
-        qty_decimals: scales.qty_decimals,
-        dom_unit: model.dom_unit(),
-        feature_names,
-        instrument_names: &instrument_names,
-    };
+    let instrument_names = instrument_names(model);
+    let frame = MonitorFrame::for_selected(model, &instrument_names);
     monitor::paint(ui, rect, &frame, monitor_state);
 }
 
@@ -352,7 +300,7 @@ fn paint_dom(ui: &mut egui::Ui, rect: egui::Rect, model: &mut UiModel, feed: Fee
         .is_quote_live(selected)
         .then(|| model.quote(selected).map(|(quote, _)| quote))
         .flatten();
-    let stale_age = book_staleness(model, selected);
+    let stale_age = model.book_staleness(selected);
     let feed = match (feed, stale_age) {
         (FeedStatus::Live, Some(_)) => FeedStatus::Stale,
         (feed, _) => feed,
@@ -448,28 +396,4 @@ fn paint_grouping_dropdown(ui: &mut egui::Ui, rect: egui::Rect, model: &mut UiMo
     if chosen != current {
         model.set_dom_grouping(chosen);
     }
-}
-
-fn grouping_table(unit: DomUnit) -> &'static [(DomGrouping, &'static str)] {
-    match unit {
-        DomUnit::Ticks => &TICK_GROUPINGS,
-        DomUnit::Bps => &BPS_GROUPINGS,
-    }
-}
-
-fn grouping_label(grouping: DomGrouping) -> &'static str {
-    grouping_table(grouping.unit())
-        .iter()
-        .find(|(candidate, _)| *candidate == grouping)
-        .map_or(format::MISSING, |(_, label)| *label)
-}
-
-/// How far behind the ladder is, once that is far enough to say so. Both sides of the subtraction
-/// are the ENGINE's clock: the workstation is a separate process reached over UDP at an arbitrary
-/// address, and reading its own clock here would let a few seconds of skew between two machines
-/// paint a frozen ladder as a live one — the exact reading this badge exists to prevent.
-fn book_staleness(model: &UiModel, instrument: InstrumentId) -> Option<DurationUs> {
-    model
-        .book_lag(instrument)
-        .filter(|lag| *lag > theme::DOM_STALE_THRESHOLD)
 }

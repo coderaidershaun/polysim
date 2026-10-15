@@ -4,36 +4,16 @@
 
 use eframe::egui;
 
-use crate::runtime::ExitReport;
-
+use super::text::ScreenText;
 use super::theme::{DARK, METRICS};
 
-pub(crate) fn starting(ui: &mut egui::Ui) {
+pub(crate) fn paint(ui: &mut egui::Ui, text: &ScreenText<'_>) {
     centered(
         ui,
-        "STARTING",
-        DARK.text_primary,
-        "waiting for engine",
-        DARK.text_secondary,
-    );
-}
-
-pub(crate) fn draining(ui: &mut egui::Ui, reason: &str) {
-    centered(ui, "DRAINING", DARK.warning, reason, DARK.text_secondary);
-}
-
-pub(crate) fn stopped(ui: &mut egui::Ui, report: &ExitReport) {
-    let (title, color) = if report.graceful {
-        ("STOPPED - graceful", DARK.positive)
-    } else {
-        ("STOPPED - fatal", DARK.invalid)
-    };
-    centered(
-        ui,
-        title,
-        color,
-        report.reason.as_ref(),
-        DARK.text_secondary,
+        text.title,
+        DARK.tone(text.title_tone),
+        text.detail,
+        DARK.tone(text.detail_tone),
     );
 }
 

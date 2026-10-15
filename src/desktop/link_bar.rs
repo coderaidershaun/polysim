@@ -4,10 +4,10 @@
 
 use eframe::egui;
 
-use crate::link::{RunPhase, RunState};
+use crate::link::RunState;
 
-use super::format::MISSING;
-use super::link_model::{ConnectionState, ControlVerdict, LinkStatus};
+use super::link_model::LinkStatus;
+use super::text;
 use super::theme::{self, DARK, METRICS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -46,53 +46,36 @@ pub(crate) fn paint(
         return LinkAction::None;
     };
 
+    let chips = text::link_chips(status);
     let mut cursor = rect.left() + METRICS.space_3;
     let middle = rect.center().y;
-    let peer_width = chip(
-        &painter,
-        cursor,
-        middle,
-        &peer_label(status),
-        DARK.text_primary,
-    );
-    let peer_hit = egui::Rect::from_min_max(
-        egui::pos2(cursor - CHIP_PAD, rect.top() + 2.0),
-        egui::pos2(cursor + peer_width + CHIP_PAD, rect.bottom() - 2.0),
-    );
-    cursor += peer_width + METRICS.space_3;
-
-    let (connection, connection_color) = connection_label(status.connection);
-    cursor += chip(&painter, cursor, middle, connection, connection_color) + METRICS.space_3;
-
-    if let Some(phase) = status.phase {
-        let (label, color) = phase_label(phase);
-        cursor += chip(&painter, cursor, middle, label, color) + METRICS.space_3;
+    let mut peer_hit = egui::Rect::NOTHING;
+    for (index, (label, tone)) in chips.iter().enumerate() {
+        let width = chip(&painter, cursor, middle, label, DARK.tone(*tone));
+        if index == 0 {
+            peer_hit = egui::Rect::from_min_max(
+                egui::pos2(cursor - CHIP_PAD, rect.top() + 2.0),
+                egui::pos2(cursor + width + CHIP_PAD, rect.bottom() - 2.0),
+            );
+        }
+        cursor += width + METRICS.space_3;
     }
-
-    cursor += chip(
-        &painter,
-        cursor,
-        middle,
-        &run_label(status),
-        run_color(status),
-    ) + METRICS.space_3;
-    chip(
-        &painter,
-        cursor,
-        middle,
-        &control_label(status),
-        control_color(status),
-    );
 
     let action = paint_stop_start(ui, rect, status);
     if action != LinkAction::None {
         return action;
     }
-    paint_peer_picker(ui, peer_hit, status)
+    let peer = chips.first().map_or("", |(label, _)| label.as_str());
+    paint_peer_picker(ui, peer_hit, status, peer)
 }
 
-fn paint_peer_picker(ui: &mut egui::Ui, hit: egui::Rect, status: &LinkStatus) -> LinkAction {
-    if status.peer_count < 2 {
+fn paint_peer_picker(
+    ui: &mut egui::Ui,
+    hit: egui::Rect,
+    status: &LinkStatus,
+    label: &str,
+) -> LinkAction {
+    if !text::is_peer_clickable(status) {
         return LinkAction::None;
     }
     let response = ui
@@ -111,7 +94,7 @@ fn paint_peer_picker(ui: &mut egui::Ui, hit: egui::Rect, status: &LinkStatus) ->
             &painter,
             hit.left() + CHIP_PAD,
             hit.center().y,
-            &peer_label(status),
+            label,
             DARK.text_primary,
         );
     }
@@ -124,10 +107,7 @@ fn paint_stop_start(ui: &mut egui::Ui, rect: egui::Rect, status: &LinkStatus) ->
         egui::pos2(rect.right() - BUTTON_WIDTH, rect.top()),
         rect.max,
     );
-    let label = match target {
-        RunState::Idle => "STOP",
-        RunState::Running => "START",
-    };
+    let label = text::button_label(target);
     let response = ui.interact(
         button,
         egui::Id::new("polysim-link-assert"),
@@ -152,81 +132,6 @@ fn paint_stop_start(ui: &mut egui::Ui, rect: egui::Rect, status: &LinkStatus) ->
         DARK.text_primary,
     );
     if response.clicked() { LinkAction::Assert(target) } else { LinkAction::None }
-}
-
-fn peer_label(status: &LinkStatus) -> String {
-    if status.peer_count < 2 {
-        return format!("engine {}", status.peer);
-    }
-    format!(
-        "engine {} [{}/{}]",
-        status.peer,
-        status.peer_index + 1,
-        status.peer_count
-    )
-}
-
-fn connection_label(connection: ConnectionState) -> (&'static str, egui::Color32) {
-    match connection {
-        ConnectionState::Connecting => ("CONNECTING", DARK.text_secondary),
-        ConnectionState::Live => ("LIVE", DARK.positive),
-        ConnectionState::Stale => ("STALE", DARK.stale),
-    }
-}
-
-fn phase_label(phase: RunPhase) -> (&'static str, egui::Color32) {
-    match phase {
-        RunPhase::Starting => ("starting", DARK.text_secondary),
-        RunPhase::Ready => ("ready", DARK.text_secondary),
-        RunPhase::Draining => ("draining", DARK.warning),
-        RunPhase::Stopped => ("stopped", DARK.invalid),
-    }
-}
-
-fn run_label(status: &LinkStatus) -> String {
-    match status.reported_state {
-        Some(RunState::Running) => "run RUNNING".to_owned(),
-        Some(RunState::Idle) => "run IDLE".to_owned(),
-        None => format!("run {MISSING}"),
-    }
-}
-
-fn run_color(status: &LinkStatus) -> egui::Color32 {
-    match status.reported_state {
-        Some(RunState::Running) => DARK.positive,
-        Some(RunState::Idle) => DARK.warning,
-        None => DARK.text_secondary,
-    }
-}
-
-fn control_label(status: &LinkStatus) -> String {
-    match (status.control, status.asserted_state) {
-        (ControlVerdict::NoOpinion, _) => "control none".to_owned(),
-        (ControlVerdict::Applied, Some(state)) => format!("control applied {}", state_word(state)),
-        (ControlVerdict::Pending, Some(state)) => {
-            format!("control asserting {}", state_word(state))
-        }
-        (ControlVerdict::Lost { holder_epoch }, _) => {
-            format!("control LOST to epoch {holder_epoch}")
-        }
-        (_, None) => "control none".to_owned(),
-    }
-}
-
-fn control_color(status: &LinkStatus) -> egui::Color32 {
-    match status.control {
-        ControlVerdict::NoOpinion => DARK.text_secondary,
-        ControlVerdict::Pending => DARK.warning,
-        ControlVerdict::Applied => DARK.positive,
-        ControlVerdict::Lost { .. } => DARK.invalid,
-    }
-}
-
-fn state_word(state: RunState) -> &'static str {
-    match state {
-        RunState::Running => "RUNNING",
-        RunState::Idle => "IDLE",
-    }
 }
 
 fn chip(painter: &egui::Painter, left: f32, middle: f32, text: &str, color: egui::Color32) -> f32 {

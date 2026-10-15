@@ -15,6 +15,7 @@ use super::format;
 use super::position_chart::{self, PositionFrame};
 use super::position_chart_model::PositionModel;
 use super::position_chart_view::RiskSeries;
+use super::text;
 use super::theme::{self, DARK, METRICS};
 
 /// The risk selector's segments, in strip order. Exposure leads because it is the default series.
@@ -136,14 +137,6 @@ fn paint_latest_value(painter: &egui::Painter, rect: egui::Rect, frame: &ChartSt
         egui::Align2::RIGHT_CENTER,
         &readout,
         egui::FontId::monospace(METRICS.chart_axis_font),
-        sign_color(value),
+        DARK.tone(text::sign_tone(value)),
     );
-}
-
-fn sign_color(value: i64) -> egui::Color32 {
-    match value {
-        value if value > 0 => DARK.positive,
-        value if value < 0 => DARK.negative,
-        _ => DARK.text_secondary,
-    }
 }

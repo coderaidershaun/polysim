@@ -26,6 +26,9 @@ pub struct InstrumentScales {
     pub qty_decimals: usize,
 }
 
+/// How far a book may trail the engine's own clock before the ladder reads as stale.
+const BOOK_STALE_AFTER: DurationUs = DurationUs::from_millis(2_000);
+
 /// Per-run state (per-instrument vectors grow on demand).
 pub struct UiModel {
     catalog: Option<UiCatalog>,
@@ -210,6 +213,15 @@ impl UiModel {
         let book = self.book(instrument)?;
         let freshest = self.freshest_feed_ts?;
         Some(freshest.diff(book.event_ts_us).max(DurationUs::ZERO))
+    }
+
+    /// How far behind the ladder is, once that is far enough to say so. Both sides of the subtraction
+    /// are the ENGINE's clock: the workstation is a separate process reached over UDP at an arbitrary
+    /// address, and reading its own clock here would let a few seconds of skew between two machines
+    /// paint a frozen ladder as a live one — the exact reading this badge exists to prevent.
+    pub(crate) fn book_staleness(&self, instrument: InstrumentId) -> Option<DurationUs> {
+        self.book_lag(instrument)
+            .filter(|lag| *lag > BOOK_STALE_AFTER)
     }
 
     pub fn selected(&self) -> InstrumentId {

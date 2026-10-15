@@ -23,6 +23,10 @@ name = "polysim-mcp"
 path = "src/bin/polysim-mcp.rs"
 required-features = ["mcp"]
 
+[[bin]]
+name = "polysim-bridge"
+path = "src/bin/polysim-bridge.rs"
+
 [[example]]
 name = "dom-fixture"
 path = "tools/dom-fixture/main.rs"

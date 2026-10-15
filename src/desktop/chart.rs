@@ -10,6 +10,7 @@ use crate::ids::{InstrumentId, Price, Side};
 use super::chart_model::{ChartBucket, ChartModel};
 use super::chart_view::{self, ChartBounds, ChartDomain, ChartMode};
 use super::format;
+use super::text::{self, AxisLabels};
 use super::theme::{self, DARK, METRICS};
 
 const AXIS_LABEL_PITCH: f32 = 2.0;
@@ -84,14 +85,14 @@ fn paint_plot(
     rect: egui::Rect,
     frame: &ChartFrame<'_>,
 ) -> Option<PlotGeometry> {
-    if frame.tick.0 <= 0 {
-        paint_note(painter, rect, "no tick grid for this instrument");
+    let plot = project(rect, frame);
+    let domain = plot.map(|plot| plot.domain);
+    let bounds = plot.map(|plot| plot.bounds);
+    if let Some(note) = text::mid_note(frame.tick, domain, bounds) {
+        paint_note(painter, rect, note);
         return None;
     }
-    let Some(plot) = project(rect, frame) else {
-        paint_note(painter, rect, "no mid samples yet");
-        return None;
-    };
+    let plot = plot?;
     match frame.mode {
         ChartMode::Line => paint_line(painter, &plot, frame),
         ChartMode::Candles => paint_candles(painter, &plot, frame),
@@ -118,12 +119,6 @@ fn project(rect: egui::Rect, frame: &ChartFrame<'_>) -> Option<PlotGeometry> {
     })
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum AxisLabels {
-    VenueMid(Price),
-    QuoteAmount,
-}
-
 pub(crate) fn paint_axis_labels(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -136,22 +131,15 @@ pub(crate) fn paint_axis_labels(
         font * AXIS_LABEL_PITCH,
         font * MIN_LEGIBLE_PITCH,
     );
-    let ticks = format::axis_ticks(bounds.low, bounds.high, ceiling);
-    let decimals = format::quote_axis_decimals(ticks.step());
     let font = egui::FontId::monospace(METRICS.chart_axis_font);
     let stroke = theme::hairline(painter, DARK.grid);
     let left = rect.right() + METRICS.chart_pad;
-    let mut label = String::new();
-    for value in ticks {
+    for (value, label) in text::axis_labels(bounds, ceiling, labels) {
         let y = egui::lerp(
             rect.bottom()..=rect.top(),
             chart_view::y_fraction(value, bounds),
         );
         painter.hline(rect.right()..=left, theme::crisp(painter, y), stroke);
-        match labels {
-            AxisLabels::VenueMid(tick) => format::write_venue_mid(&mut label, value, tick),
-            AxisLabels::QuoteAmount => format::write_quote_amount(&mut label, value, decimals),
-        }
         painter.text(
             egui::pos2(left, y),
             egui::Align2::LEFT_CENTER,

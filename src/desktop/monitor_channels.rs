@@ -4,8 +4,9 @@ use eframe::egui;
 
 use super::monitor::{Channel, MonitorFrame, MonitorUiState, RowList, paint_row_list};
 use super::monitor_model::{FillRow, OrderRow, SystemRow, TradeRow};
-use super::monitor_rows::{Cell, ChannelRow, paint_cells, record_row};
+use super::monitor_rows::paint_cells;
 use super::monitor_view::unseen;
+use super::text::{Cell, ChannelRow, record_row};
 use super::theme::{self, DARK, METRICS};
 
 /// Scroll offset threshold for "pinned to newest". Hair above zero absorbs sub-pixel jitter.

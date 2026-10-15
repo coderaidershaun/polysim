@@ -75,6 +75,13 @@ impl PositionModel {
             .copied()
     }
 
+    /// Buckets ever pushed for the instrument. A rotation rebuilds the ring, so it restarts at zero.
+    pub(crate) fn buckets_appended(&self, instrument: InstrumentId) -> u64 {
+        self.series
+            .get(instrument.0 as usize)
+            .map_or(0, BoundedHistory::appended)
+    }
+
     /// Buckets per instrument (5-min window, same cadence as mid chart for shared domain).
     pub fn capacity(&self) -> usize {
         self.bucket_capacity

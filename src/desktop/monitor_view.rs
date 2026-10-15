@@ -1,11 +1,13 @@
-//! Pure projections: quote summary -> tick distances, feature freshness, channel histories newest-first.
+//! Pure projections from the model to what the monitor shows, free of egui so the window and the
+//! bridge read the same values: quote distances, feature freshness, channel histories and names.
 
-use super::dom_view::{delta_from_mid, snapshot_mid, tick_index};
+use super::dom_view::{DomUnit, delta_from_mid, snapshot_mid, tick_index};
 use super::exec_model::{BalanceCell, OrderStatus, RejectCell};
 use super::model::UiModel;
 use super::monitor_model::FeatureCell;
 use crate::hot::exec::ExecHalt;
 use crate::ids::{FIXED_SCALE, InstrumentId, Price, Qty, Side};
+use crate::labelled_enum::labelled_enum;
 use crate::msg::persist::FeatureId;
 use crate::time::{DurationUs, TsUs};
 
@@ -229,4 +231,83 @@ fn feature_row(
 
 fn spins(spin_interval: DurationUs, count: i64) -> i64 {
     spin_interval.micros().saturating_mul(count)
+}
+
+labelled_enum! {
+    /// Monitor channels in tab order; System is the tab a fresh session opens on.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Channel {
+        System = "System",
+        Orders = "Orders",
+        PubTrades = "Pub trades",
+        TradeFills = "Trade fills",
+    }
+    /// The tab's label. The two-word names keep their space so they read at a glance.
+    pub fn label;
+    /// Every channel in tab order, which the tab strip and the channel cycler walk.
+    pub const ALL;
+}
+
+impl Channel {
+    pub(crate) fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// What the monitor reads for one frame. The names come as slices, so the monitor never depends on
+/// the catalog's own types.
+pub struct MonitorFrame<'a> {
+    pub model: &'a UiModel,
+    pub instrument: InstrumentId,
+    pub tick: Price,
+    pub qty_scale: i64,
+    pub qty_decimals: usize,
+    /// The DOM's unit selector, which the summary deltas follow.
+    pub dom_unit: DomUnit,
+    pub feature_names: &'a [Box<str>],
+    pub instrument_names: &'a [Box<str>],
+}
+
+impl<'a> MonitorFrame<'a> {
+    /// The frame for the selected instrument, as the window and the bridge both read the monitor.
+    pub(crate) fn for_selected(model: &'a UiModel, instrument_names: &'a [Box<str>]) -> Self {
+        let scales = model.instrument_scales();
+        Self {
+            model,
+            instrument: model.selected(),
+            tick: scales.tick,
+            qty_scale: scales.qty_scale,
+            qty_decimals: scales.qty_decimals,
+            dom_unit: model.dom_unit(),
+            feature_names: model
+                .catalog()
+                .map_or(&[], |catalog| &catalog.feature_names),
+            instrument_names,
+        }
+    }
+
+    /// The catalog's display name, or `i<id>` for an id the catalog does not name. A named
+    /// instrument costs no allocation.
+    pub(crate) fn instrument_label(&self, id: InstrumentId, scratch: &mut String) {
+        scratch.clear();
+        match self.instrument_names.get(id.0 as usize) {
+            Some(name) => scratch.push_str(name),
+            None => {
+                scratch.push('i');
+                scratch.push_str(&id.0.to_string());
+            }
+        }
+    }
+}
+
+/// The catalog's display names in id order. The catalog keeps each inside its instrument record, so
+/// a frame cannot borrow them as one slice.
+pub(crate) fn instrument_names(model: &UiModel) -> Vec<Box<str>> {
+    model.catalog().map_or_else(Vec::new, |catalog| {
+        catalog
+            .instruments
+            .iter()
+            .map(|instrument| instrument.display.clone())
+            .collect()
+    })
 }

@@ -51,6 +51,53 @@ docker buildx build \
 
 `polysim-mcp` gives an agent four tools: `list_strategies`, `start_strategy`, `stop_strategy` and `set_execution_mode`. It starts each engine as a child process from its prebuilt release binary, and stops every engine it started when it exits. The `.mcp.json` at the repo root registers it for Claude Code.
 
+## Workstation bridge
+
+`polysim-bridge` is the workstation without the window. It attaches to one running trading engine over the same UDP link `polysim-ui` uses, folds the feed into the same model, and writes what the window would show as JSON lines on stdout, so a web page can paint it. It reads the page's choices and link commands as JSON lines on stdin. It builds without the `ui` feature and links no graphics stack. Closing stdin ends it and stops nothing on the engine.
+
+```shell
+cargo run --release --bin polysim-bridge -- --strategy strat-micro-recorder --link 127.0.0.1:9310
+# --tick-ms <1..1000> sets how often changed sections are written (default 16); --token and a repeated --link work as in polysim-ui
+```
+
+Stdout carries protocol lines and nothing else. Usage and errors go to stderr, and the log goes to stderr in debug builds and a file in release builds.
+
+**Lines out**, one JSON object each, `kind` first, in this order within one pass of the bridge:
+
+| kind | when | key fields |
+| --- | --- | --- |
+| `hello` | once, first | `protocol`, `bridge`, `polysim`, `tickMs`, `groupings` (the ladder's tick and bps groupings with labels), `levels` (`min`, `max`, `default`), `channels` (label and empty note for system, orders, trades, fills) |
+| `link` | on change, never before the first link status | `peer`, `peerIndex`, `peerCount`, `session`, `chips` (`text`, `tone`), `peerClickable`, `button` (`label`, `assert`), `connection` |
+| `lifecycle` | on change; back to `starting` when the session changes | `session`, `screen`, `title`, `titleTone`, `detail`, `detailTone` (a `live` screen has empty `title` and `detail`) |
+| `catalog` | once per session, and again after `resync` | `session`, `strategyId`, `title`, `badge`, `spinIntervalUs`, `instruments` (`id`, `display`, `base`, `quote`, `tick`), `featureNames` |
+| `tick` | when a section changed, never before the session's catalog | `session`, `seq`, then any of `view`, `ladder`, `summary`, `account`, `features`, `channels`, `latency`, `chart`, `risk`, `gaps`, in that order |
+| `bye` | last | `reason`: `stdin closed` or `stdin failed` |
+
+Display numbers are strings the bridge has already formatted (`"118000.005"`, `"0.05000"`); geometry values (half-ticks, tick indexes, bucket indexes) are integers. Colours are tone names (`text`, `text2`, `bid`, `ask`, `sellFill`, `positive`, `negative`, `warning`, `invalid`, `stale`, `selected`) that the page maps to its own palette. A value shown as `null` is sent as `null`; only whole tick sections are left out when unchanged. `ladder`, `summary`, `account`, `features`, `latency` and `gaps` are whole snapshots. `chart` and `risk` carry only the buckets (and fills) the page has not seen, plus the newest bucket again while it is still growing. Each `channels` entry carries `appended` and the rows added since the last tick, newest first, with `full: true` when the page should replace its ring instead of prepending. `generation` (on `chart` and `risk`) bumps on a session change, an instrument change and `resync`; the tick that carries a new generation carries every section whole. `seq` counts tick lines and never resets, so a jump means the page missed one and should send `resync`.
+
+Three things this bridge adds to that shape: `hello.channels`, the `full` flag on each `channels` entry, and `catalog.instruments[].tick` (the tick size as a decimal string, or `null`). `account.gate` is `null` until the first execution frame, a channel row's `detail` is the full record the window shows on hover, and `chart.axis` and `risk.axis` use ceilings of 9 and 5 ticks until the page has sent `chart_ticks`.
+
+**Commands in**, one JSON object per line; a line the bridge cannot use is logged and changes nothing:
+
+```text
+{"cmd":"select","instrument":0}
+{"cmd":"chart_mode","mode":"line|candles"}
+{"cmd":"dom_unit","unit":"ticks|bps"}
+{"cmd":"dom_grouping","unit":"bps","numerator":1,"denominator":20}
+{"cmd":"dom_grouping","unit":"ticks","perBucket":5}
+{"cmd":"dom_levels","levels":24}
+{"cmd":"dom_fit","rows":18}
+{"cmd":"chart_ticks","mid":9,"risk":5}
+{"cmd":"risk_series","series":"exposure|pnl"}
+{"cmd":"assert","state":"running|idle"}
+{"cmd":"next_peer"}
+{"cmd":"resync"}
+{"cmd":"pause"}
+{"cmd":"resume"}
+```
+
+`select`, `chart_mode`, `dom_unit`, `dom_grouping`, `dom_levels` and `risk_series` change what is shown and never reach the engine; `dom_fit` and `chart_ticks` say how much the page has room for; `assert` and `next_peer` are the link bar's controls; `pause` stops tick lines (link and lifecycle lines still flow) and `resume` implies `resync`.
+
 ## Post Trade Analysis
 
 Post-trade analysis lives in [`strategies/post-trade.ipynb`](strategies/post-trade.ipynb), reading the parquet a run records. The Python environment is managed by [uv](https://docs.astral.sh/uv/) and lives in `strategies/` beside its `pyproject.toml`:

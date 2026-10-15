@@ -380,6 +380,16 @@ place where engine state lives.
 - [ ] Server exit stops every engine it started: SIGTERM first, SIGKILL only past one shared
   deadline.
 
+### Amended 2026-10-14: the `polysim-bridge` binary
+
+WHY: Jet paints the workstation in a web page. The bridge keeps the link and the egui-free model in
+Rust and hands the page JSON lines, so no second model can drift from the one the egui window folds.
+
+- [ ] `polysim-bridge` declares no required-features and links no eframe. It only composes.
+- [ ] Its stdout carries protocol JSON lines and nothing else. Usage text and errors go to stderr.
+  Diagnostics go through the bespoke log (§7): stderr in debug, file in release.
+- [ ] The gate stays the two configurations of §14; the bridge builds in both.
+
 ## 9. Naming & API Ergonomics
 
 - [ ] rex-code-ergonomics binds.
@@ -458,7 +468,7 @@ WHY: agents write comments at volume, and a writer cannot proof its own tone.
 | ------------------------------------------------------------ | -------------------------------------------------- | -------------------------------- |
 | `tokio`                                                      | ratified. See note.                                | async actor runtime              |
 | `rtrb`                                                       | ratified                                           | SPSC rings                       |
-| `serde` + `serde_json`                                       | ratified                                           | exchange payload deserialization |
+| `serde` + `serde_json`                                       | ratified                                           | exchange payload deserialization + edge DTO serialisation |
 | `thiserror`                                                  | ratified                                           | library error types              |
 | `anyhow`                                                     | ratified (binaries only)                           | binary error context             |
 | `parquet` (`arrow`, `zstd`) + `arrow-array` + `arrow-schema` | ratified 2026-07-18. See note.                     | persistence                      |
@@ -529,7 +539,8 @@ Each note = justification + limits of that crate's row. Same force as the row.
   - `optional = true` behind feature `ui`.
     - Amended 2026-07-25. WHY: a headless trading engine deployed in another region must not need
       wgpu/winit/X11/wayland merely to BUILD.
-    - `desktop/` is `#[cfg(feature = "ui")]`.
+    - `desktop/` is `#[cfg(feature = "ui")]`. Amended 2026-10-14: only its painters and window; see
+      the amendment below.
     - The `polysim-ui` bin + the `dom-fixture` example carry `required-features = ["ui"]`.
     - The §14 gate consequence binds.
 - `ring`
@@ -586,6 +597,28 @@ Each note = justification + limits of that crate's row. Same force as the row.
     Linux-only. Thus a macOS build or an mcp-only build compiles it for the first time. This is
     not the `ring` precedent.
   - `optional = true` behind feature `mcp`.
+
+### Amended 2026-10-14: the egui-free half of `desktop/` compiles in every build
+
+WHY: the workstation bridge renders the same model headless. The model, view, text and link files
+name no egui type, so gating them on `ui` would make a headless renderer build the GUI stack it never
+draws with.
+
+- [ ] Only files that name an egui/eframe type are `#[cfg(feature = "ui")]`: the painters, the window
+  and `run_desktop`.
+- [ ] The words and colour roles the window shows live in the egui-free `desktop/text/`, and the
+  painters read them there. Thus the window and the bridge cannot say different things.
+- [ ] Rule intact: a build without `ui` links no eframe, wgpu or winit.
+
+### Amended 2026-10-14: serde serialises edge DTOs
+
+WHY: the bridge writes its protocol lines through `serde_json`. A hand-written JSON writer would be a
+second serializer with its own escaping bugs, for a crate already in the tree.
+
+- [ ] The `serde` + `serde_json` role widens from exchange payload deserialization to edge DTO
+  serialisation: venue request bodies, the exposure file, the bridge protocol lines.
+- [ ] No new crate and no new feature: `derive` + `std` already cover it.
+- [ ] DTOs stay at the edge. A hot-path type never derives `Serialize`.
 
 ## 12. Testing
 
@@ -653,6 +686,19 @@ in ONE place.
     its already-exported peers imply.
   - `hot::quant::optimise`: every sibling calculator module was `pub` already. It was the lone
     exception.
+
+### Amended 2026-10-14: the bridge wire format is a cross-process pin
+
+WHY: Jet's page reads the bridge's JSON lines from another process and another repository. A
+renamed or reshaped field breaks the page silently, which is the same failure the link wire format
+amendment guards.
+
+- [ ] Fitness gains the bridge wire format: a fixed scene encodes to a checked-in snapshot, and the
+  encoder's change and append rules are pinned through its public API.
+- [ ] The process-level check (spawn the bin, read stdout to `bye`) opens a socket, so it lives in
+  `tests/integration/`, `#[ignore]`d like the rest of that suite.
+- [ ] Ruled on merit, not for a test: the bridge's encoder and command types are `pub`, because the
+  wire they produce and read is a promise to another program.
 
 ## 13. Performance
 

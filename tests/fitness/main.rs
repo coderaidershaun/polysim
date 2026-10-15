@@ -14,23 +14,15 @@ mod binance_parse;
 mod binance_rest_plan;
 mod binance_sign;
 mod book_reconstruction;
+mod bridge;
 mod cargo_bins;
-#[cfg(feature = "ui")]
 mod chart_axis;
-/// `chart_projection`, `dom_projection` and `monitor_projection` drive `polysim::desktop`, which
-/// is itself behind feature `ui`. `ui_feed` is NOT gated — it reads the framework-free
-/// `msg::ui` seam the hot path emits into, which the headless engine still owns.
-#[cfg(feature = "ui")]
 mod chart_projection;
 mod config_guards;
-#[cfg(feature = "ui")]
 mod desktop_format;
-#[cfg(feature = "ui")]
 mod desktop_support;
 mod dispatch_replay;
-#[cfg(feature = "ui")]
 mod dom_grouping;
-#[cfg(feature = "ui")]
 mod dom_projection;
 mod e2e_replay;
 mod e2e_scenario;
@@ -62,9 +54,6 @@ mod hawkes_alloc;
 mod ingress_order;
 mod kyles_lambda_alloc;
 mod latency_metrics;
-/// `link_client` is the workstation half of the link and drives `polysim::desktop`, so it gates
-/// with the rest of the UI modules.
-#[cfg(feature = "ui")]
 mod link_client;
 mod link_control;
 mod link_ingress;
@@ -82,6 +71,9 @@ mod mcp_tools;
 /// include point only — a second would mint a distinct `MicroRecorder` type.
 #[path = "../../strategies/strat-micro-recorder/te-binance-spot-btcusdt/strategy.rs"]
 mod micro_strategy;
+/// `monitor_projection` names the `monitor` painter module, which only exists under feature `ui`.
+/// The other desktop suites read the toolkit-free half of `polysim::desktop`, which every build
+/// compiles.
 #[cfg(feature = "ui")]
 mod monitor_projection;
 mod parquet_readback;
@@ -111,7 +103,6 @@ mod polymarket_fixtures;
 mod polymarket_gamma;
 mod polymarket_parse;
 mod position_ledger;
-#[cfg(feature = "ui")]
 mod position_projection;
 /// The quant calculator pins. They live here rather than beside the calculators because `src/`
 /// carries production code only. One module per calculator, named for the concept rather than the

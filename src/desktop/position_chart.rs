@@ -7,10 +7,11 @@ use eframe::egui;
 
 use crate::ids::InstrumentId;
 
-use super::chart::{self, AxisLabels, Plot, paint_note};
+use super::chart::{self, Plot, paint_note};
 use super::chart_view::ChartDomain;
 use super::position_chart_model::{PositionBucket, PositionModel};
 use super::position_chart_view::{self, QuoteBounds, RiskSeries};
+use super::text::{self, AxisLabels};
 use super::theme::{self, DARK, METRICS};
 
 /// Paint input; domain = None when mid chart has no window (this chart's empty state).
@@ -56,16 +57,14 @@ fn paint_plot(
     rect: egui::Rect,
     frame: &PositionFrame<'_>,
 ) -> Option<PositionPlot> {
-    let Some(domain) = frame.domain else {
-        paint_note(painter, rect, "no chart window");
-        return None;
-    };
-    let Some(bounds) =
+    let bounds = frame.domain.and_then(|domain| {
         position_chart_view::bounds(frame.positions, frame.instrument, frame.series, domain)
-    else {
-        paint_note(painter, rect, "no position samples yet");
+    });
+    if let Some(note) = text::risk_note(frame.domain, bounds) {
+        paint_note(painter, rect, note);
         return None;
-    };
+    }
+    let (domain, bounds) = frame.domain.zip(bounds)?;
     let plot = PositionPlot {
         rect,
         domain,

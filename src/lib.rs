@@ -33,14 +33,16 @@ pub mod log;
 pub mod persist;
 
 // assembly
+/// Headless twin of the workstation window: the same attached model, written as protocol lines.
+pub mod bridge;
 pub mod config;
 pub mod registry;
 pub mod runtime;
 pub mod secrets;
 pub mod shutdown;
 
-/// Feature-gated: headless engine never builds wgpu/winit. What `pub` means here is stated inside.
-#[cfg(feature = "ui")]
+/// The painters and the window are behind feature `ui`, so a headless build never links wgpu/winit.
+/// What `pub` means here is stated inside.
 pub mod desktop;
 
 /// Feature-gated, so a headless engine never builds the agent protocol stack.

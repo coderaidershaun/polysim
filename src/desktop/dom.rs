@@ -9,10 +9,11 @@ use crate::msg::ui::UiBookSnapshot;
 use super::dom_overlay;
 use super::dom_view::{
     DomGrouping, DomOverlay, DomRow, DomStatus, DomView, DomViewInput, FeedStatus,
-    MAX_ROWS_PER_SIDE, StrategyCell, build_dom_view, fit_rows, price_for_row,
+    MAX_ROWS_PER_SIDE, StrategyCell, build_dom_view, fit_rows,
 };
 use super::exec_model::OrderStatus;
 use super::format;
+use super::text::{self, Ring};
 use super::theme::{self, DARK, METRICS};
 use crate::ids::Qty;
 use crate::time::DurationUs;
@@ -37,12 +38,7 @@ pub struct DomFrame<'a> {
 
 impl DomFrame<'_> {
     pub(crate) fn write_row_price(&self, buf: &mut String, tick_index: i64) {
-        match price_for_row(self.tick, tick_index) {
-            Some(price) => format::write_venue_price(buf, price, self.price_decimals),
-            None => {
-                format::write_missing(buf);
-            }
-        }
+        text::row_price(buf, self.tick, self.price_decimals, tick_index);
     }
 }
 
@@ -243,7 +239,9 @@ impl LadderPainter<'_> {
 
     fn strategy(&mut self, cell: egui::Rect, row: &DomRow, edge: Edge) {
         let (qty, word, color) = match row.strategy_cell() {
-            Some(StrategyCell::Order { qty, status }) => (qty, status.word(), order_color(status)),
+            Some(StrategyCell::Order { qty, status }) => {
+                (qty, status.word(), DARK.tone(text::order_tone(status)))
+            }
             Some(StrategyCell::Desired { qty }) => (qty, "want", DARK.selected.gamma_multiply(0.6)),
             None => return,
         };
@@ -272,10 +270,7 @@ impl LadderPainter<'_> {
         }
 
         format::write_opt_venue_mid(&mut self.scratch, view.mid_half_ticks, self.frame.tick);
-        let color = match view.mid_half_ticks {
-            Some(_) => DARK.text_primary,
-            None => DARK.invalid,
-        };
+        let color = DARK.tone(text::mid_tone(view.mid_half_ticks));
         let center = separator.center();
         self.painter.text(
             egui::pos2(center.x, theme::crisp(self.painter, center.y)),
@@ -345,31 +340,29 @@ impl Edge {
     }
 }
 
-fn order_color(status: OrderStatus) -> egui::Color32 {
-    match status {
-        OrderStatus::Confirmed => DARK.selected,
-        OrderStatus::InFlight => DARK.warning,
-        OrderStatus::Lost => DARK.invalid,
-    }
-}
-
 fn paint_quote_rings(painter: &egui::Painter, layout: &DomLayout, view: &DomView) {
-    if view.status != DomStatus::Live {
-        return;
-    }
     for (index, row) in view.ask_rows().iter().enumerate() {
-        ring_for(painter, layout, layout.cell(layout.ask_row(index), 1), row);
+        let cell = layout.cell(layout.ask_row(index), 1);
+        ring_for(painter, layout, cell, row, view.status);
     }
     for (index, row) in view.bid_rows().iter().enumerate() {
-        ring_for(painter, layout, layout.cell(layout.bid_row(index), 1), row);
+        let cell = layout.cell(layout.bid_row(index), 1);
+        ring_for(painter, layout, cell, row, view.status);
     }
 }
 
-fn ring_for(painter: &egui::Painter, layout: &DomLayout, cell: egui::Rect, row: &DomRow) {
-    let (width, color) = match row.order_status {
-        Some(OrderStatus::Confirmed) => (2.0, DARK.selected),
-        Some(status) => (1.0, order_color(status)),
-        None if row.is_quoted => (1.0, DARK.selected.gamma_multiply(0.6)),
+fn ring_for(
+    painter: &egui::Painter,
+    layout: &DomLayout,
+    cell: egui::Rect,
+    row: &DomRow,
+    status: DomStatus,
+) {
+    let (width, color) = match text::ring(row, status) {
+        Some(Ring::Confirmed) => (2.0, DARK.selected),
+        Some(Ring::InFlight) => (1.0, DARK.tone(text::order_tone(OrderStatus::InFlight))),
+        Some(Ring::Lost) => (1.0, DARK.tone(text::order_tone(OrderStatus::Lost))),
+        Some(Ring::Desired) => (1.0, DARK.selected.gamma_multiply(0.6)),
         None => return,
     };
     // The ring carries status alone once the tags drop out, so it thins with the row rather than

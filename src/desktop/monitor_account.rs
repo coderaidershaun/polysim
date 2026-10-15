@@ -2,18 +2,16 @@
 
 use eframe::egui;
 
-use crate::hot::exec::{ExecHalt, RejectOrigin};
+use crate::hot::exec::ExecHalt;
 
-use super::format::{self, MISSING};
+use super::format::MISSING;
 use super::monitor::{MonitorFrame, paint_left_ellipsized};
-use super::monitor_view::{AccountView, AssetRole, AssetRowView, SideCountView, account};
+use super::monitor_view::{AccountView, AssetRowView, SideCountView, account};
+use super::text::{
+    self, BALANCE_DECIMALS, VALUE_DECIMALS, account_captions, account_notes, asset_label,
+    write_amount,
+};
 use super::theme::{self, DARK, METRICS};
-
-/// Balance fraction digits: 5 (Binance 0.00001 BTC stepSize) instead of 8 (too noisy).
-const BALANCE_DECIMALS: usize = 5;
-
-/// A notional is money, and money reads at two places whatever precision its asset carries.
-const VALUE_DECIMALS: usize = 2;
 
 /// Fixed row count (header, base, quote, bid/ask counts, status) -> height stable.
 const ROWS: usize = 6;
@@ -122,32 +120,18 @@ fn paint_header(painter: &egui::Painter, grid: &Grid, rect: egui::Rect, view: &A
         DARK.text_secondary,
     );
     let mut note_left = title.right();
-    for (count, noun) in [
-        (view.unknown_asset_balances, "untracked"),
-        (view.rejected_position_frames, "exposure dropped"),
-    ] {
-        if count == 0 {
-            continue;
-        }
+    for (note, tone) in account_notes(view) {
         let note = painter.text(
             egui::pos2(note_left + METRICS.space_2, y),
             egui::Align2::LEFT_CENTER,
-            format!("+{count} {noun}"),
+            note,
             egui::FontId::proportional(METRICS.monitor_micro_font),
-            DARK.text_secondary,
+            DARK.tone(tone),
         );
         note_left = note.right();
     }
 
-    let mut value_caption = String::from("value");
-    if !view.quote.label.is_empty() {
-        value_caption.push(' ');
-        value_caption.push_str(view.quote.label);
-    }
-    for (index, caption) in ["free", "locked", value_caption.as_str()]
-        .into_iter()
-        .enumerate()
-    {
+    for (index, caption) in account_captions(view).iter().enumerate() {
         paint_caption(painter, grid.column(rect, index), caption);
     }
 }
@@ -192,26 +176,6 @@ fn paint_asset(
     // Two places against the balances' five: obviously the same money, obviously a total.
     write_amount(scratch, asset.value, VALUE_DECIMALS);
     paint_number(painter, grid.column(rect, 2), scratch, DARK.text_primary);
-}
-
-/// Catalog asset name, or role if no name. Old engines (no names in catalog) -> label role not index.
-fn asset_label(asset: AssetRowView<'_>) -> &str {
-    if !asset.label.is_empty() {
-        return asset.label;
-    }
-    match asset.role {
-        AssetRole::Base => "BASE",
-        AssetRole::Quote => "QUOTE",
-    }
-}
-
-fn write_amount(scratch: &mut String, mantissa: Option<i64>, decimals: usize) {
-    match mantissa {
-        Some(mantissa) => format::write_quote_amount(scratch, mantissa, decimals),
-        None => {
-            format::write_missing(scratch);
-        }
-    }
 }
 
 fn paint_number(painter: &egui::Painter, cell: egui::Rect, text: &str, color: egui::Color32) {
@@ -304,10 +268,7 @@ fn paint_status(painter: &egui::Painter, grid: &Grid, rect: egui::Rect, view: &A
         egui::FontId::proportional(METRICS.monitor_micro_font),
         DARK.text_secondary,
     );
-    let (text, color) = match view.last_reject {
-        Some(reject) => reject_display(reject.origin),
-        None => (MISSING.to_owned(), DARK.text_secondary),
-    };
+    let (reject, tone) = text::reject_display(view.last_reject.map(|reject| reject.origin));
     let reject_text_rect = egui::Rect::from_min_max(
         grid.column(rect, 0).min,
         egui::pos2(grid.column(rect, 1).right(), rect.bottom()),
@@ -315,9 +276,9 @@ fn paint_status(painter: &egui::Painter, grid: &Grid, rect: egui::Rect, view: &A
     paint_left_ellipsized(
         painter,
         reject_text_rect,
-        &text,
+        &reject,
         egui::FontId::monospace(METRICS.monitor_channel_font),
-        color,
+        DARK.tone(tone),
     );
 
     let (gate, gate_color) = match view.halt {
@@ -325,14 +286,4 @@ fn paint_status(painter: &egui::Painter, grid: &Grid, rect: egui::Rect, view: &A
         _ => (MISSING, DARK.text_secondary),
     };
     paint_number(painter, grid.column(rect, 2), gate, gate_color);
-}
-
-fn reject_display(origin: RejectOrigin) -> (String, egui::Color32) {
-    match origin {
-        RejectOrigin::Local(reason) => (format!("gate {}", reason.label()), DARK.warning),
-        RejectOrigin::Venue { class, code } => (
-            format!("{code}  {}", class.as_str()),
-            theme::reject_color(class),
-        ),
-    }
 }

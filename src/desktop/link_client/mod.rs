@@ -7,6 +7,7 @@
 //! protect here, and the only thing ever sent is a 2 s heartbeat, so the engine-side argument for
 //! async (an outbound payload must not wait out a read timeout) does not transfer.
 
+mod arguments;
 mod worker;
 
 use std::io;
@@ -23,6 +24,8 @@ use crate::warn;
 
 use super::link_model::LinkStatus;
 use worker::{Worker, WorkerSetup};
+
+pub use arguments::{ArgumentError, AttachArguments};
 
 const RECEIVE_TIMEOUT: Duration = Duration::from_millis(50);
 
