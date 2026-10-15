@@ -822,6 +822,41 @@ fn every_execution_mode_parses_and_only_the_armed_ones_cost_a_queue() {
     }
 }
 
+/// A mode flip is a one-line edit, by an operator or an agent. If a sim block made a config fail
+/// to boot under any other mode, switching away from sim would mean deleting the block too, and
+/// switching back would mean retyping every venue assumption in it.
+#[test]
+fn a_sim_block_is_inert_outside_sim_mode() {
+    for (spelling, expected) in [("off", ExecutionMode::Off), ("live", ExecutionMode::Live)] {
+        let yaml = config_with_execution_on(
+            BINANCE_SPOT_SOURCE,
+            &execution_block_with(spelling, SIM_BLOCK),
+        );
+        let config = polysim::config::Config::<NoParams>::from_yaml(&yaml)
+            .unwrap_or_else(|error| panic!("a sim block under {spelling} must load: {error}"));
+        assert_eq!(
+            config.execution.as_ref().map(|block| block.mode),
+            Some(expected),
+            "the block is carried, but the mode is still the one the operator typed"
+        );
+    }
+
+    let bad_fee = SIM_BLOCK.replace("maker_fee_bps: 10.0", "maker_fee_bps: 10000.5");
+    let latent =
+        config_with_execution_on(BINANCE_SPOT_SOURCE, &execution_block_with("live", &bad_fee));
+    assert!(
+        matches!(
+            refusal(&latent),
+            ConfigError::Invalid {
+                field: "execution.sim.maker_fee_bps",
+                ..
+            }
+        ),
+        "a block that is present is validated in every mode, so flipping back to sim can never \
+         surface a bad value that sat unchecked"
+    );
+}
+
 #[test]
 fn every_reason_a_simulated_config_is_refused_names_itself() {
     let accepted =
@@ -862,23 +897,6 @@ fn every_reason_a_simulated_config_is_refused_names_itself() {
         ),
         "mode: sim with no sim block leaves every venue assumption at a default nobody chose"
     );
-
-    for spelling in ["off", "live"] {
-        let live_block = config_with_execution_on(
-            BINANCE_SPOT_SOURCE,
-            &execution_block_with(spelling, SIM_BLOCK),
-        );
-        assert!(
-            matches!(
-                refusal(&live_block),
-                ConfigError::Invalid {
-                    field: "execution.sim",
-                    ..
-                }
-            ),
-            "a sim block under {spelling} is an operator who believes they are paper trading"
-        );
-    }
 
     let perpetual =
         config_with_execution_on(BINANCE_PERP_SOURCE, &execution_block_with("sim", SIM_BLOCK));

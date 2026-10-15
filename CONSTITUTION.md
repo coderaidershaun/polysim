@@ -100,6 +100,20 @@ M13 `exchange-sim`. Ratified O1.
 - [ ] Exchange time ≠ local receive time ≠ monotonic latency clock. Never interchange them
   silently.
 
+### Amended 2026-10-14: MCP wire timestamps
+
+WHY: the MCP wire is an external JSON contract read by agents and a UI, so its timestamps are
+civil strings, and every internal field stays `TsUs`/`_ts_us`.
+
+- [ ] A timestamp on the MCP wire is an RFC3339 UTC string with a µs fraction, for example
+  `started_at: "2026-10-14T19:05:03.123456Z"`.
+- [ ] It is formatted from a `TsUs` at the wire edge, by the crate's own civil-time conversion.
+  No calendar crate.
+- [ ] Internal fields stay `TsUs` with the `_ts_us` suffix.
+- [ ] A duration on the MCP wire is an integer whose field name ends in its unit (`duration_ms`),
+  while every internal duration stays `DurationUs`.
+- [ ] Scope: the MCP wire ONLY. Every other API, record and file keeps the rules above.
+
 ## 6. Errors & Failure
 
 - [ ] Two failure classes. Never confuse them.
@@ -178,6 +192,18 @@ order flow a function of venue budget drain.
   exactly the same point.
 - [ ] An adapter never withholds a banked command to satisfy a budget.
 
+### Amended 2026-10-14: sim block is inert outside sim mode
+
+WHY: an operator or agent flips mode with a one-line edit, and a mode flip that makes a config fail
+at boot is a trap.
+
+- [ ] A `sim:` block can sit under `mode: off` or `mode: live`.
+- [ ] It is validated whenever present, in every mode. Thus a flip back to `sim` never surfaces a
+  bad value that sat unchecked.
+- [ ] It is USED only under `sim`. Code may read it in any mode, but only a simulated venue acts
+  on it.
+- [ ] `mode: sim` with no block stays refused.
+
 ## 7. Logging
 
 - [ ] Bespoke minimal subsystem. No logging framework dependency.
@@ -245,6 +271,19 @@ execution-safety defect, not an observability preference.
   - exposure: `<strategy-id>-<te-id>-sim.json`
   - Parquet: below `<strategy>/<te>/sim/`, with an `execution_mode` footer
   - UI: mode badge (O6)
+
+### Amended 2026-10-14: the MCP server's stdout is the wire
+
+WHY: `polysim-mcp` speaks JSON-RPC on stdout, so one stray byte there corrupts the agent's
+session.
+
+- [ ] `polysim-mcp` never writes to stdout. Its own diagnostics go to stderr.
+- [ ] An engine it starts never inherits its stdio. stdin is null. stdout and stderr append to
+  `logs/<artifact-stem>-console.log`.
+- [ ] A sim run gets the `-sim` stem, under the 2026-07-29 ruling.
+- [ ] `tracing` = transitive-only, exactly like `log`. It arrives via reqwest -> hyper-util, and
+  now via rmcp. No subscriber is installed. Thus its emissions drop.
+- [ ] A polysim module must not call `tracing`.
 
 ## 8. Code Organisation
 
@@ -321,6 +360,25 @@ WHY: three venues implement the execution seam by convention. A fourth needs law
   - fatal on an undecodable open order
 - [ ] The README = prose half of the adapter contract. Changes to it are seam changes, not doc
   edits.
+
+### Amended 2026-10-14: agent control plane
+
+WHY: an agent operates the engines through an MCP server, and that server must not become a second
+place where engine state lives.
+
+- [ ] The MCP server (`src/mcp/`, bin `polysim-mcp`) is an OPERATOR process, not an edge actor.
+- [ ] It holds no market state and links no strategy. It reaches an engine only through the OS:
+  spawn, signal, exit status, files.
+- [ ] Every tool is a thin shell: params -> one `Fleet` call -> reply or refusal. The substance
+  stays in the supervisor. Thus a CLI or UI can reuse it.
+- [ ] `Fleet` is `pub` on its own merit, as the reusable operator supervisor. Its fitness pins
+  follow from that ruling and are not the reason for it.
+- [ ] All tools live in one file. A second tool family becomes `src/mcp/tools/<family>.rs`, with
+  routers merged by `+`.
+- [ ] The server makes no edit it cannot read back. `set_execution_mode` writes only when the new
+  file parses as the requested mode.
+- [ ] Server exit stops every engine it started: SIGTERM first, SIGKILL only past one shared
+  deadline.
 
 ## 9. Naming & API Ergonomics
 
@@ -414,6 +472,8 @@ WHY: agents write comments at volume, and a writer cannot proof its own tone.
 | `ring`                                                       | ratified 2026-07-27. See note.                     | request signing                  |
 | `k256`                                                       | ratified 2026-08-07. See note.                     | secp256k1 signing                |
 | `tiny-keccak`                                                | ratified 2026-08-07. See note.                     | keccak256                        |
+| `rmcp`                                                       | ratified 2026-10-14. See note.                     | MCP server (feature `mcp`)       |
+| `rustix`                                                     | ratified 2026-10-14. See note.                     | SIGTERM (feature `mcp`)          |
 | `smol_str`                                                   | candidate: only on demonstrated ergonomic need     | edge string handling             |
 | `criterion`                                                  | candidate (dev): only if benchmark warranted       | measurement                      |
 
@@ -428,6 +488,8 @@ Each note = justification + limits of that crate's row. Same force as the row.
   - M12 adds `rt-multi-thread` + `signal` + `macros`. For: the config-sized multi-worker runtime
     that PROJECT §2 mandates, SIGINT/SIGTERM-driven graceful drain, and `select!` on the shutdown
     wait.
+  - Under feature `mcp`, rmcp adds `io-std`. `io-util` and `sync` were already unified in.
+    polysim adds no tokio feature itself.
 - `parquet` (`arrow`, `zstd`) + `arrow-array` + `arrow-schema`
   - M09: arrow-rs 59.1.0.
   - For: ArrowWriter batched append + footer KV + explicit row-group flush + arrow reader for M12
@@ -502,6 +564,28 @@ Each note = justification + limits of that crate's row. Same force as the row.
     supply it.
   - `default-features = false` + `keccak` only.
   - Its one dependency, `crunchy`, was already in the lock. Thus it adds no build cost.
+- `rmcp`
+  - The official MCP SDK. 3.5.1 = latest stable at adoption. MSRV 1.88 < toolchain.
+  - Features: `server`, `macros`, `transport-io`. `client` only as a dev-dependency, for the
+    fitness suite's in-process client.
+  - `optional = true` behind feature `mcp`. Only the `polysim-mcp` bin requires it. Thus a trading
+    engine never builds it.
+  - Honest cost, measured: 18 new crates in the lock (darling, darling_core, darling_macro,
+    dyn-clone, futures, futures-executor, ident_case, pastey, ref-cast, ref-cast-impl, rmcp,
+    rmcp-macros, schemars, schemars_derive, serde_derive_internals, strsim, tokio-stream,
+    tokio-util).
+  - `tracing` is an unconditional rmcp dependency. It was already in the lock via reqwest ->
+    hyper-util. The §7 2026-10-14 amendment binds it.
+  - A dev-dependency cannot be optional. Thus every test build compiles rmcp's client half, with
+    or without `mcp`. A deploy build never builds dev-dependencies.
+- `rustix`
+  - 1.1.5 = latest stable at adoption. `default-features = false` + `process` only.
+  - The only safe-Rust way to send SIGTERM under `forbid(unsafe_code)`. std's `Child::kill` sends
+    only SIGKILL, which skips the engine's drain. SIGKILL still goes through std.
+  - Honest cost: it was in the lock at 1.1.4 only through eframe -> zbus/accesskit_unix, which is
+    Linux-only. Thus a macOS build or an mcp-only build compiles it for the first time. This is
+    not the `ring` precedent.
+  - `optional = true` behind feature `mcp`.
 
 ## 12. Testing
 
@@ -598,9 +682,12 @@ in ONE place.
 - [ ] Toolchain: pinned stable via `rust-toolchain.toml`. Edition 2024. Upgrades deliberate.
 - [ ] Gate every change: `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` +
   `cargo test`. All green or no merge.
-- [ ] Run clippy + test in BOTH feature configurations: with and without `--features ui`.
+- [ ] Run clippy + test in BOTH configurations: no features, and `--all-features` (`ui` + `mcp`).
   - Amended 2026-07-25. WHY: `eframe` is optional behind feature `ui` (§11), and a single-config
     gate rots the path it never compiles.
+  - Amended 2026-10-14. WHY: `mcp` joins `ui` as an optional feature, and one `--all-features` run
+    compiles both gated paths.
+  - Replaced 2026-10-14: the second configuration was `--features ui`.
 - [ ] `#[allow]` requires inline WHY.
 - [ ] `#![forbid(unsafe_code)]` at crate root. An amendment requires a benchmark that proves safe
   implementation cannot meet measured requirement.

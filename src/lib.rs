@@ -42,3 +42,7 @@ pub mod shutdown;
 /// Feature-gated: headless engine never builds wgpu/winit. What `pub` means here is stated inside.
 #[cfg(feature = "ui")]
 pub mod desktop;
+
+/// Feature-gated, so a headless engine never builds the agent protocol stack.
+#[cfg(feature = "mcp")]
+pub mod mcp;

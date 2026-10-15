@@ -1,4 +1,4 @@
-//! Two manifest invariants that no amount of Rust source can express.
+//! Three manifest invariants that no amount of Rust source can express.
 //!
 //! Identity is two-part, so the "folder == bin == id" invariant needs enforcing rather than
 //! hoping: every trading-engine `[[bin]]` must be named `<strategy-id>-<te-id>` and live at
@@ -10,6 +10,10 @@
 //! eframe target fails the build loudly, but making `eframe` non-optional — or letting any feature
 //! pull `ui` in by default — puts the whole GUI stack back into every deployment with every gate
 //! still green. That is the silent loss this pins.
+//!
+//! And the same holds for the agent's MCP server: a trading engine must never build its protocol
+//! stack, so `rmcp` and `rustix` stay optional behind feature `mcp` and only the `polysim-mcp` bin
+//! asks for it.
 
 use std::path::Path;
 
@@ -20,6 +24,10 @@ use std::path::Path;
 /// Named one at a time on purpose. The guard below exists so that a new target cannot quietly
 /// re-link eframe everywhere, and any rule shaped like "examples are exempt" would hand that back.
 const NON_UI_TARGETS: [&str; 1] = ["poly-probe"];
+
+/// Targets outside `strategies/` that gate on a feature other than `ui`, with the exact
+/// `required-features` value each must declare. Every other non-strategy target names eframe.
+const OTHER_FEATURE_TARGETS: [(&str, &str); 1] = [("polysim-mcp", r#"["mcp"]"#)];
 
 /// Parsed straight from the manifest text — pulling in a toml crate to read two tables would be a
 /// new dependency earned for nothing.
@@ -98,7 +106,10 @@ fn the_default_build_links_no_eframe() {
         "the ui bin and the dom-fixture example are declared targets — an empty set means the \
          parser stopped seeing them, not that the invariant holds"
     );
-    for exempt in NON_UI_TARGETS {
+    let tabled = NON_UI_TARGETS
+        .into_iter()
+        .chain(OTHER_FEATURE_TARGETS.map(|(name, _)| name));
+    for exempt in tabled {
         assert!(
             gated.iter().any(|target| target.name == exempt),
             "{exempt} is exempted from the ui gate but is no longer a declared target — a stale \
@@ -107,21 +118,56 @@ fn the_default_build_links_no_eframe() {
     }
 
     for target in gated {
-        if NON_UI_TARGETS.contains(&target.name.as_str()) {
-            assert!(
-                target.required_features.is_empty(),
-                "{} {} is a headless tool, so it must declare no required-features",
-                target.kind,
-                target.name
-            );
-            continue;
-        }
+        let expected = required_features_for(&target.name);
         assert_eq!(
-            target.required_features, r#"["ui"]"#,
-            "{} {} names eframe, so it must declare required-features = [\"ui\"]",
+            target.required_features, expected,
+            "{} {} must declare required-features = {expected:?}: a headless tool declares none, \
+             the agent server gates on mcp, and every other target names eframe and gates on ui",
             target.kind, target.name
         );
     }
+}
+
+#[test]
+fn the_default_build_links_no_rmcp() {
+    let manifest = read_manifest();
+    for crate_name in ["rmcp", "rustix"] {
+        assert!(
+            dependency_line(&manifest, crate_name).contains("optional = true"),
+            "{crate_name} must stay optional, or every trading engine builds the agent server's \
+             dependencies"
+        );
+    }
+    assert_eq!(
+        feature_definition(&manifest, "mcp"),
+        r#"["dep:rmcp", "dep:rustix"]"#,
+        "feature mcp must map to dep:rmcp and dep:rustix alone"
+    );
+    assert!(
+        feature_names(&manifest)
+            .iter()
+            .all(|feature| feature != "default"),
+        "no default feature may exist: one that reached mcp would build rmcp everywhere"
+    );
+    let server = declared_targets()
+        .into_iter()
+        .find(|target| target.name == "polysim-mcp")
+        .expect("Cargo.toml declares the polysim-mcp bin");
+    assert_eq!(
+        server.required_features, r#"["mcp"]"#,
+        "the agent server is the only target allowed to need rmcp"
+    );
+}
+
+/// A target in neither table gets the ui gate, so a new non-strategy target is gated by default.
+fn required_features_for(name: &str) -> &'static str {
+    if NON_UI_TARGETS.contains(&name) {
+        return "";
+    }
+    OTHER_FEATURE_TARGETS
+        .iter()
+        .find(|(target, _)| *target == name)
+        .map_or(r#"["ui"]"#, |(_, features)| features)
 }
 
 /// The `(strategy-id, te-id)` pair the path claims, taken from the path so name and path are checked

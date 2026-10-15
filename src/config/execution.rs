@@ -26,6 +26,11 @@ const MAX_EXECUTION_DURATION_US: u128 = MAX_OPERATIONAL_DURATION_MS as u128 * 1_
 
 labelled_enum! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+    #[cfg_attr(
+        feature = "mcp",
+        derive(rmcp::schemars::JsonSchema),
+        schemars(crate = "rmcp::schemars")
+    )]
     #[serde(rename_all = "snake_case")]
     pub enum ExecutionMode {
         Off = "off",
@@ -133,7 +138,8 @@ pub struct ExecutionConfig {
     #[serde(default = "default_taker_fee_rate")]
     pub taker_fee_rate: f64,
 
-    /// Required when `mode` is `sim`; rejected otherwise.
+    /// Required when `mode` is `sim`. Under `off` or `live` it is still validated but unused, so
+    /// switching modes is a one-line edit.
     #[serde(default)]
     pub sim: Option<SimConfig>,
 }
@@ -215,19 +221,12 @@ impl ExecutionConfig {
 
     fn validate_sim(&self, spin_interval_us: u64) -> Result<(), ConfigError> {
         let sim = match (self.mode, self.sim.as_ref()) {
-            (ExecutionMode::Sim, Some(sim)) => sim,
+            (_, Some(sim)) => sim,
             (ExecutionMode::Sim, None) => {
                 return Err(ConfigError::Invalid {
                     field: "execution.sim",
                     value: "absent".into(),
                     expected: "a sim block, because mode is sim and its assumptions have no safe default",
-                });
-            }
-            (mode, Some(_)) => {
-                return Err(ConfigError::Invalid {
-                    field: "execution.sim",
-                    value: mode.as_str().into(),
-                    expected: "no sim block unless mode is sim — a simulated venue never answers a live run",
                 });
             }
             (_, None) => return Ok(()),

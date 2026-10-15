@@ -71,6 +71,13 @@ mod link_ingress;
 mod link_wire;
 mod log_lane_ownership;
 mod loss_gate;
+/// These three drive `polysim::mcp`, which exists only under feature `mcp`.
+#[cfg(feature = "mcp")]
+mod mcp_fleet;
+#[cfg(feature = "mcp")]
+mod mcp_support;
+#[cfg(feature = "mcp")]
+mod mcp_tools;
 /// The shipped strategy, included from its folder so the fitness suite drives the real thing. One
 /// include point only — a second would mint a distinct `MicroRecorder` type.
 #[path = "../../strategies/strat-micro-recorder/te-binance-spot-btcusdt/strategy.rs"]

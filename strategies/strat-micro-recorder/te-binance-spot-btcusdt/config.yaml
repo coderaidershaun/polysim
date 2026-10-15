@@ -39,7 +39,7 @@ persistence:
 execution:
   # Ships disarmed.
   mode: sim # live, sim, off
-  # To paper trade against the built-in simulator: set mode: sim and uncomment.
+  # The sim block is used only when mode is sim, so it can stay when you switch modes.
   sim:
     order_entry_latency_ms: 15
     ack_latency_ms: 15

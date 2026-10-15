@@ -26,12 +26,17 @@ cargo run --release --bin strat-micro-recorder-te-polymarket-btc-updown-5m
 cargo run --release --features ui --bin polysim-ui -- --strategy strat-micro-recorder --link 127.0.0.1:9310
 cargo run --release --features ui --bin polysim-ui -- --strategy strat-micro-recorder --link 127.0.0.1:9311
 
+# Agent control plane — an MCP server over stdio, needs the `mcp` feature. Build it first: a cold
+# release build can outlast an MCP host's start-up timeout.
+cargo build --release --features mcp --bin polysim-mcp
+cargo run -q --release --features mcp --bin polysim-mcp
+
 # Gate — all five must pass before anything merges
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo clippy --all-targets --features ui -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 cargo test
-cargo test --features ui
+cargo test --all-features
 
 # ARM64 Linux binary for deployment, built in Docker, lands in dist/
 ./scripts/build-strategy.sh strat-micro-recorder-te-binance-spot-btcusdt
@@ -43,6 +48,8 @@ docker buildx build \
     --output type=local,dest=dist \
     .
 ```
+
+`polysim-mcp` gives an agent four tools: `list_strategies`, `start_strategy`, `stop_strategy` and `set_execution_mode`. It starts each engine as a child process from its prebuilt release binary, and stops every engine it started when it exits. The `.mcp.json` at the repo root registers it for Claude Code.
 
 ## Post Trade Analysis
 
