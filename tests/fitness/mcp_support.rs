@@ -1,9 +1,12 @@
-//! The fixtures the two mcp suites share: an engine tree on disk, shell scripts that stand in for
-//! engine binaries, and deadlines short enough for a test.
+//! The mcp suites share these fixtures: an engine tree on disk, shell scripts that stand in for
+//! engine binaries, deadlines short enough for a test, and the checks that read a tool's reply.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+use rmcp::model::CallToolResult;
+use serde_json::Value;
 
 use polysim::config::RunIdentity;
 use polysim::mcp::{Fleet, FleetTiming};
@@ -28,15 +31,16 @@ macro_rules! bounded_script {
         concat!(
             "#!/bin/sh\n",
             $prelude,
+            "echo ready\n",
             "i=0; while [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done\n"
         )
     };
 }
 
-pub const TRAP_TERM: &str = bounded_script!("trap 'exit 0' TERM\necho ready\n");
-pub const IGNORE_TERM: &str = bounded_script!("trap '' TERM\necho ready\n");
+pub const TRAP_TERM: &str = bounded_script!("trap 'exit 0' TERM\n");
+pub const IGNORE_TERM: &str = bounded_script!("trap '' TERM\n");
 pub const MARKERS: &str =
-    bounded_script!("echo stdout-marker\necho stderr-marker >&2\ntrap 'exit 0' TERM\necho ready\n");
+    bounded_script!("echo stdout-marker\necho stderr-marker >&2\ntrap 'exit 0' TERM\n");
 pub const EXITS_THREE: &str = "#!/bin/sh\necho \"config refused\" >&2\nexit 3\n";
 
 pub const LINK_BIND: &str = "127.0.0.1:9399";
@@ -60,6 +64,10 @@ impl EngineTree {
         self.dir.path()
     }
 
+    pub fn bin_dir(&self) -> PathBuf {
+        self.root().join("bin")
+    }
+
     pub fn config(&self, strategy: &str, te: &str, text: &str) -> &EngineTree {
         let path = self.config_path(strategy, te);
         std::fs::create_dir_all(path.parent().expect("config has a folder")).expect("mkdir");
@@ -68,7 +76,7 @@ impl EngineTree {
     }
 
     pub fn script(&self, strategy: &str, te: &str, body: &str) -> &EngineTree {
-        let dir = self.root().join("bin");
+        let dir = self.bin_dir();
         std::fs::create_dir_all(&dir).expect("mkdir bin");
         let path = dir.join(format!("{strategy}-{te}"));
         std::fs::write(&path, body).expect("write script");
@@ -103,7 +111,7 @@ impl EngineTree {
     }
 
     pub fn fleet(&self, timing: FleetTiming) -> Fleet {
-        Fleet::new(self.root().to_path_buf(), self.root().join("bin"), timing)
+        Fleet::new(self.root().to_path_buf(), self.bin_dir(), timing)
     }
 }
 
@@ -122,4 +130,28 @@ pub fn wait_for_file_containing(path: &Path, needles: &[&str]) -> String {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+pub fn text_of(result: &CallToolResult) -> &str {
+    result
+        .content
+        .first()
+        .and_then(|block| block.as_text())
+        .map(|text| text.text.as_str())
+        .expect("every reply carries a text block")
+}
+
+/// A success must carry the same JSON object as structured content and as its first text block.
+pub fn reply_of(result: &CallToolResult) -> Value {
+    assert_eq!(result.is_error, Some(false), "{}", text_of(result));
+    let structured = result
+        .structured_content
+        .clone()
+        .expect("a success carries structured content");
+    let text: Value = serde_json::from_str(text_of(result)).expect("the text block is JSON");
+    assert_eq!(
+        structured, text,
+        "the text block mirrors the structured content"
+    );
+    structured
 }

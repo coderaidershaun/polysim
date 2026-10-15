@@ -37,7 +37,7 @@ name = "poly-probe"
 path = "tools/poly-probe/main.rs"
 
 [features]
-mcp = ["dep:rmcp", "dep:rustix"]
+mcp = ["dep:hyper", "dep:hyper-util", "dep:rmcp", "dep:rustix"]
 ui = ["dep:eframe"]
 
 [dependencies]
@@ -47,11 +47,13 @@ arrow-schema = { version = "59.1.0", default-features = false }
 core_affinity = { version = "0.8.3", default-features = false }
 eframe = { version = "=0.35.0", default-features = false, features = ["wgpu", "accesskit", "default_fonts"], optional = true }
 futures-util = { version = "0.3.33", default-features = false, features = ["sink", "std"] }
+hyper = { version = "1.12.0", default-features = false, features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio", "service"], optional = true }
 k256 = { version = "0.14.0", default-features = false, features = ["ecdsa"] }
 parquet = { version = "59.1.0", default-features = false, features = ["arrow", "zstd"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
 ring = { version = "0.17.14", default-features = false }
-rmcp = { version = "3.5.1", default-features = false, features = ["server", "macros", "transport-io"], optional = true }
+rmcp = { version = "3.5.1", default-features = false, features = ["server", "macros", "transport-io", "transport-streamable-http-server"], optional = true }
 rtrb = { version = "0.3.4", default-features = false }
 rustix = { version = "1.1.5", default-features = false, features = ["process"], optional = true }
 serde = { version = "1.0.228", default-features = false, features = ["std", "derive"] }
@@ -64,7 +66,7 @@ tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
 
 [dev-dependencies]
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
-rmcp = { version = "3.5.1", default-features = false, features = ["client"] }
+rmcp = { version = "3.5.1", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
 
 [[test]]
 name = "fitness"

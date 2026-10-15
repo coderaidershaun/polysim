@@ -12,8 +12,8 @@
 //! still green. That is the silent loss this pins.
 //!
 //! And the same holds for the agent's MCP server: a trading engine must never build its protocol
-//! stack, so `rmcp` and `rustix` stay optional behind feature `mcp` and only the `polysim-mcp` bin
-//! asks for it.
+//! stack, so `rmcp`, `rustix`, `hyper` and `hyper-util` stay optional behind feature `mcp` and only
+//! the `polysim-mcp` bin asks for it.
 
 use std::path::Path;
 
@@ -132,7 +132,7 @@ fn the_default_build_links_no_eframe() {
 #[test]
 fn the_default_build_links_no_rmcp() {
     let manifest = read_manifest();
-    for crate_name in ["rmcp", "rustix"] {
+    for crate_name in ["hyper", "hyper-util", "rmcp", "rustix"] {
         assert!(
             dependency_line(&manifest, crate_name).contains("optional = true"),
             "{crate_name} must stay optional, or every trading engine builds the agent server's \
@@ -141,8 +141,8 @@ fn the_default_build_links_no_rmcp() {
     }
     assert_eq!(
         feature_definition(&manifest, "mcp"),
-        r#"["dep:rmcp", "dep:rustix"]"#,
-        "feature mcp must map to dep:rmcp and dep:rustix alone"
+        r#"["dep:hyper", "dep:hyper-util", "dep:rmcp", "dep:rustix"]"#,
+        "feature mcp must map to the agent server's optional dependencies alone"
     );
     assert!(
         feature_names(&manifest)

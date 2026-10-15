@@ -1,7 +1,6 @@
 //! The MCP surface an agent and a desktop client see, pinned by name literals: an expectation
 //! built from the server's own types would agree with any rename.
 
-use std::future::Future;
 use std::time::Duration;
 
 use rmcp::model::{CallToolRequestParams, CallToolResult};
@@ -12,7 +11,9 @@ use tokio::task::JoinHandle;
 
 use polysim::mcp::{Fleet, PolysimMcp};
 
-use crate::mcp_support::{EngineTree, FAST, LINK_BIND, MODE_OFF, MODE_SIM, TRAP_TERM, UNPARSEABLE};
+use crate::mcp_support::{
+    EngineTree, FAST, LINK_BIND, MODE_OFF, MODE_SIM, TRAP_TERM, UNPARSEABLE, reply_of, text_of,
+};
 
 /// A server that panics inside a handler never answers, so every call is bounded.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -65,30 +66,6 @@ async fn answered<T>(future: impl Future<Output = T>) -> T {
     tokio::time::timeout(ANSWER_TIMEOUT, future)
         .await
         .expect("the server answered")
-}
-
-fn text_of(result: &CallToolResult) -> &str {
-    result
-        .content
-        .first()
-        .and_then(|block| block.as_text())
-        .map(|text| text.text.as_str())
-        .expect("every reply carries a text block")
-}
-
-/// The success contract: the same JSON object as structured content and as the first text block.
-fn reply_of(result: &CallToolResult) -> Value {
-    assert_eq!(result.is_error, Some(false), "{}", text_of(result));
-    let structured = result
-        .structured_content
-        .clone()
-        .expect("a success carries structured content");
-    let text: Value = serde_json::from_str(text_of(result)).expect("the text block is JSON");
-    assert_eq!(
-        structured, text,
-        "the text block mirrors the structured content"
-    );
-    structured
 }
 
 fn refusal_of(result: &CallToolResult) -> &str {

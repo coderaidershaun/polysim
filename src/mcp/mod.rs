@@ -5,8 +5,11 @@ mod catalog;
 mod child;
 mod error;
 mod fleet;
+mod http;
 mod reply;
 mod tools;
+
+use std::net::SocketAddr;
 
 use rmcp::ServiceExt;
 use rmcp::service::{QuitReason, ServerInitializeError};
@@ -35,6 +38,23 @@ pub enum ServeError {
         #[source]
         source: std::io::Error,
     },
+    #[error("cannot bind {address}")]
+    Bind {
+        address: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("cannot read stdin, so the server can no longer tell whether its parent is alive")]
+    StdinRead(#[source] std::io::Error),
+}
+
+/// Under `EndAtEof` the session also ends when stdin closes, exactly as it does on SIGTERM, so a
+/// parent that holds the other end of a pipe takes the server and its engines down when it dies.
+/// Under `Ignore` stdin is never read, so a null stdin cannot end the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StdinWatch {
+    Ignore,
+    EndAtEof,
 }
 
 /// Serves on stdin and stdout until the client hangs up or the process gets SIGTERM or SIGINT.
@@ -48,6 +68,24 @@ pub async fn serve_stdio(fleet: Fleet) -> ServeReport {
         match running.waiting().await {
             Ok(QuitReason::JoinError(error)) | Err(error) => Err(ServeError::Session(error)),
             Ok(_) => Ok(()),
+        }
+    })
+    .await
+}
+
+/// Serves streamable HTTP at `http://127.0.0.1:<port>/mcp`, on loopback only, until the process
+/// gets SIGTERM or SIGINT, or until stdin closes when `stdin_watch` asks for that. Port 0 lets the
+/// operating system pick a free port, and the line the server prints on stderr once it listens
+/// names that port. Every session drives the same fleet, so an engine outlives the client that
+/// started it. Every engine this server started is stopped before it returns.
+pub async fn serve_http(fleet: Fleet, port: u16, stdin_watch: StdinWatch) -> ServeReport {
+    serve_until_exit(fleet, |server| async move {
+        match stdin_watch {
+            StdinWatch::Ignore => http::serve(server, port).await,
+            StdinWatch::EndAtEof => tokio::select! {
+                result = http::serve(server, port) => result,
+                result = http::wait_until_stdin_closes() => result,
+            },
         }
     })
     .await

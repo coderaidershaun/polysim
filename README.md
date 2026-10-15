@@ -26,10 +26,13 @@ cargo run --release --bin strat-micro-recorder-te-polymarket-btc-updown-5m
 cargo run --release --features ui --bin polysim-ui -- --strategy strat-micro-recorder --link 127.0.0.1:9310
 cargo run --release --features ui --bin polysim-ui -- --strategy strat-micro-recorder --link 127.0.0.1:9311
 
-# Agent control plane — an MCP server over stdio, needs the `mcp` feature. Build it first: a cold
-# release build can outlast an MCP host's start-up timeout.
+# Agent control plane — an MCP server over stdio by default, or over loopback HTTP with --http.
+# Needs the `mcp` feature. Build it first: a cold release build can outlast an MCP host's start-up
+# timeout.
 cargo build --release --features mcp --bin polysim-mcp
 cargo run -q --release --features mcp --bin polysim-mcp
+cargo run -q --release --features mcp --bin polysim-mcp -- --http 8765
+# A parent passes --watch-stdin and holds a stdin pipe open, so the server and engines end with it.
 
 # Gate — all five must pass before anything merges
 cargo fmt --check
@@ -50,6 +53,14 @@ docker buildx build \
 ```
 
 `polysim-mcp` gives an agent four tools: `list_strategies`, `start_strategy`, `stop_strategy` and `set_execution_mode`. It starts each engine as a child process from its prebuilt release binary, and stops every engine it started when it exits. The `.mcp.json` at the repo root registers it for Claude Code.
+
+A stdio server lives only as long as the client that spawned it, and stops every engine it started when that client exits. Use `--http <port>` when engines must outlive one client: the desktop UI and every `claude -p` reply then share one long-lived server and its engines. Start it once, then register it under the same name the tracked `.mcp.json` uses, so it replaces the stdio entry instead of sitting beside it:
+
+```shell
+claude mcp add --transport http polysim http://127.0.0.1:8765/mcp
+```
+
+That registration has local scope, which overrides the project entry. Under any other name every reply still spawns its own stdio server, and an engine started through that server dies with the reply. Ctrl-C or SIGTERM ends the HTTP server and stops every engine it started. It listens on 127.0.0.1 only, has no auth, and refuses requests from browser pages. `--engines <dir>` points either transport at another folder of prebuilt engine binaries.
 
 ## Workstation bridge
 

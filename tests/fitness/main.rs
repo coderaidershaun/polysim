@@ -60,9 +60,11 @@ mod link_ingress;
 mod link_wire;
 mod log_lane_ownership;
 mod loss_gate;
-/// These three drive `polysim::mcp`, which exists only under feature `mcp`.
+/// These drive `polysim::mcp` and its binary, which exist only under feature `mcp`.
 #[cfg(feature = "mcp")]
 mod mcp_fleet;
+#[cfg(feature = "mcp")]
+mod mcp_http;
 #[cfg(feature = "mcp")]
 mod mcp_support;
 #[cfg(feature = "mcp")]

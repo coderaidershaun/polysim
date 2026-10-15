@@ -379,6 +379,11 @@ place where engine state lives.
   file parses as the requested mode.
 - [ ] Server exit stops every engine it started: SIGTERM first, SIGKILL only past one shared
   deadline.
+- [ ] Amended 2026-10-15: `--http <port>` serves the same tools on 127.0.0.1 only, with no auth:
+  on a single-operator host, loopback is the auth. A request that carries an `Origin` header is
+  refused (the MCP spec requires Origin validation), so no browser quirk around the CORS preflight
+  can reach the tools. WHY: one long-lived server is shared by the desktop UI and every agent
+  reply, so an engine started from chat outlives the reply.
 
 ### Amended 2026-10-14: the `polysim-bridge` binary
 
@@ -484,6 +489,8 @@ WHY: agents write comments at volume, and a writer cannot proof its own tone.
 | `tiny-keccak`                                                | ratified 2026-08-07. See note.                     | keccak256                        |
 | `rmcp`                                                       | ratified 2026-10-14. See note.                     | MCP server (feature `mcp`)       |
 | `rustix`                                                     | ratified 2026-10-14. See note.                     | SIGTERM (feature `mcp`)          |
+| `hyper`                                                      | ratified 2026-10-15. See note.                     | MCP HTTP server (feature `mcp`)  |
+| `hyper-util`                                                 | ratified 2026-10-15. See note.                     | MCP HTTP server (feature `mcp`)  |
 | `smol_str`                                                   | candidate: only on demonstrated ergonomic need     | edge string handling             |
 | `criterion`                                                  | candidate (dev): only if benchmark warranted       | measurement                      |
 
@@ -500,6 +507,8 @@ Each note = justification + limits of that crate's row. Same force as the row.
     wait.
   - Under feature `mcp`, rmcp adds `io-std`. `io-util` and `sync` were already unified in.
     polysim adds no tokio feature itself.
+  - Amended 2026-10-15: test builds gain `fs`, through reqwest 0.13's `stream` feature in rmcp's
+    client. Non-test builds gain nothing. polysim adds no tokio feature itself.
 - `parquet` (`arrow`, `zstd`) + `arrow-array` + `arrow-schema`
   - M09: arrow-rs 59.1.0.
   - For: ArrowWriter batched append + footer KV + explicit row-group flush + arrow reader for M12
@@ -513,6 +522,9 @@ Each note = justification + limits of that crate's row. Same force as the row.
 - `reqwest`
   - 0.12 PINNED with `rustls-tls`: ring + webpki, ONE TLS stack shared with tungstenite.
   - 0.13 rejected: it bundles aws-lc-rs second crypto provider + C toolchain.
+  - Amended 2026-10-15: a second major, 0.13.5, enters TEST builds only, through rmcp's
+    streamable-HTTP client. It carries no TLS feature (`json` + `stream` only). Thus no second
+    crypto provider and no C toolchain. polysim's own client stays 0.12.
 - `futures-util`
   - M11: `StreamExt::next`/`SinkExt::send` on WebSocketStream. tungstenite does not re-export
     them.
@@ -589,6 +601,16 @@ Each note = justification + limits of that crate's row. Same force as the row.
     hyper-util. The §7 2026-10-14 amendment binds it.
   - A dev-dependency cannot be optional. Thus every test build compiles rmcp's client half, with
     or without `mcp`. A deploy build never builds dev-dependencies.
+  - Amended 2026-10-15: features gain `transport-streamable-http-server`, for `--http`. The
+    dev-dependency gains `transport-streamable-http-client-reqwest`, the HTTP pin's client. Honest
+    cost, measured:
+    - New to the lock: base64 0.23.1, httpdate 1.0.3 (hyper's server half) and sse-stream 0.2.6 in
+      every `mcp` build. reqwest 0.13.5 in test builds only, with no TLS feature. wasm-streams
+      0.5.0, a wasm-only dependency of it, in the lock and never compiled on a native target.
+    - New to an `mcp` build (non-test): base64, httpdate, sse-stream, plus async-trait 0.1.91 (a
+      proc macro, from rmcp's session layer) and tokio-stream 0.1.19 (already in the lock, reached
+      only by test builds before).
+    - A dev-dependency cannot be optional. Thus every test build compiles that client.
 - `rustix`
   - 1.1.5 = latest stable at adoption. `default-features = false` + `process` only.
   - The only safe-Rust way to send SIGTERM under `forbid(unsafe_code)`. std's `Child::kill` sends
@@ -597,6 +619,18 @@ Each note = justification + limits of that crate's row. Same force as the row.
     Linux-only. Thus a macOS build or an mcp-only build compiles it for the first time. This is
     not the `ring` precedent.
   - `optional = true` behind feature `mcp`.
+- `hyper` + `hyper-util`
+  - Serve rmcp's streamable-HTTP service on one loopback listener: `hyper::server::conn::http1`
+    per connection, hyper-util's `TokioIo` + `TowerToHyperService`.
+  - Both were already in the lock via reqwest. This is the `ring` precedent. The direct deps add
+    one crate, `httpdate` (hyper's server half).
+  - hyper 1.12.0 + hyper-util 0.1.21 = latest stable at adoption. Adopting them moves the shared
+    entries reqwest already used: hyper 1.10.1 -> 1.12.0, hyper-util 0.1.20 -> 0.1.21, want 0.3.1
+    -> 0.3.2. All are semver-compatible.
+  - hyper `server` + `http1` only. hyper-util `tokio` + `service` only.
+  - HTTP/2 is out: `server-auto` adds h2 + fnv for no MCP client.
+  - axum rejected: a router framework for one route.
+  - `optional = true` behind feature `mcp`. Thus a trading engine never builds the server half.
 
 ### Amended 2026-10-14: the egui-free half of `desktop/` compiles in every build
 
