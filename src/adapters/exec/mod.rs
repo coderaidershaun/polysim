@@ -21,6 +21,9 @@ pub use effect::{
     ExecEffect, ExecRequest, PlaceNotSentReason, RequestId, SkipReason, TimeoutFallout,
 };
 pub use event::open_orders_snapshot_end;
+#[allow(unused_imports)]
+// adopted by the next lean-overhaul stream; remove with the first caller
+pub(crate) use event::{ChunkStamps, account_chunks, blank};
 pub(crate) use event::{
     amend_not_sent, place_not_sent, request_timed_out, stream_ready, stream_reset,
 };

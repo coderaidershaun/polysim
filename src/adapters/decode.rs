@@ -1,10 +1,10 @@
-//! Every venue's JSON boundary meets the same two hazards: a frame serde cannot read, and a decimal
-//! that will not fit an `i64@1e-8` mantissa. One fault type so the fatal-vs-drop verdict cannot
-//! drift between venues.
+//! Every venue's JSON meets the same three hazards: a frame serde cannot read, a decimal too large
+//! for an `i64` at eight decimal places, and a spelling this engine does not know. They share one
+//! fault type so that whether a fault is fatal or dropped cannot drift between venues.
 
 use serde::Deserialize;
 
-use crate::ids::{DecimalError, Price, Qty};
+use crate::ids::{DecimalError, Price, Qty, Side};
 
 /// `MantissaOverflow` is fatal — a venue number this scale cannot hold escalates, never truncates.
 #[derive(thiserror::Error, Debug)]
@@ -23,6 +23,11 @@ pub enum DecimalFault {
     },
     #[error("mantissa overflow in {field}: {value:?} exceeds i64@1e-8 scale")]
     MantissaOverflow {
+        field: &'static str,
+        value: Box<str>,
+    },
+    #[error("unknown {field} {value:?} — refusing to map a spelling this engine does not know")]
+    UnknownEnum {
         field: &'static str,
         value: Box<str>,
     },
@@ -74,6 +79,21 @@ pub(crate) fn mantissa_field(field: &'static str, text: &str) -> Result<i64, Dec
     Qty::parse_decimal(text)
         .map(|qty| qty.0)
         .map_err(|error| decimal_fault(field, text, error))
+}
+
+#[allow(dead_code)] // adopted by the next lean-overhaul stream; remove with the first caller
+pub(crate) fn order_side(field: &'static str, text: &str) -> Result<Side, DecimalFault> {
+    [Side::Buy, Side::Sell]
+        .into_iter()
+        .find(|side| side.wire_name() == text)
+        .ok_or_else(|| unknown_enum(field, text))
+}
+
+pub(crate) fn unknown_enum(field: &'static str, value: &str) -> DecimalFault {
+    DecimalFault::UnknownEnum {
+        field,
+        value: value.into(),
+    }
 }
 
 fn decimal_fault(field: &'static str, text: &str, error: DecimalError) -> DecimalFault {

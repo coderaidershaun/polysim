@@ -95,6 +95,13 @@ impl Side {
             Side::Sell => Side::Buy,
         }
     }
+
+    pub(crate) const fn wire_name(self) -> &'static str {
+        match self {
+            Side::Buy => "BUY",
+            Side::Sell => "SELL",
+        }
+    }
 }
 
 pub const FIXED_SCALE: i64 = 100_000_000;

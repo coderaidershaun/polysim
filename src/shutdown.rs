@@ -1,8 +1,9 @@
 //! The shutdown latches: `FatalSignal` stops NOW, `DrainSignal` finishes the input then stops, and
-//! `ShutdownRequest` is the external graceful trigger, alongside `abort_and_warn`. `RunStateCell`
-//! is a TWO-WAY toggle for trading on and off rather than an ending; SIGINT remains the only real
-//! exit.
+//! `ShutdownRequest` is the external graceful trigger. `abort_and_warn` stops a spawned task, and
+//! `WriterThread` lets a blocking file writer finish before exit. `RunStateCell` is a TWO-WAY
+//! toggle for trading on and off rather than an ending; SIGINT remains the only real exit.
 
+use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -11,7 +12,7 @@ use crate::warn;
 
 /// A one-way latch: the engine drains and exits immediately. Cheap to clone and to check, and the
 /// first tripper's reason is the one kept.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct FatalSignal {
     tripped: Arc<AtomicBool>,
     reason: Arc<Mutex<Option<Box<str>>>>,
@@ -19,10 +20,7 @@ pub struct FatalSignal {
 
 impl FatalSignal {
     pub fn new() -> Self {
-        Self {
-            tripped: Arc::new(AtomicBool::new(false)),
-            reason: Arc::new(Mutex::new(None)),
-        }
+        Self::default()
     }
 
     /// Records `reason` (only the first is kept) and latches the signal.
@@ -46,12 +44,6 @@ impl FatalSignal {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
-    }
-}
-
-impl Default for FatalSignal {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -225,5 +217,57 @@ pub(crate) async fn abort_and_warn(join: tokio::task::JoinHandle<()>, task_name:
         && join_error.is_panic()
     {
         warn!("{task_name} task panicked during shutdown — cause already logged");
+    }
+}
+
+pub(crate) fn panic_text(payload: &(dyn Any + Send)) -> Box<str> {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
+        .into()
+}
+
+/// A blocking writer on its own thread, told to finish by a flag and joined from async code.
+pub(crate) struct WriterThread<E> {
+    drain_requested: Arc<AtomicBool>,
+    join: std::thread::JoinHandle<Result<(), E>>,
+}
+
+#[allow(dead_code)] // adopted by the next lean-overhaul stream; remove with the first caller
+impl<E: Send + 'static> WriterThread<E> {
+    /// `body` receives the drain flag: once it is set, write what is left and return.
+    pub(crate) fn spawn(
+        name: &str,
+        body: impl FnOnce(Arc<AtomicBool>) -> Result<(), E> + Send + 'static,
+    ) -> Self {
+        let drain_requested = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&drain_requested);
+        let join = std::thread::Builder::new()
+            .name(name.into())
+            .spawn(move || body(flag))
+            .unwrap_or_else(|error| {
+                panic!("os refused to spawn the {name} writer thread at init: {error}")
+            });
+        Self {
+            drain_requested,
+            join,
+        }
+    }
+
+    /// A writer that panicked is reported through `panicked` and never re-raised: the panic hook
+    /// has already turned the panic fatal.
+    pub(crate) async fn drain(self, panicked: fn(Box<str>) -> E, interrupted: E) -> Result<(), E> {
+        self.drain_requested.store(true, Ordering::Release);
+        let thread = self.join;
+        match tokio::task::spawn_blocking(move || thread.join()).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(panic)) => Err(panicked(panic_text(&*panic))),
+            Err(join_error) if join_error.is_panic() => {
+                Err(panicked(panic_text(&*join_error.into_panic())))
+            }
+            Err(_) => Err(interrupted),
+        }
     }
 }
