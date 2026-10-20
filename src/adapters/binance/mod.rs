@@ -12,5 +12,6 @@ pub mod rest;
 pub mod depth;
 pub mod kline;
 pub mod parse;
+pub mod preflight;
 
 pub(crate) mod ws;

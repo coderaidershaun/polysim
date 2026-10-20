@@ -269,7 +269,7 @@ fn intensity_accumulator_and_fit_do_not_allocate() {
             i * 1_000,
         ));
     };
-    let mut fit = IntensityFit::new();
+    let mut fit = IntensityFit::default();
     for i in 0..1_000i64 {
         feed(&mut tracker, i);
     }

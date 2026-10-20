@@ -46,9 +46,7 @@ pub(super) enum InboundFrame {
 /// Peeks at the routing keys only; the full frame is parsed separately by the decoder.
 #[derive(Deserialize)]
 struct FrameKeys {
-    #[serde(default)]
     id: Option<u64>,
-    #[serde(default)]
     event: Option<serde::de::IgnoredAny>,
 }
 

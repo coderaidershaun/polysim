@@ -8,23 +8,30 @@ use super::execution::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct SimConfig {
-    #[serde(default = "default_order_entry_latency_ms")]
     pub order_entry_latency_ms: u64,
-    #[serde(default = "default_ack_latency_ms")]
     pub ack_latency_ms: u64,
-    #[serde(default = "default_max_market_data_delay_ms")]
     pub max_market_data_delay_ms: u64,
-    #[serde(default = "default_sim_heartbeat_ms")]
     pub heartbeat_ms: u64,
-    #[serde(default = "default_opening_base_balance")]
     pub opening_base_balance: f64,
-    #[serde(default = "default_opening_quote_balance")]
     pub opening_quote_balance: f64,
     /// Negative is a rebate, paid in the quote asset.
-    #[serde(default = "default_maker_fee_bps")]
     pub maker_fee_bps: f64,
+}
+
+impl Default for SimConfig {
+    fn default() -> Self {
+        Self {
+            order_entry_latency_ms: 15,
+            ack_latency_ms: 15,
+            max_market_data_delay_ms: 1_000,
+            heartbeat_ms: 100,
+            opening_base_balance: 0.01,
+            opening_quote_balance: 1_000.0,
+            maker_fee_bps: 10.0,
+        }
+    }
 }
 
 impl SimConfig {
@@ -82,32 +89,4 @@ impl SimConfig {
         }
         Ok(())
     }
-}
-
-fn default_order_entry_latency_ms() -> u64 {
-    15
-}
-
-fn default_ack_latency_ms() -> u64 {
-    15
-}
-
-fn default_max_market_data_delay_ms() -> u64 {
-    1_000
-}
-
-fn default_sim_heartbeat_ms() -> u64 {
-    100
-}
-
-fn default_opening_base_balance() -> f64 {
-    0.01
-}
-
-fn default_opening_quote_balance() -> f64 {
-    1_000.0
-}
-
-fn default_maker_fee_bps() -> f64 {
-    10.0
 }

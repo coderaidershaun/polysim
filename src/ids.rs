@@ -1,5 +1,7 @@
 //! Compact typed identity + exact fixed-point numerics: dense indices, prices/quantities as i64 1e-8 mantissas (never float).
 
+use crate::labelled_enum::labelled_enum;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InstrumentId(pub u16);
 
@@ -52,18 +54,19 @@ pub struct AggregateTradeId(pub u64);
 pub struct StreamEpoch(u64);
 
 impl StreamEpoch {
-    pub const MAX: StreamEpoch = StreamEpoch(u64::MAX);
-
     #[must_use]
     pub fn next(self) -> Option<Self> {
         self.0.checked_add(1).map(Self)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Side {
-    Buy,
-    Sell,
+labelled_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum Side {
+        Buy = "buy",
+        Sell = "sell",
+    }
+    pub fn as_str;
 }
 
 impl Side {
@@ -93,6 +96,18 @@ impl Side {
         match self {
             Side::Buy => Side::Sell,
             Side::Sell => Side::Buy,
+        }
+    }
+
+    /// A buy commits quote notional and a sell commits base quantity.
+    ///
+    /// # Panics
+    /// If a buy's notional does not fit an i64 mantissa, exactly as [`Price::notional`] does.
+    #[inline]
+    pub fn spend(self, price: Price, qty: Qty) -> i64 {
+        match self {
+            Side::Buy => price.notional(qty),
+            Side::Sell => qty.0,
         }
     }
 
@@ -162,6 +177,19 @@ impl Qty {
     #[inline]
     pub fn to_f64(self) -> f64 {
         self.0 as f64 / FIXED_SCALE as f64
+    }
+
+    /// Never negative, so an overfill reads as nothing left rather than a negative amount.
+    #[inline]
+    pub fn remaining_after(self, filled: Qty) -> Qty {
+        Qty((self.0 - filled.0).max(0))
+    }
+
+    /// # Panics
+    /// If `step` is zero.
+    #[inline]
+    pub fn floor_to_step(self, step: i64) -> Qty {
+        Qty(self.0 - self.0.rem_euclid(step))
     }
 }
 

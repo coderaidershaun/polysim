@@ -14,10 +14,9 @@ mod tap;
 /// the surface is the contract itself and shrinking it would put the codec's evidence out of reach.
 pub mod wire;
 
-/// The construction seam. A caller standing this venue up names these and nothing deeper.
-pub(crate) use actor::SimActor;
-pub(crate) use bringup::{SimActorSetup, SimVenueSettings, SimVenueSpec};
-pub(crate) use core::resting::InstrumentLimits;
+/// The only way to stand this venue up: a caller hands over its inputs here and reaches nothing
+/// deeper.
+pub(crate) use bringup::bring_up;
 pub use error::SimVenueError;
 
 use crate::adapters::exec::{LeaseNamespace, VenueCapabilities};

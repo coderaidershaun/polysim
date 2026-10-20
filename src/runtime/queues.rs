@@ -1,22 +1,19 @@
 //! Input-queue fabric: one SPSC ring per queue id the registry issued, all built before any
 //! producer exists so the hot thread owns every read end from the first message on.
 
-use std::sync::Arc;
-
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::config::{BinanceMarket, VenueMarket};
 use crate::hot::ingress::IngressQueues;
-use crate::hot::spawn::{LinkQueueProducer, QueueProducer, SimTapGate};
+use crate::hot::spawn::{LinkQueueProducer, QueueProducer};
 use crate::ids::{QueueId, SourceId};
-use crate::info;
-use crate::msg::inbound::{InboundMessage, MarketTapItem};
-use crate::registry::{ConnectionCategory, Registry};
+use crate::msg::inbound::InboundMessage;
+use crate::registry::Registry;
 use crate::shutdown::FatalSignal;
 
 pub(super) struct InputQueues {
     pub ingress: IngressQueues,
-    /// In producer_groups() order for spawn_adapters zip.
+    /// In the registry's producer-group order, because the market-data spawn pairs each group with
+    /// its producer by position.
     pub groups: Vec<QueueProducer>,
     pub timer: QueueProducer,
     /// None with no link: block. Drop+count, not fatal-on-full.
@@ -32,7 +29,7 @@ pub(super) fn build_input_queues(
 ) -> InputQueues {
     let mut consumers: Vec<Option<Consumer<InboundMessage>>> =
         (0..registry.input_queue_count()).map(|_| None).collect();
-    // Push in producer_groups() order so Vec aligns for spawn_adapters zip.
+    // Pushed in the registry's producer-group order, which the market-data spawn relies on.
     let mut group_producers = Vec::with_capacity(registry.producer_groups().len());
     for group in registry.producer_groups() {
         let producer = attach_ring(&mut consumers, group.queue_id, capacity);
@@ -83,74 +80,4 @@ fn attach_ring(
     let (producer, consumer) = RingBuffer::<InboundMessage>::new(capacity);
     consumers[usize::from(queue_id.0)] = Some(consumer);
     producer
-}
-
-pub(super) struct MarketTaps {
-    pub trades: Consumer<MarketTapItem>,
-    pub depth: Consumer<MarketTapItem>,
-    pub gate: Arc<SimTapGate>,
-}
-
-/// # Panics
-/// If either Binance Spot lane is missing or duplicated.
-pub(super) fn attach_market_taps(
-    registry: &Registry,
-    capacity: usize,
-    groups: Vec<QueueProducer>,
-) -> (Vec<QueueProducer>, MarketTaps) {
-    assert_eq!(
-        groups.len(),
-        registry.producer_groups().len(),
-        "the zip below would silently drop a hot producer"
-    );
-    let gate = Arc::new(SimTapGate::new());
-    let mut trades = None;
-    let mut depth = None;
-    let mut tapped = Vec::with_capacity(groups.len());
-
-    for (group, producer) in registry.producer_groups().iter().zip(groups) {
-        let Some(slot) = tapped_slot(group.market, group.category, &mut trades, &mut depth) else {
-            tapped.push(producer);
-            continue;
-        };
-        let (tap_producer, tap_consumer) = RingBuffer::<MarketTapItem>::new(capacity);
-        info!(
-            "market tap for input queue {} ({}) allocated {} slots of {} bytes",
-            group.queue_id.0,
-            group.category.as_str(),
-            capacity,
-            size_of::<MarketTapItem>()
-        );
-        *slot = Some(tap_consumer);
-        tapped.push(producer.with_tap(tap_producer, Arc::clone(&gate)));
-    }
-
-    let taps = MarketTaps {
-        trades: trades.expect("simulator requires a binance spot trades producer group"),
-        depth: depth.expect("simulator requires a binance spot depth producer group"),
-        gate,
-    };
-    (tapped, taps)
-}
-
-fn tapped_slot<'a>(
-    market: VenueMarket,
-    category: ConnectionCategory,
-    trades: &'a mut Option<Consumer<MarketTapItem>>,
-    depth: &'a mut Option<Consumer<MarketTapItem>>,
-) -> Option<&'a mut Option<Consumer<MarketTapItem>>> {
-    if market != VenueMarket::Binance(BinanceMarket::Spot) {
-        return None;
-    }
-    let slot = match category {
-        ConnectionCategory::Trades => trades,
-        ConnectionCategory::Depth => depth,
-        ConnectionCategory::Klines | ConnectionCategory::Market => return None,
-    };
-    assert!(
-        slot.is_none(),
-        "one simulator tap per lane: {} appears twice in the producer groups",
-        category.as_str()
-    );
-    Some(slot)
 }

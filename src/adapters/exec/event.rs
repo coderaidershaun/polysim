@@ -121,7 +121,6 @@ pub(crate) struct ChunkStamps {
 
 /// The engine stays unready until it sees the last chunk of a balance snapshot, so an empty sweep
 /// still yields one chunk, marked last.
-#[allow(dead_code)] // adopted by the next lean-overhaul stream; remove with the first caller
 pub(crate) fn account_chunks(
     kind: AccountChunkKind,
     balances: &[AssetBalance],

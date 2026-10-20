@@ -1,10 +1,9 @@
 //! Tracker validation at startup: fails loud on traps that would otherwise panic hot thread or void promises.
 
 use crate::config::{
-    ConfigError, KlineInterval, SpinField, TrackerSpec, VolumeBarsSpec, VolumeThreshold,
-    WindowsSpec,
+    ConfigError, KlineInterval, SpinField, TARGET_WINDOW_CANDLES, TrackerSpec, VolumeBarsSpec,
+    VolumeThreshold, WindowsSpec,
 };
-use crate::hot::tracker::TARGET_WINDOW_CANDLES;
 use crate::ids::FIXED_SCALE;
 
 const MAX_THRESHOLD_USD: u64 = (i64::MAX / 4) as u64 / FIXED_SCALE as u64;

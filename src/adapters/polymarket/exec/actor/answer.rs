@@ -3,6 +3,7 @@
 //! and where the frames held waiting for it are released.
 
 use crate::adapters::exec::{ExecRequest, Outgoing, PlaceNotSentReason, SessionOutcome};
+use crate::adapters::http::TransportError;
 use crate::msg::exec::ExecEvent;
 use crate::{error, info, warn};
 
@@ -11,7 +12,7 @@ use super::super::codec::{
     DecodeContext, KnownOrder, PlaceRequestContext, PlacementStatus, VenueAnswer, WireError,
     decode_cancel, decode_neg_risk, decode_place, decode_single_order,
 };
-use super::super::rest::{ClobHttpError, ClobResponse};
+use super::super::rest::ClobResponse;
 use super::rest::{OpenOrdersRead, RestOutcome, RestPurpose};
 use super::{Actor, Writer};
 
@@ -115,7 +116,7 @@ impl Actor {
         request: ExecRequest,
         recon_seq: u64,
         place: Option<PlaceRequestContext>,
-        answer: Result<ClobResponse, ClobHttpError>,
+        answer: Result<ClobResponse, TransportError>,
         writer: Option<&mut Writer>,
     ) -> Option<SessionOutcome> {
         let Some(entry) = self.session.inflight.take(request_id) else {
@@ -341,7 +342,7 @@ impl Actor {
 /// returned instead.
 pub(super) fn read_body<'a>(
     what: &str,
-    answer: &'a Result<ClobResponse, ClobHttpError>,
+    answer: &'a Result<ClobResponse, TransportError>,
 ) -> Option<&'a str> {
     match answer {
         Ok(response) if response.is_success() => Some(&response.body),

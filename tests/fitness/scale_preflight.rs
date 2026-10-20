@@ -5,16 +5,19 @@
 //! both venue ticks (0.01 and the 0.001 endgame tick) pass, a drifted tick or absent min size
 //! refuses. `check_symbol_scale` and `check_poly_market` are pure.
 
+use polysim::adapters::binance::preflight::{
+    ScaleError, check_order_rate_limits, check_symbol_scale, order_budget,
+};
 use polysim::adapters::binance::rest::{ExchangeInfo, SymbolFilter, SymbolInfo};
+use polysim::adapters::polymarket::preflight::{
+    ScaleError as PolyScaleError, check_poly_market, stamp_poly_scales,
+};
 use polysim::adapters::polymarket::rest::GammaMarket;
 use polysim::config::{BinanceEnv, BinanceMarket, VenueMarket};
 use polysim::hot::exec::{MAX_ORDER_BUDGET_WINDOWS, OrderBudgetWindow};
 use polysim::ids::{AssetId, Price, Qty};
 use polysim::registry::{InstrumentRow, OrderRateLimit, RateInterval, Registry};
-use polysim::runtime::{
-    EngineError, check_order_rate_limits, check_poly_market, check_symbol_order_capacity,
-    check_symbol_scale, order_budget, stamp_poly_scales,
-};
+use polysim::runtime::{EngineError, check_symbol_order_capacity};
 use polysim::time::{DurationUs, TsUs};
 
 use crate::engine_support::{ONE, instrument_row, tracker_spec_all};
@@ -141,17 +144,14 @@ enum ScaleRejection<'a> {
     SymbolUnknown,
 }
 
-fn assert_scale_rejection(case: &str, error: &EngineError, expected: &ScaleRejection) {
+fn assert_scale_rejection(case: &str, error: &ScaleError, expected: &ScaleRejection) {
     match (expected, error) {
-        (
-            ScaleRejection::FieldMissing(field),
-            EngineError::ScaleFieldMissing { field: got, .. },
-        ) => {
+        (ScaleRejection::FieldMissing(field), ScaleError::FieldMissing { field: got, .. }) => {
             assert_eq!(got, field, "{case}: wrong missing field, got {error:?}");
         }
         (
             ScaleRejection::LimitNotPositive(field, value),
-            EngineError::ScaleLimitNotPositive {
+            ScaleError::LimitNotPositive {
                 field: got_field,
                 value: got_value,
                 ..
@@ -166,13 +166,13 @@ fn assert_scale_rejection(case: &str, error: &EngineError, expected: &ScaleRejec
                 );
             }
         }
-        (ScaleRejection::NotPositive(field), EngineError::ScaleNotPositive { field: got, .. }) => {
+        (ScaleRejection::NotPositive(field), ScaleError::NotPositive { field: got, .. }) => {
             assert_eq!(got, field, "{case}: wrong field, got {error:?}");
         }
-        (ScaleRejection::OutOfRange(field), EngineError::ScaleOutOfRange { field: got, .. }) => {
+        (ScaleRejection::OutOfRange(field), ScaleError::OutOfRange { field: got, .. }) => {
             assert_eq!(got, field, "{case}: wrong field, got {error:?}");
         }
-        (ScaleRejection::SymbolUnknown, EngineError::ScaleSymbolUnknown { .. }) => {}
+        (ScaleRejection::SymbolUnknown, ScaleError::SymbolUnknown { .. }) => {}
         _ => panic!("{case}: wrong error variant, got {error:?}"),
     }
 }
@@ -398,7 +398,7 @@ fn poly_preflight_accepts_the_venue_ticks_and_stamps_the_accepted_grid() {
         matches!(
             check_poly_market(&poly_market(Price(500_000), Qty(500_000_000)))
                 .expect_err("a 0.005 tick must refuse the start"),
-            EngineError::ScalePolyTick { .. }
+            PolyScaleError::TickNotAccepted { .. }
         ),
         "a tick outside the accepted set refuses",
     );
@@ -406,20 +406,20 @@ fn poly_preflight_accepts_the_venue_ticks_and_stamps_the_accepted_grid() {
     match check_poly_market(&poly_market(Price(2_000_000), Qty(500_000_000)))
         .expect_err("a 0.02 tick must refuse the start")
     {
-        EngineError::ScalePolyTick {
+        PolyScaleError::TickNotAccepted {
             actual, expected, ..
         } => {
             assert_eq!(actual, Price(2_000_000));
             assert_eq!(expected, [Price(1_000_000), Price(100_000)]);
         }
-        other => panic!("expected ScalePolyTick, got {other:?}"),
+        other => panic!("expected TickNotAccepted, got {other:?}"),
     }
 
     assert!(
         matches!(
             check_poly_market(&poly_market(Price(1_000_000), Qty(0)))
                 .expect_err("an absent orderMinSize must refuse"),
-            EngineError::ScalePolyMinSize { .. }
+            PolyScaleError::MinSizeNotPositive { .. }
         ),
         "a non-positive min order size refuses",
     );
@@ -569,7 +569,7 @@ fn every_unreadable_absent_or_unmodellable_order_budget_refuses_the_start() {
     let mut beyond = modelled;
     beyond.push(bucket);
     match order_budget(&beyond).expect_err("one bucket past the model refuses") {
-        EngineError::ExecutionTooManyOrderWindows { found, max } => {
+        ScaleError::TooManyOrderWindows { found, max } => {
             assert_eq!(
                 (found, max),
                 (MAX_ORDER_BUDGET_WINDOWS + 1, MAX_ORDER_BUDGET_WINDOWS)
@@ -585,7 +585,7 @@ fn every_unreadable_absent_or_unmodellable_order_budget_refuses_the_start() {
         matches!(
             check_order_rate_limits(BinanceMarket::Spot, &none)
                 .expect_err("no ORDERS bucket must refuse"),
-            EngineError::ScaleOrderLimitsMissing { .. }
+            ScaleError::OrderLimitsMissing { .. }
         ),
         "a payload with no ORDERS bucket refuses rather than pacing blind",
     );
@@ -599,11 +599,11 @@ fn every_unreadable_absent_or_unmodellable_order_budget_refuses_the_start() {
     match check_order_rate_limits(BinanceMarket::Spot, &unknown_interval)
         .expect_err("an unrecognised interval must refuse")
     {
-        EngineError::ScaleRateLimitUnreadable { field, value, .. } => {
+        ScaleError::RateLimitUnreadable { field, value, .. } => {
             assert_eq!(field, "interval");
             assert_eq!(value.as_ref(), "FORTNIGHT");
         }
-        other => panic!("expected ScaleRateLimitUnreadable, got {other:?}"),
+        other => panic!("expected RateLimitUnreadable, got {other:?}"),
     }
 
     let mut zero_limit = spot_info();
@@ -615,8 +615,8 @@ fn every_unreadable_absent_or_unmodellable_order_budget_refuses_the_start() {
     match check_order_rate_limits(BinanceMarket::Spot, &zero_limit)
         .expect_err("a zero order budget must refuse")
     {
-        EngineError::ScaleRateLimitUnreadable { field, .. } => assert_eq!(field, "limit"),
-        other => panic!("expected ScaleRateLimitUnreadable, got {other:?}"),
+        ScaleError::RateLimitUnreadable { field, .. } => assert_eq!(field, "limit"),
+        other => panic!("expected RateLimitUnreadable, got {other:?}"),
     }
 
     let mut zero_interval_num = spot_info();
@@ -628,8 +628,8 @@ fn every_unreadable_absent_or_unmodellable_order_budget_refuses_the_start() {
     match check_order_rate_limits(BinanceMarket::Spot, &zero_interval_num)
         .expect_err("a zero intervalNum must refuse")
     {
-        EngineError::ScaleRateLimitUnreadable { field, .. } => assert_eq!(field, "intervalNum"),
-        other => panic!("expected ScaleRateLimitUnreadable, got {other:?}"),
+        ScaleError::RateLimitUnreadable { field, .. } => assert_eq!(field, "intervalNum"),
+        other => panic!("expected RateLimitUnreadable, got {other:?}"),
     }
 }
 

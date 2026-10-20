@@ -1,12 +1,13 @@
 //! Schemas for venue public data: features, trades, book events, klines, link tape, rotation lineage.
 
+use crate::ids::Side;
 use crate::msg::persist::{
     BookEventKind, BookEventRow, FeatureRow, KlineRow, LinkFrameRow, RotationRow, TradeRow,
 };
 use crate::time::TsUs;
 
+use super::TableRow;
 use super::column::Column;
-use super::{TableRow, side_str};
 
 fn kind_str(kind: BookEventKind) -> &'static str {
     match kind {
@@ -38,7 +39,7 @@ impl TableRow for TradeRow {
         Column::U16("instrument_id", |row| row.instrument.0),
         Column::Mantissa("price", |row| row.price.0),
         Column::Mantissa("qty", |row| row.qty.0),
-        Column::Text("side", |row| side_str(row.side)),
+        Column::Text("side", |row| row.side.as_str()),
     ];
 
     fn partition_ts(&self) -> TsUs {
@@ -52,7 +53,7 @@ impl TableRow for BookEventRow {
         Column::Ts("received_ts_us", |row| row.received_ts_us),
         Column::U16("instrument_id", |row| row.instrument.0),
         Column::Text("kind", |row| kind_str(row.kind)),
-        Column::Text("side", |row| row.side.map_or("none", side_str)),
+        Column::Text("side", |row| row.side.map_or("none", Side::as_str)),
         Column::Mantissa("price", |row| row.price.0),
         Column::Mantissa("qty", |row| row.qty.0),
         Column::U64("update_id", |row| row.update_id),

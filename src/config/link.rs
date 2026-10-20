@@ -18,7 +18,6 @@ pub struct LinkConfig {
     #[serde(default)]
     pub subscribe: Vec<PeerSubscription>,
     /// Cross-talk protection, not security (digest in clear).
-    #[serde(default)]
     pub token: Option<Box<str>>,
     #[serde(default)]
     pub on_controller_loss: ControllerLoss,

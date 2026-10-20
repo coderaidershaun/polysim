@@ -2,6 +2,7 @@
 //! event folds through. Apply is ungated — a fill during warmup is money — and only the callback
 //! a strategy receives is gated.
 
+use crate::config::MAX_QUOTE_LEVELS;
 use crate::hot::ledger::PositionLedger;
 use crate::hot::strategy::Actions;
 use crate::ids::{AssetId, ClientOrderId, InstrumentId, Qty, Side};
@@ -15,7 +16,7 @@ use super::account::{AccountTable, Balance};
 use super::audit::bank_engine_driven;
 use super::budget::{BudgetMeter, OrderBudget};
 use super::command::{ExecSink, PendingCommands};
-use super::desired::{MAX_QUOTE_LEVELS, QuoteLevel};
+use super::desired::QuoteLevel;
 use super::event::PriorRunOrders;
 use super::flatten::FeeModel;
 use super::gates::{ExecHalt, HaltReason, Readiness, RefusalLatch};

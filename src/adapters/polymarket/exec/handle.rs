@@ -1,21 +1,18 @@
-//! What the runtime needs to start the execution actor, and the startup gate that must pass first.
-//! The gate is re-exported here so the runtime reaches both through one module.
-
-use std::time::Duration;
+//! What starting the execution actor takes, and the startup gate that must pass first. The gate is
+//! re-exported here so whatever starts this venue reaches both through one module.
 
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
-use crate::adapters::backoff::BackoffCaps;
-use crate::adapters::exec::{EdgeHandle, ExecStop};
+use crate::adapters::edge::{EdgeInputs, EdgeSettings, VenueEdge, run_edge};
+use crate::adapters::exec::EdgeHandle;
 use crate::adapters::polymarket::rotation::WindowAssignment;
 use crate::hot::spawn::QueueProducer;
 use crate::msg::exec::ExecLaneItem;
 use crate::registry::InstrumentRow;
-use crate::shutdown::{FatalSignal, RunStateCell};
-use crate::time::{DurationUs, EngineClock};
+use crate::time::DurationUs;
 
-use super::actor::PolymarketExecActor;
+use super::actor::Actor;
 use super::sign::address::Address;
 use super::sign::key::SigningKey;
 use super::sign::l2::ApiCredentials;
@@ -32,48 +29,54 @@ pub struct WalletIdentity {
     pub signature_type: SignatureType,
 }
 
-pub struct PolymarketExecAdapterContext {
-    pub clock: EngineClock,
-    pub fatal: FatalSignal,
-    // When run_state goes IDLE, quotes are withdrawn and the socket drops — resting orders
-    // can't simply be parked.
-    pub run_state: RunStateCell,
-    pub backoff: BackoffCaps,
-    pub venue_clock_offset: DurationUs,
-    pub max_orders_per_side: usize,
-    // The shutdown sweep deadline, enforced by the engine's drain deadline.
-    pub sweep_deadline: Duration,
-    // How long to stay disconnected before pulling orders over HTTP; the venue offers no
-    // SLA here, so this is an operator's choice.
-    pub disconnect_sweep_after: DurationUs,
-}
-
-pub struct PolymarketExecAdapterSetup {
-    pub instruments: Vec<InstrumentRow>,
+pub(super) struct PolymarketExecAdapterSetup {
+    pub(super) instruments: Vec<InstrumentRow>,
     // L2 API credentials, kept separate from the key that signs orders.
-    pub credentials: ApiCredentials,
-    pub key: SigningKey,
-    pub wallet: WalletIdentity,
-    pub commands: rtrb::Consumer<ExecLaneItem>,
-    pub producer: QueueProducer,
+    pub(super) credentials: ApiCredentials,
+    pub(super) key: SigningKey,
+    pub(super) wallet: WalletIdentity,
+    pub(super) commands: rtrb::Consumer<ExecLaneItem>,
+    pub(super) producer: QueueProducer,
     /// Rotation bindings from the market-data actor, which is the single authority on how a
     /// token maps to a leg.
-    pub assignments: mpsc::Receiver<WindowAssignment>,
-    pub context: PolymarketExecAdapterContext,
+    pub(super) assignments: mpsc::Receiver<WindowAssignment>,
+    pub(super) venue_clock_offset: DurationUs,
+    pub(super) edge: EdgeSettings,
 }
 
-pub struct PolymarketExecAdapter;
-
-impl PolymarketExecAdapter {
-    pub(crate) fn spawn(setup: PolymarketExecAdapterSetup, runtime: &Handle) -> EdgeHandle {
-        let stop = ExecStop::new();
-        let sweep_deadline = setup.context.sweep_deadline;
-        EdgeHandle {
-            join: PolymarketExecActor::spawn(setup, stop.clone(), runtime),
-            stop,
-            sweep_deadline,
-            venue: "polymarket execution adapter",
-            missed_sweep_cost: "orders may still rest on the venue",
-        }
+pub(crate) fn bring_up(
+    gate: PolymarketPreflight,
+    inputs: EdgeInputs<'_>,
+    assignments: mpsc::Receiver<WindowAssignment>,
+) -> VenueEdge {
+    let EdgeInputs {
+        registry,
+        commands,
+        producer,
+        settings,
+        ..
+    } = inputs;
+    let setup = PolymarketExecAdapterSetup {
+        instruments: registry.instruments().to_vec(),
+        credentials: gate.credentials,
+        key: gate.key,
+        wallet: gate.wallet,
+        commands,
+        producer,
+        assignments,
+        venue_clock_offset: gate.venue_clock_offset,
+        edge: settings,
+    };
+    VenueEdge {
+        spawn: Box::new(move |runtime: &Handle| spawn(setup, runtime)),
+        tap_gate: None,
     }
+}
+
+fn spawn(setup: PolymarketExecAdapterSetup, runtime: &Handle) -> EdgeHandle {
+    let sweep_deadline = setup.edge.sweep_deadline;
+    EdgeHandle::spawn("polymarket execution adapter", sweep_deadline, |stop| {
+        let actor = Actor::new(setup, stop, runtime);
+        runtime.spawn(crate::log::tag_task("polymarket-exec", run_edge(actor)))
+    })
 }

@@ -90,8 +90,6 @@ impl RateLimit {
     }
 }
 
-pub type ClobHttpError = TransportError;
-
 #[derive(Debug, Clone)]
 pub struct ClobHttp {
     http: HttpClient,
@@ -103,7 +101,7 @@ impl ClobHttp {
     pub fn new(
         connect_timeout: Duration,
         request_timeout: Duration,
-    ) -> Result<Self, ClobHttpError> {
+    ) -> Result<Self, TransportError> {
         let http = HttpClient::new(Deadlines {
             connect: connect_timeout,
             request: request_timeout,
@@ -112,14 +110,14 @@ impl ClobHttp {
     }
 
     /// Unsigned, at an absolute url — the one check that does not live on the api host.
-    pub async fn send_unsigned(&self, url: &str) -> Result<ClobResponse, ClobHttpError> {
+    pub async fn send_unsigned(&self, url: &str) -> Result<ClobResponse, TransportError> {
         self.send(self.http.request(Method::GET, url), url).await
     }
 
     pub async fn send_public(
         &self,
         request: &EncodedRequest,
-    ) -> Result<ClobResponse, ClobHttpError> {
+    ) -> Result<ClobResponse, TransportError> {
         let url = url_of(request);
         self.send(self.builder(request, &url), &url).await
     }
@@ -130,7 +128,7 @@ impl ClobHttp {
         signer: &RequestSigner,
         request: &EncodedRequest,
         timestamp_secs: i64,
-    ) -> Result<ClobResponse, ClobHttpError> {
+    ) -> Result<ClobResponse, TransportError> {
         let headers = signer.headers(
             &RequestToSign {
                 method: request.method,
@@ -148,7 +146,7 @@ impl ClobHttp {
         key: &SigningKey,
         request: &EncodedRequest,
         timestamp_secs: i64,
-    ) -> Result<ClobResponse, ClobHttpError> {
+    ) -> Result<ClobResponse, TransportError> {
         let headers = clob_auth_headers(
             key,
             &ClobAuthRequest {
@@ -164,7 +162,7 @@ impl ClobHttp {
         &self,
         request: &EncodedRequest,
         headers: impl IntoIterator<Item = (&'static str, &str)>,
-    ) -> Result<ClobResponse, ClobHttpError> {
+    ) -> Result<ClobResponse, TransportError> {
         let url = url_of(request);
         let mut builder = self.builder(request, &url);
         for (name, value) in headers {
@@ -194,7 +192,7 @@ impl ClobHttp {
         &self,
         builder: reqwest::RequestBuilder,
         url: &str,
-    ) -> Result<ClobResponse, ClobHttpError> {
+    ) -> Result<ClobResponse, TransportError> {
         let response = self.http.send(builder, url).await?;
         let status = response.status().as_u16();
         let rate_limit = RateLimit::from_response(&response);

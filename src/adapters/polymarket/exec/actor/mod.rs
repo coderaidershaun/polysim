@@ -22,11 +22,12 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::adapters::edge::{
-    COMMAND_POLL, EdgeControl, EdgeDriver, EdgeSettings, EventFunnel, HOUSEKEEPING, OfflineStep,
-    RECENT_TRADES, RECONCILE_INTERVAL, Reader, Writer, run_edge,
+    COMMAND_POLL, EdgeControl, EdgeDriver, EventFunnel, HOUSEKEEPING, OfflineStep, RECENT_TRADES,
+    RECONCILE_INTERVAL,
 };
 use crate::adapters::exec::{ExecCore, ExecSession, ExecStop, SessionOutcome, SessionSetup};
 use crate::adapters::polymarket::rotation::WindowAssignment;
+use crate::adapters::socket::{Reader, Writer};
 use crate::ids::{AssetId, InstrumentId};
 use crate::msg::exec::{AssetBalance, CancelReason, ExecLaneItem};
 use crate::registry::InstrumentRow;
@@ -104,7 +105,7 @@ impl Heartbeat {
     }
 }
 
-struct Actor {
+pub(super) struct Actor {
     session: ExecSession<EventFunnel>,
     tokens: TokenTable,
     orders: OrderIndex,
@@ -143,7 +144,7 @@ struct Actor {
 }
 
 impl Actor {
-    fn new(setup: PolymarketExecAdapterSetup, stop: ExecStop, runtime: &Handle) -> Self {
+    pub(super) fn new(setup: PolymarketExecAdapterSetup, stop: ExecStop, runtime: &Handle) -> Self {
         let PolymarketExecAdapterSetup {
             instruments,
             credentials,
@@ -152,7 +153,8 @@ impl Actor {
             commands,
             producer,
             assignments,
-            context,
+            venue_clock_offset,
+            edge,
         } = setup;
         let request_signer = RequestSigner::new(&credentials, wallet.signer)
             .expect("the startup gate already built a request signer from these credentials");
@@ -162,8 +164,8 @@ impl Actor {
             LaneSetup {
                 http: Arc::new(http),
                 signer: Arc::new(request_signer),
-                clock: context.clock.clone(),
-                venue_clock_offset: context.venue_clock_offset,
+                clock: edge.clock.clone(),
+                venue_clock_offset,
             },
             runtime,
         );
@@ -181,22 +183,13 @@ impl Actor {
             .iter()
             .filter_map(|row| usize::try_from(row.max_num_orders?).ok())
             .sum();
-        let settings = EdgeSettings {
-            clock: context.clock,
-            fatal: context.fatal,
-            run_state: context.run_state,
-            backoff: context.backoff,
-            sweep_deadline: context.sweep_deadline,
-            disconnect_sweep_after: context.disconnect_sweep_after,
-            max_orders_per_side: context.max_orders_per_side,
-        };
         Self {
             session: ExecSession::new(SessionSetup {
                 venue: "polymarket",
-                core: ExecCore::with_limits(settings.max_orders_per_side, mirror_capacity),
+                core: ExecCore::with_limits(edge.max_orders_per_side, mirror_capacity),
                 instruments: instruments.iter().map(|row| row.instrument_id).collect(),
-                events: EventFunnel::new(producer, settings.clock.clone()),
-                fatal: settings.fatal.clone(),
+                events: EventFunnel::new(producer, edge.clock.clone()),
+                fatal: edge.fatal.clone(),
             }),
             tokens: TokenTable::with_retired_capacity(RETIRED_BINDINGS),
             orders: OrderIndex::with_capacity(ORDER_INDEX_CAPACITY),
@@ -205,7 +198,7 @@ impl Actor {
             signature_type: wallet.signature_type,
             signer,
             credentials,
-            control: EdgeControl::new(&settings, stop),
+            control: EdgeControl::new(&edge, stop),
             commands,
             lanes,
             outcomes,
@@ -384,18 +377,5 @@ impl EdgeDriver for Actor {
 
     fn abort_workers(&self) {
         self.lanes.abort();
-    }
-}
-
-pub(super) struct PolymarketExecActor;
-
-impl PolymarketExecActor {
-    pub(super) fn spawn(
-        setup: PolymarketExecAdapterSetup,
-        stop: ExecStop,
-        runtime: &Handle,
-    ) -> tokio::task::JoinHandle<()> {
-        let actor = Actor::new(setup, stop, runtime);
-        runtime.spawn(crate::log::tag_task("polymarket-exec", run_edge(actor)))
     }
 }

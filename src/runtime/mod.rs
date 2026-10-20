@@ -2,11 +2,10 @@
 //! under a watchdog deadline.
 //!
 //! Every submodule is either a PHASE of one run — `prepare`, `run`, `drain`, in that order — or the
-//! bring-up of ONE subsystem, named for it: `adapters`, `exec`, `link`, `persist`, `metrics`,
-//! `timer`, `queues`. The rest are leaves those two lean on: `error`, `preflight`, `rate_limits`,
-//! `exec_identity`.
+//! bring-up of ONE subsystem, named for it: `exec`, `link`, `persist`, `metrics`, `timer`, `queues`.
+//! The rest are leaves those two lean on: `error`, `exec_identity`. Which venue a run talks to is
+//! decided by the adapters, never here.
 
-mod adapters;
 mod drain;
 mod error;
 mod exec;
@@ -14,12 +13,9 @@ mod exec_identity;
 mod link;
 mod metrics;
 mod persist;
-mod preflight;
 mod prepare;
 mod queues;
-mod rate_limits;
 mod run;
-mod sim;
 mod timer;
 
 use std::sync::Arc;
@@ -32,7 +28,9 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 
 use crate::adapters::exec::EdgeHandle;
-use crate::adapters::polymarket::rotation::WindowAssignment;
+use crate::adapters::venue::{
+    MarketDataWiring, WindowAssignment, spawn_market_data, tap_heartbeat,
+};
 use crate::config::{Config, ExecutionMode, RunIdentity};
 use crate::exposure::{ExposureHandle, ExposureWriter, ExposureWriterConfig};
 use crate::hot::dispatch::{ExposureWiring, HotEngine, HotEngineSetup, LinkWiring};
@@ -49,24 +47,19 @@ use crate::sink::{LinkSink, MetricsSink, StrategyLogSink};
 use crate::time::{DurationUs, EngineClock};
 use crate::{error, info};
 
-use adapters::{AdapterWiring, spawn_adapters, tap_heartbeat};
 use drain::install_panic_hook;
 use exec::{ExecBringUp, ExecBringUpSetup, exec_bring_up};
 use link::link_bring_up;
 use metrics::MetricsHandle;
 use persist::{PersistBringUp, PersistBringUpSetup, persist_bring_up};
 use prepare::{Prepared, prepare};
-use queues::{InputQueues, attach_market_taps, build_input_queues};
+use queues::{InputQueues, build_input_queues};
 use timer::spawn_timer;
 
 pub use drain::decide_exit;
 pub use error::EngineError;
 pub use exec_identity::ExecutionLease;
-pub use preflight::{
-    SymbolScales, check_poly_market, check_symbol_order_capacity, check_symbol_scale,
-    stamp_poly_scales,
-};
-pub use rate_limits::{check_order_rate_limits, order_budget};
+pub use prepare::check_symbol_order_capacity;
 pub use run::run_trading_engine;
 
 const METRICS_RING_CAPACITY: usize = 64;
@@ -145,8 +138,8 @@ impl Engine {
             registry,
             runtime,
             exposure: restored_exposure,
-            execution: execution_preflight,
-            binance_rest_quiet,
+            execution: execution_venue,
+            rest_quiet,
         } = match prepare(&config, &identity, mode) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -236,20 +229,11 @@ impl Engine {
         let queues = build_input_queues(&registry, config.queues.input_capacity, &fatal);
         let InputQueues {
             ingress,
-            groups: group_producers,
+            groups: mut group_producers,
             timer: timer_producer,
             link: link_producer,
             exec: exec_producer,
         } = queues;
-
-        let (group_producers, market_taps) = match mode.is_some_and(ExecutionMode::is_simulated) {
-            true => {
-                let (tapped, taps) =
-                    attach_market_taps(&registry, config.queues.input_capacity, group_producers);
-                (tapped, Some(taps))
-            }
-            false => (group_producers, None),
-        };
 
         // One clock serves every edge producer's received/queued stamps; the hot engine
         // keeps its own separate one.
@@ -263,12 +247,12 @@ impl Engine {
             lease: execution_lease,
         } = match exec_bring_up(ExecBringUpSetup {
             execution: config.execution.as_ref(),
-            preflight: execution_preflight,
+            venue: execution_venue,
             registry: &registry,
             identity: &identity,
             producer: exec_producer,
-            taps: market_taps,
-            window_assignments: Some(assignments_rx),
+            groups: &mut group_producers,
+            window_assignments: assignments_rx,
             clock: &clock,
             fatal: &fatal,
             desired_run_state: control.desired().clone(),
@@ -333,7 +317,7 @@ impl Engine {
         // consumer exists.
         let exec = exec_spawn.map(|spawn| spawn(&tokio_handle));
 
-        let adapters = spawn_adapters(AdapterWiring {
+        let adapters = spawn_market_data(MarketDataWiring {
             registry: &registry,
             producers: group_producers,
             clock: &clock,
@@ -342,7 +326,7 @@ impl Engine {
             rotations_tx: &rotations_tx,
             window_assignments: Some(assignments_tx),
             tap_heartbeat: tap_heartbeat(&config),
-            binance_rest_quiet,
+            rest_quiet,
             tokio_handle: &tokio_handle,
         });
         info!(

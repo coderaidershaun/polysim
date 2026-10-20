@@ -19,68 +19,41 @@ use crate::shutdown::{FatalSignal, RunStateCell};
 use crate::time::{EngineClock, TsUs};
 use crate::{info, warn};
 
-use super::bringup::SimActorSetup;
 use super::core::latency::{LatencyBudget, rewound, shifted};
 use super::core::market::ResetReason;
 use super::driver::SimExecDriver;
-use super::lanes::{LaneBuffer, SimHorizon, SimLane};
+use super::lanes::{LaneBuffer, SimHorizon};
 use super::readiness::{ReadinessProof, SimReadiness};
 use super::tap::MarketTapLane;
 
 const LANE_POLL: Duration = Duration::from_millis(1);
 const SWEEP_PASSES: u32 = 8;
 
-pub struct SimActor {
-    driver: SimExecDriver,
-    commands: rtrb::Consumer<ExecLaneItem>,
-    trades: MarketTapLane,
-    depth: MarketTapLane,
-    producer: QueueProducer,
-    engine_clock: EngineClock,
-    assets: AssetDictionary,
-    symbols: SymbolTable,
-    identity: EngineIdentity,
-    latency: LatencyBudget,
-    horizon: SimHorizon,
-    commands_due: LaneBuffer<StampedExecCommand>,
-    readiness: SimReadiness,
-    market_recovery_generation: u64,
-    applied_through_ts_us: Option<TsUs>,
-    has_opened: bool,
-    stop: ExecStop,
-    run_state: RunStateCell,
-    fatal: FatalSignal,
-    is_parked: bool,
+pub(super) struct SimActor {
+    pub(super) driver: SimExecDriver,
+    pub(super) commands: rtrb::Consumer<ExecLaneItem>,
+    pub(super) trades: MarketTapLane,
+    pub(super) depth: MarketTapLane,
+    pub(super) producer: QueueProducer,
+    pub(super) engine_clock: EngineClock,
+    pub(super) assets: AssetDictionary,
+    pub(super) symbols: SymbolTable,
+    pub(super) identity: EngineIdentity,
+    pub(super) latency: LatencyBudget,
+    pub(super) horizon: SimHorizon,
+    pub(super) commands_due: LaneBuffer<StampedExecCommand>,
+    pub(super) readiness: SimReadiness,
+    pub(super) market_recovery_generation: u64,
+    pub(super) applied_through_ts_us: Option<TsUs>,
+    pub(super) has_opened: bool,
+    pub(super) stop: ExecStop,
+    pub(super) run_state: RunStateCell,
+    pub(super) fatal: FatalSignal,
+    pub(super) is_parked: bool,
+    pub(super) sweep_deadline: Duration,
 }
 
 impl SimActor {
-    fn new(setup: SimActorSetup, stop: ExecStop) -> Self {
-        let is_parked = setup.run_state.state() == RunState::Idle;
-        let market_recovery_generation = setup.driver.venue().market().recovery().generation;
-        Self {
-            driver: setup.driver,
-            commands: setup.commands,
-            trades: setup.trades,
-            depth: setup.depth,
-            producer: setup.producer,
-            engine_clock: setup.clock,
-            assets: setup.assets,
-            symbols: setup.symbols,
-            identity: setup.identity,
-            latency: setup.latency,
-            horizon: SimHorizon::unseeded(setup.latency),
-            commands_due: LaneBuffer::new(SimLane::Command, setup.lane_capacity),
-            readiness: SimReadiness::unseeded(),
-            market_recovery_generation,
-            applied_through_ts_us: None,
-            has_opened: false,
-            stop,
-            run_state: setup.run_state,
-            fatal: setup.fatal,
-            is_parked,
-        }
-    }
-
     /// Private on purpose: a venue started without its [`EdgeHandle`] has nothing that can ask it
     /// to sweep, so the only legitimate door is [`SimActor::spawn`].
     async fn run(mut self) {
@@ -99,12 +72,11 @@ impl SimActor {
         self.shut_down();
     }
 
-    pub(crate) fn spawn(setup: SimActorSetup, rt: &Handle) -> EdgeHandle {
-        let stop = ExecStop::new();
-        let sweep_deadline = setup.sweep_deadline;
-        let actor = Self::new(setup, stop.clone());
+    pub(super) fn spawn(self, rt: &Handle) -> EdgeHandle {
+        let stop = self.stop.clone();
+        let sweep_deadline = self.sweep_deadline;
         EdgeHandle {
-            join: rt.spawn(crate::log::tag_task("exchange-sim", actor.run())),
+            join: rt.spawn(crate::log::tag_task("exchange-sim", self.run())),
             stop,
             sweep_deadline,
             venue: "exchange simulator",

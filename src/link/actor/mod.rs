@@ -13,7 +13,7 @@ use rtrb::Consumer;
 use tokio::net::UdpSocket;
 use tokio::runtime::Handle;
 
-use crate::config::{ControllerLoss, ExecutionMode};
+use crate::config::{ConfigError, ControllerLoss, ExecutionMode, PeerSubscription};
 use crate::hot::spawn::LinkQueueProducer;
 use crate::msg::inbound::{InboundMessage, RunControl};
 use crate::msg::ui::UiChannels;
@@ -21,7 +21,7 @@ use crate::shutdown::{RunAssertion, RunControlGate, TaskHandle};
 use crate::time::{DurationUs, EngineClock, TsUs};
 use crate::{info, warn, warn_repeating};
 
-use super::control::{RunPhase, RunState, Subscribe, TopicSet};
+use super::control::{LINK_MAX_TOPICS, RunPhase, RunState, Subscribe, TopicSet};
 use super::envelope::{FrameGuard, LINK_MAX_DATAGRAM, LinkDecodeError, LinkIdentity, TopicId};
 use super::frame::{
     InboundLink, LinkBody, LinkDatagram, LinkFrame, LinkOrigin, LinkPayload, OutboundLink,
@@ -49,6 +49,52 @@ const REPORT_TICKS: u64 = 60;
 pub(crate) struct PeerFeed {
     pub address: SocketAddr,
     pub topics: TopicSet,
+}
+
+impl PeerFeed {
+    /// Resolves the topic names a config file gave against the ones this strategy declares in code.
+    pub(crate) fn resolve(
+        peer: &PeerSubscription,
+        strategy_topics: &[&'static str],
+    ) -> Result<Self, ConfigError> {
+        Ok(PeerFeed {
+            address: peer.address,
+            topics: resolve_topics(peer, strategy_topics)?,
+        })
+    }
+}
+
+fn resolve_topics(
+    peer: &PeerSubscription,
+    strategy_topics: &[&'static str],
+) -> Result<TopicSet, ConfigError> {
+    if peer.topics.is_empty() {
+        return Ok(TopicSet::ALL);
+    }
+    let mut ids = Vec::with_capacity(peer.topics.len() + 1);
+    for name in &peer.topics {
+        let id = TopicId::from_name(name, strategy_topics).ok_or_else(|| {
+            ConfigError::UnknownLinkTopic {
+                address: address_label(peer.address),
+                topic: name.clone(),
+            }
+        })?;
+        ids.push(id);
+    }
+    // The lifecycle topic cannot be opted out of: it carries the heartbeat, and without it a
+    // receiver cannot tell a dead feed from a quiet one.
+    if !ids.contains(&TopicId::LIFECYCLE) {
+        ids.push(TopicId::LIFECYCLE);
+    }
+    TopicSet::new(&ids).map_err(|_| ConfigError::TooManyPeerTopics {
+        address: address_label(peer.address),
+        count: ids.len(),
+        max: LINK_MAX_TOPICS,
+    })
+}
+
+fn address_label(address: SocketAddr) -> Box<str> {
+    address.to_string().into_boxed_str()
 }
 
 pub(crate) struct LinkActorSetup {

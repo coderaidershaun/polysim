@@ -119,7 +119,6 @@ pub(super) struct ErrorResponse {
     pub error_msg: String,
     #[serde(default)]
     pub code: String,
-    #[serde(default)]
     pub retry_after_seconds: Option<i64>,
 }
 

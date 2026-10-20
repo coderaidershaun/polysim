@@ -66,7 +66,7 @@ pub struct OrderCell {
 impl OrderCell {
     #[inline]
     pub fn remaining(self) -> Qty {
-        Qty((self.qty.0 - self.filled.0).max(0))
+        self.qty.remaining_after(self.filled)
     }
 }
 

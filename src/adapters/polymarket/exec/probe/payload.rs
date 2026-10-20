@@ -6,10 +6,11 @@
 
 use serde::Deserialize;
 
+use crate::adapters::http::TransportError;
 use crate::secrets::Secret;
 
 use super::super::codec::{ApiKeyPayload, decode_closed_only, decode_protocol_version};
-use super::super::rest::{ClobHttpError, ClobResponse};
+use super::super::rest::ClobResponse;
 use super::super::sign::l2::{ApiCredentials, L2Error};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -56,7 +57,7 @@ pub struct OpenOrders {
 #[derive(thiserror::Error, Debug)]
 pub enum ProbeError {
     #[error("the venue could not be reached")]
-    Http(#[from] ClobHttpError),
+    Http(#[from] TransportError),
     #[error("{url} answered http {status}: {body}")]
     Status {
         url: String,

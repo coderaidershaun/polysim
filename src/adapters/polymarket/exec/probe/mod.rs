@@ -87,6 +87,8 @@ pub struct Probe {
 }
 
 impl Probe {
+    /// # Errors
+    /// The HTTP client cannot be built because its TLS backend failed to start.
     pub fn new(key: SigningKey) -> Result<Self, ProbeError> {
         Ok(Self {
             http: ClobHttp::new(CONNECT_TIMEOUT, REQUEST_TIMEOUT)?,

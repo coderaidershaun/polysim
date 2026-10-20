@@ -9,7 +9,6 @@ use arrow_array::RecordBatch;
 use arrow_schema::{ArrowError, SchemaRef};
 
 use crate::config::ExecutionMode;
-use crate::ids::Side;
 use crate::time::TsUs;
 
 use self::column::Column;
@@ -66,11 +65,4 @@ pub(super) fn footer_metadata(meta: &RunMeta) -> Vec<(String, String)> {
 
 fn json_string_array(items: &[Box<str>]) -> String {
     serde_json::to_string(items).expect("a slice of strings always serialises to json")
-}
-
-fn side_str(side: Side) -> &'static str {
-    match side {
-        Side::Buy => "buy",
-        Side::Sell => "sell",
-    }
 }

@@ -34,6 +34,10 @@ pub struct OrderAmounts {
     pub taker: u128,
 }
 
+/// # Errors
+/// Any input the venue would refuse: a tick, price or size that is not positive, a tick too fine
+/// for six decimals, a price off the tick grid or within one tick of $1, a size finer than a
+/// hundredth of a share, or amounts that truncate to zero.
 pub fn order_amounts(request: &AmountRequest) -> Result<OrderAmounts, AmountError> {
     let AmountRequest {
         side,

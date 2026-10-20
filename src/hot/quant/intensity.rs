@@ -207,6 +207,12 @@ impl SideEstimate {
     pub fn a_mid_per_sec(&self, half_spread_ticks: f64) -> f64 {
         self.a_per_sec * (self.k_per_tick * half_spread_ticks).exp()
     }
+
+    /// A stale fit is a previous one re-dated: recording or publishing it would date a dead
+    /// market's liquidity to now.
+    pub fn fresh(self) -> Option<Self> {
+        (!self.is_stale).then_some(self)
+    }
 }
 
 /// Bid/ask/pooled fits (None before first fit).
@@ -245,24 +251,12 @@ impl Slot {
 }
 
 /// Warm-start cache (not Copy to prevent fork).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct IntensityFit {
     slots: [Option<SlotFit>; 3],
 }
 
-impl Default for IntensityFit {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl IntensityFit {
-    pub fn new() -> Self {
-        Self {
-            slots: [None, None, None],
-        }
-    }
-
     /// Fits A, k per side and pool. Below min_events returns prior fit (stale) or None.
     pub fn fit(&mut self, counts: &IntensityCounts, now: TsUs) -> IntensityEstimate {
         IntensityEstimate {
@@ -341,7 +335,7 @@ pub struct PacedIntensity {
 impl PacedIntensity {
     pub fn new(refit_interval: Option<DurationUs>) -> Self {
         Self {
-            fit: IntensityFit::new(),
+            fit: IntensityFit::default(),
             estimate: None,
             last_fit_ts_us: None,
             refit_interval,

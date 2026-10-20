@@ -6,13 +6,14 @@
 
 use std::ops::Range;
 
+use crate::config::MAX_QUOTE_LEVELS;
 use crate::ids::{ClientOrderId, InstrumentId, Price, Qty, Side, VenueOrderId};
 use crate::msg::exec::{ExecEvent, OrderStyle};
 use crate::msg::persist::OrderLifecycle;
 use crate::time::{DurationUs, TsUs};
 
 use super::account::AccountWatermark;
-use super::desired::{MAX_QUOTE_LEVELS, QuoteLevel};
+use super::desired::QuoteLevel;
 
 const SLOTS_PER_LEVEL: usize = 4;
 const SLOTS_PER_SIDE: usize = MAX_QUOTE_LEVELS * SLOTS_PER_LEVEL;

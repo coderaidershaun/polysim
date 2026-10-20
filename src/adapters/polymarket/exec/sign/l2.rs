@@ -113,6 +113,8 @@ pub struct RequestSigner {
 }
 
 impl RequestSigner {
+    /// # Errors
+    /// The API secret is not base64url text, or the passphrase is not UTF-8.
     pub fn new(credentials: &ApiCredentials, signer: Address) -> Result<Self, L2Error> {
         let mut secret = decode_base64url(&credentials.secret)?;
         let key = hmac::Key::new(hmac::HMAC_SHA256, &secret);

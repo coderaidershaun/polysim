@@ -14,7 +14,7 @@ use crate::desktop::position_chart_view::{self, QuoteBounds, RiskSeries};
 use crate::desktop::text::{
     AxisLabels, NO_EVENT_TIME, axis_labels, mid_note, risk_note, sign_tone,
 };
-use crate::ids::{Price, Side};
+use crate::ids::Price;
 use crate::time::DurationUs;
 
 use super::{Cursor, Encoder, Styled, series_word};
@@ -115,13 +115,6 @@ struct RiskBucketLine {
     pnl_label: String,
 }
 
-fn side_word(side: Side) -> &'static str {
-    match side {
-        Side::Buy => "buy",
-        Side::Sell => "sell",
-    }
-}
-
 impl Encoder {
     pub(super) fn chart(&mut self, model: &UiModel, domain: Option<ChartDomain>) -> Option<Chart> {
         let selected = model.selected();
@@ -200,7 +193,7 @@ impl Encoder {
             .map(|fill| ChartFillLine {
                 index: fill.index,
                 half_ticks: fill.half_ticks,
-                side: side_word(fill.side),
+                side: fill.side.as_str(),
             })
             .collect()
     }

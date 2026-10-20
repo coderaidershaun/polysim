@@ -6,6 +6,7 @@
 //! trading, whether its sell side is even reachable, and whether the venue still believes this
 //! process is alive.
 
+use crate::adapters::http::TransportError;
 use crate::ids::AssetId;
 use crate::msg::exec::AccountChunkKind;
 use crate::{info, warn};
@@ -15,7 +16,7 @@ use super::super::codec::{
     AccountStamps, account_snapshot, collateral_balance, conditional_balance, decode_balance,
     decode_clob_market, decode_heartbeat, decode_trades_page, trades_page,
 };
-use super::super::rest::{ClobHttpError, ClobResponse};
+use super::super::rest::ClobResponse;
 use super::Actor;
 use super::answer::read_body;
 use super::rest::{Lane, RestJob, RestPurpose, Submitted};
@@ -84,7 +85,7 @@ impl Actor {
         &mut self,
         asset: AssetId,
         resync_seq: Option<u64>,
-        answer: Result<ClobResponse, ClobHttpError>,
+        answer: Result<ClobResponse, TransportError>,
     ) {
         self.balances_outstanding = self.balances_outstanding.saturating_sub(1);
         let is_readable = self.fold_balance(asset, &answer);
@@ -125,7 +126,7 @@ impl Actor {
     fn fold_balance(
         &mut self,
         asset: AssetId,
-        answer: &Result<ClobResponse, ClobHttpError>,
+        answer: &Result<ClobResponse, TransportError>,
     ) -> bool {
         let response = match answer {
             Ok(response) => response,
@@ -158,7 +159,7 @@ impl Actor {
         &mut self,
         resync_seq: Option<u64>,
         page: u32,
-        answer: Result<ClobResponse, ClobHttpError>,
+        answer: Result<ClobResponse, TransportError>,
     ) {
         let response = match &answer {
             Ok(response) if response.is_success() => response,
@@ -227,7 +228,7 @@ impl Actor {
     pub(super) fn on_market_answer(
         &mut self,
         condition_id: &str,
-        answer: Result<ClobResponse, ClobHttpError>,
+        answer: Result<ClobResponse, TransportError>,
     ) {
         let step = match read_body("clob-markets", &answer) {
             Some(body) => match decode_clob_market(body) {
@@ -252,7 +253,7 @@ impl Actor {
     pub(super) fn on_allowance(
         &mut self,
         token_id: &str,
-        answer: Result<ClobResponse, ClobHttpError>,
+        answer: Result<ClobResponse, TransportError>,
     ) {
         let is_warm = read_body("balance-allowance/update", &answer).is_some();
         self.bindings.on_allowance_answered(token_id, is_warm);
@@ -266,7 +267,7 @@ impl Actor {
 
     /// The venue answers with the id the next heartbeat must echo, whether this one was
     /// refused or succeeded.
-    pub(super) fn on_heartbeat_answer(&mut self, answer: Result<ClobResponse, ClobHttpError>) {
+    pub(super) fn on_heartbeat_answer(&mut self, answer: Result<ClobResponse, TransportError>) {
         let Ok(response) = answer else {
             warn!(
                 "polymarket execution heartbeat request failed in transport — the venue cancels this book after ten seconds of silence"

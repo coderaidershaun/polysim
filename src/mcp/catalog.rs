@@ -121,9 +121,7 @@ pub(super) struct ParsedConfig {
 
 #[derive(Deserialize)]
 struct ConfigShape {
-    #[serde(default)]
     execution: Option<ExecutionShape>,
-    #[serde(default)]
     link: Option<LinkShape>,
 }
 

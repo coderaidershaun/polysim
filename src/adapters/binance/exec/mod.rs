@@ -11,7 +11,7 @@ use crate::config::BinanceEnv;
 use crate::hot::exec::{FeeModel, OrderBudget};
 use crate::secrets::CredentialVariables;
 
-pub use actor::handle::{BinanceExecAdapter, BinanceExecAdapterContext, BinanceExecAdapterSetup};
+pub(crate) use actor::handle::bring_up;
 pub use codec::{
     CLIENT_ORDER_ID_LEN, DecodeContext, DecodedResponse, EncodeContext, EncodedRequest,
     IgnoredReason, RejectSubject, ResponseContext, StreamEvent, SymbolTable, WireError,

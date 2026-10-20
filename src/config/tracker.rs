@@ -2,28 +2,21 @@
 
 use serde::Deserialize;
 
+/// A klines volume target averages this many trailing closed one-minute candles: one day.
+pub(crate) const TARGET_WINDOW_CANDLES: usize = 1_440;
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrackerSpec {
-    #[serde(default)]
     pub trades_all: Option<WindowsSpec>,
-    #[serde(default)]
     pub trades_buy: Option<WindowsSpec>,
-    #[serde(default)]
     pub trades_sell: Option<WindowsSpec>,
-    #[serde(default)]
     pub microprice: Option<WindowsSpec>,
-    #[serde(default)]
     pub imbalance: Option<ImbalanceSpec>,
-    #[serde(default)]
     pub candles: Option<CandlesSpec>,
-    #[serde(default)]
     pub spin_sampled: Option<SpinSampledSpec>,
-    #[serde(default)]
     pub volume_bars: Option<VolumeBarsSpec>,
-    #[serde(default)]
     pub ewma_vol: Option<EwmaVolSpec>,
-    #[serde(default)]
     pub intensity: Option<IntensitySpec>,
 }
 
@@ -67,7 +60,6 @@ pub struct SpinSampledSpec {
 pub struct VolumeBarsSpec {
     pub threshold: VolumeThreshold,
     pub keep: usize,
-    #[serde(default)]
     pub sampled: Option<SpinSampledSpec>,
 }
 
@@ -143,24 +135,19 @@ pub struct EwmaVolSpec {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct IntensitySpec {
-    #[serde(default = "default_max_depth_ticks")]
     pub max_depth_ticks: usize,
-    #[serde(default = "default_half_life_secs")]
     pub half_life_secs: f64,
-    #[serde(default = "default_min_events")]
     pub min_events: f64,
 }
 
-fn default_max_depth_ticks() -> usize {
-    32
-}
-
-fn default_half_life_secs() -> f64 {
-    600.0
-}
-
-fn default_min_events() -> f64 {
-    5.0
+impl Default for IntensitySpec {
+    fn default() -> Self {
+        Self {
+            max_depth_ticks: 32,
+            half_life_secs: 600.0,
+            min_events: 5.0,
+        }
+    }
 }

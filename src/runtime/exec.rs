@@ -1,31 +1,23 @@
-//! Shared bring-up for live and simulated execution edges.
+//! Shared bring-up for live and simulated execution edges: the venue-neutral half — the command
+//! lane, the lease, the settings every edge is built from — around the venue's own bring-up.
 
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use rtrb::RingBuffer;
+use tokio::sync::mpsc;
 
 use crate::adapters::backoff::BackoffCaps;
-use crate::adapters::binance::exec as binance_exec;
-use crate::adapters::binance::exec::{
-    BinanceExecAdapter, BinanceExecAdapterContext, BinanceExecAdapterSetup, RecvWindow,
-};
-use crate::adapters::exchange_sim;
-use crate::adapters::exec::{EdgeHandle, LeaseNamespace, TeTag, VenueCapabilities};
-use crate::adapters::polymarket::exec as polymarket_exec;
-use crate::adapters::polymarket::exec::handle::{
-    PolymarketExecAdapter, PolymarketExecAdapterContext, PolymarketExecAdapterSetup,
-};
-use crate::adapters::polymarket::rotation::WindowAssignment;
+use crate::adapters::edge::{EdgeInputs, EdgeSettings, EdgeSpawn, VenueEdge};
+use crate::adapters::exec::{TeTag, VenueCapabilities};
+use crate::adapters::venue::{ExecutionVenue, WindowAssignment};
 use crate::config::{
-    DEFAULT_QUOTE_STOP_MARGIN_MS, ExecutionConfig, ExecutionMode, MAX_ORDERS_PER_SIDE, RunIdentity,
-    validated_mantissa,
+    DEFAULT_QUOTE_STOP_MARGIN_MS, ExecutionConfig, ExecutionMode, RunIdentity, validated_mantissa,
 };
 use crate::hot::dispatch::ExecWiring;
 use crate::hot::exec::{
-    ExecLaneBudget, ExecLimits, ExecSettings, FeeModel, MAX_ORDER_INSTRUMENTS, MAX_QUOTE_LEVELS,
-    exec_lane_capacity,
+    ExecLaneBudget, ExecLimits, ExecSettings, FeeModel, MAX_ORDER_INSTRUMENTS, exec_lane_capacity,
 };
 use crate::hot::spawn::{QueueProducer, SimTapGate};
 use crate::info;
@@ -37,22 +29,10 @@ use crate::time::{DurationUs, EngineClock};
 
 use super::EngineError;
 use super::exec_identity::ExecutionLease;
-use super::prepare::VenuePreflight;
-use super::queues::MarketTaps;
-use super::rate_limits::order_budget;
-use super::sim::{SimBringUp, SimEdge, sim_bring_up};
-
-// Config refuses a ladder deeper than the hot side's fixed one, so the two bounds must name the
-// same number.
-const _: () = assert!(MAX_ORDERS_PER_SIDE as usize == MAX_QUOTE_LEVELS);
 
 /// The cancel sweep's share of the drain deadline, as a fraction rather than a fixed
 /// reserve: half goes to the sweep, half to the hot-thread join and the file drains.
 const SWEEP_SHARE_OF_DRAIN: u32 = 2;
-
-/// The chosen venue's setup, held until the hot thread exists: an edge is decided during bring-up
-/// but must not produce into the execution input queue before its consumer is running.
-pub(super) type EdgeSpawn = Box<dyn FnOnce(&tokio::runtime::Handle) -> EdgeHandle + Send>;
 
 pub(super) struct ExecBringUp {
     pub(super) wiring: Option<ExecWiring>,
@@ -76,17 +56,19 @@ impl ExecBringUp {
 
 pub(super) struct ExecBringUpSetup<'a> {
     pub(super) execution: Option<&'a ExecutionConfig>,
-    /// Proof the startup gate passed. `None` when execution is disarmed or absent, since
-    /// the probe never ran.
-    pub(super) preflight: Option<VenuePreflight>,
+    /// The venue the startup gate probed and passed. `None` when execution is disarmed or absent,
+    /// since the probe never ran.
+    pub(super) venue: Option<ExecutionVenue>,
     pub(super) registry: &'a Registry,
     pub(super) identity: &'a RunIdentity,
     /// The write end of the execution input queue; `None` if the registry allocated no queue.
     pub(super) producer: Option<QueueProducer>,
-    pub(super) taps: Option<MarketTaps>,
-    /// Rotation bindings flowing from the market-data actor to the execution edge. `None`
-    /// on a source that mints none.
-    pub(super) window_assignments: Option<tokio::sync::mpsc::Receiver<WindowAssignment>>,
+    /// The market-data queue producers, handed over so a venue that matches orders against the
+    /// live market can tap them.
+    pub(super) groups: &'a mut Vec<QueueProducer>,
+    /// Rotation bindings flowing from the market-data actor to the execution edge, which only a
+    /// venue that rotates markets reads.
+    pub(super) window_assignments: mpsc::Receiver<WindowAssignment>,
     pub(super) clock: &'a EngineClock,
     pub(super) fatal: &'a FatalSignal,
     pub(super) desired_run_state: RunStateCell,
@@ -99,7 +81,8 @@ pub(super) struct ExecBringUpSetup<'a> {
 /// # Errors
 /// [`EngineError::ExecutionNotWired`] when an armed config reaches here without the probe or the
 /// input queue that arming implies, [`EngineError::ExecutionTooManyInstruments`] when the order
-/// table cannot address every row, and `ExecutionIdentity*` when lease acquisition fails.
+/// table cannot address every row, `ExecutionIdentity*` when lease acquisition fails, and
+/// [`EngineError::Venue`] when the venue refuses the config or its own bring-up.
 pub(super) fn exec_bring_up(mut setup: ExecBringUpSetup<'_>) -> Result<ExecBringUp, EngineError> {
     let Some(execution) = setup.execution.filter(|config| config.mode.is_enabled()) else {
         return Ok(ExecBringUp::disabled());
@@ -134,149 +117,53 @@ pub(super) fn exec_bring_up(mut setup: ExecBringUpSetup<'_>) -> Result<ExecBring
     );
     let sweep_deadline = setup.drain_deadline / SWEEP_SHARE_OF_DRAIN;
 
-    let lease_dir = setup.lease_dir;
-    // Acquiring the lease spends a run nonce that client order ids are minted under, so a config
-    // this venue cannot honour is refused before one is burnt on it.
-    let refuse_or_acquire_lease = move |capabilities: &VenueCapabilities,
-                                        namespace: &LeaseNamespace<'_>|
-          -> Result<ExecutionLease, EngineError> {
-        check_execution_against_venue(capabilities, execution)?;
-        ExecutionLease::acquire(lease_dir, te_tag, namespace)
-    };
-
     // Each venue's physics come from the venue's own module. Read here, where the venue is known,
     // and carried into `settings` — the hot engine stays venue-neutral and never names one.
-    let (lease, spawn, tap_gate, venue, capabilities) = match execution.mode {
-        ExecutionMode::Sim => {
-            let capabilities = exchange_sim::capabilities();
-            let lease = refuse_or_acquire_lease(&capabilities, &exchange_sim::lease_namespace())?;
-            let identity = lease.identity(te_tag);
-            let taps = setup.taps.take();
-            let SimEdge { spawn, tap_gate } = sim_bring_up(SimBringUp {
-                setup: &setup,
-                execution,
-                identity,
-                commands: commands_consumer,
-                producer,
-                taps,
-                lane_capacity,
-                sweep_deadline,
-            })?;
-            (
-                lease,
-                spawn,
-                Some(tap_gate),
-                "the simulated binance spot venue".to_owned(),
-                capabilities,
-            )
-        }
-        ExecutionMode::Live => match setup.preflight.take() {
-            None => {
-                return Err(EngineError::ExecutionNotWired {
-                    mode,
-                    detail: "the startup permission probe was never run",
-                });
-            }
-            Some(VenuePreflight::Binance(preflight)) => {
-                let env = setup.registry.binance_env().expect(
-                    "a binance probe implies a binance source, which stamps its deployment",
-                );
-                let capabilities =
-                    binance_exec::capabilities(order_budget(setup.registry.order_rate_limits())?);
-                let lease = refuse_or_acquire_lease(
-                    &capabilities,
-                    &binance_exec::lease_namespace(
-                        env,
-                        preflight.credentials.api_key().expose_bytes(),
-                    ),
-                )?;
-                let identity = lease.identity(te_tag);
-                let live = BinanceExecAdapterSetup {
-                    instruments: instruments.to_vec(),
-                    assets: setup.registry.assets().clone(),
-                    credentials: preflight.credentials,
-                    rest: preflight.rest,
-                    commands: commands_consumer,
-                    producer,
-                    context: BinanceExecAdapterContext {
-                        env,
-                        clock: setup.clock.clone(),
-                        fatal: setup.fatal.clone(),
-                        run_state: setup.desired_run_state.clone(),
-                        backoff: BackoffCaps::default(),
-                        identity,
-                        max_orders_per_side: execution.max_orders_per_side as usize,
-                        recv_window: RecvWindow::from_millis(execution.recv_window_ms)
-                            .map_err(EngineError::BinanceRecvWindow)?,
-                        sweep_deadline,
-                        disconnect_sweep_after: DurationUs::from_secs(
-                            execution.disconnect_sweep_secs as i64,
-                        ),
-                        loud_clock_skew: DurationUs::from_millis(
-                            execution.max_clock_skew_ms as i64,
-                        ),
-                    },
-                };
-                (
-                    lease,
-                    Box::new(move |runtime: &tokio::runtime::Handle| {
-                        BinanceExecAdapter::spawn(live, runtime)
-                    }) as EdgeSpawn,
-                    None,
-                    format!("binance {}", env.as_str()),
-                    capabilities,
-                )
-            }
-            Some(VenuePreflight::Polymarket(preflight)) => {
-                let capabilities = polymarket_exec::capabilities();
-                let signer = preflight.wallet.signer.to_checksum_hex();
-                let lease = refuse_or_acquire_lease(
-                    &capabilities,
-                    &polymarket_exec::lease_namespace(&signer),
-                )?;
-                let live = PolymarketExecAdapterSetup {
-                    instruments: instruments.to_vec(),
-                    credentials: preflight.credentials,
-                    key: preflight.key,
-                    wallet: preflight.wallet,
-                    commands: commands_consumer,
-                    producer,
-                    assignments: setup.window_assignments.take().ok_or(
-                        EngineError::ExecutionNotWired {
-                            mode,
-                            detail: "no rotation binding channel reaches the execution edge",
-                        },
-                    )?,
-                    context: PolymarketExecAdapterContext {
-                        clock: setup.clock.clone(),
-                        fatal: setup.fatal.clone(),
-                        run_state: setup.desired_run_state.clone(),
-                        backoff: BackoffCaps::default(),
-                        venue_clock_offset: preflight.venue_clock_offset,
-                        max_orders_per_side: execution.max_orders_per_side as usize,
-                        sweep_deadline,
-                        disconnect_sweep_after: DurationUs::from_secs(
-                            execution.disconnect_sweep_secs as i64,
-                        ),
-                    },
-                };
-                (
-                    lease,
-                    Box::new(move |runtime: &tokio::runtime::Handle| {
-                        PolymarketExecAdapter::spawn(live, runtime)
-                    }) as EdgeSpawn,
-                    None,
-                    "polymarket".to_owned(),
-                    capabilities,
-                )
-            }
-        },
+    let venue = match execution.mode {
+        ExecutionMode::Sim => ExecutionVenue::Simulated,
+        ExecutionMode::Live => setup.venue.take().ok_or(EngineError::ExecutionNotWired {
+            mode,
+            detail: "the startup permission probe was never run",
+        })?,
         ExecutionMode::Off => unreachable!("disabled execution was filtered above"),
     };
+    let capabilities = venue.capabilities(setup.registry)?;
+    // Acquiring the lease spends a run nonce that client order ids are minted under, so a config
+    // this venue cannot honour is refused before one is burnt on it.
+    check_execution_against_venue(&capabilities, execution)?;
+    let lease = venue.with_lease_namespace(|namespace| {
+        ExecutionLease::acquire(setup.lease_dir, te_tag, namespace)
+    })?;
+    let described = venue.describe();
+    let VenueEdge { spawn, tap_gate } = venue.bring_up(
+        EdgeInputs {
+            registry: setup.registry,
+            execution,
+            identity: lease.identity(te_tag),
+            commands: commands_consumer,
+            producer,
+            settings: EdgeSettings {
+                clock: setup.clock.clone(),
+                fatal: setup.fatal.clone(),
+                run_state: setup.desired_run_state.clone(),
+                backoff: BackoffCaps::default(),
+                sweep_deadline,
+                disconnect_sweep_after: DurationUs::from_secs(
+                    execution.disconnect_sweep_secs as i64,
+                ),
+                max_orders_per_side: execution.max_orders_per_side as usize,
+            },
+            groups: setup.groups,
+            lane_capacity,
+            spin_interval: setup.spin_interval,
+            input_capacity: setup.input_capacity,
+        },
+        setup.window_assignments,
+    )?;
 
     let run_nonce = lease.run_nonce();
     info!(
-        "execution {mode} on {venue}: sweep deadline {}ms inside a {}ms drain, run nonce {run_nonce:08x}",
+        "execution {mode} on {described}: sweep deadline {}ms inside a {}ms drain, run nonce {run_nonce:08x}",
         sweep_deadline.as_millis(),
         setup.drain_deadline.as_millis()
     );
@@ -304,7 +191,7 @@ fn check_execution_against_venue(
 ) -> Result<(), EngineError> {
     // Two settings are deliberately not checked here: recv_window_ms and max_clock_skew_ms bound a
     // request-signing protocol rather than anything a venue does. Each is bounded already — the
-    // first where the binance edge turns it into a signed window, the second by config validation
+    // first where the signing edge turns it into a signed window, the second by config validation
     // for every venue — so on a venue that reads neither they are merely inert, which is accepted.
     // Giving a signing detail a capability of its own would grow VenueCapabilities every time one
     // venue gains a knob.

@@ -1,9 +1,8 @@
 //! Strategy desired quotes per instrument/side. Level-triggered (survives one spin), not per-message (cleared every drain). Expired declaration = cancel. No escape hatch: declare every spin or absent.
 
+use crate::config::MAX_QUOTE_LEVELS;
 use crate::ids::{InstrumentId, Price, Qty, Side};
 use crate::msg::exec::OrderStyle;
-
-pub const MAX_QUOTE_LEVELS: usize = 8;
 
 /// A stable ladder identity, not a position in a sorted list: a price change never makes one live
 /// order masquerade as another level, and an absent level has exactly one meaning, which is to

@@ -14,7 +14,7 @@ use super::desired::QuoteLevel;
 use super::engine::ExecEngine;
 use super::gates::HaltReason;
 use super::order::{CloseReason, OrderClaim, OrderState};
-use super::reconcile::{PlaceIntent, ReconcileOutcome, spend_of};
+use super::reconcile::{PlaceIntent, ReconcileOutcome};
 use super::spin::SpinInput;
 
 impl ExecEngine {
@@ -155,7 +155,7 @@ impl ExecEngine {
             return None;
         };
         let asset = self.instruments[usize::from(instrument.0)].spend_asset(side);
-        let amount = spend_of(side, intent.price, intent.qty);
+        let amount = side.spend(intent.price, intent.qty);
         let reserved_at = self.account.reserve(asset, amount);
         let slot = self.orders.slot_mut(index);
         slot.reserved_amount = amount;

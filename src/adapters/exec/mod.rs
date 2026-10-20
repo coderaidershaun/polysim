@@ -20,11 +20,9 @@ pub use effect::{
     ExecEffect, ExecRequest, Outgoing, PlaceNotSentReason, RequestId, SkipReason, TimeoutFallout,
 };
 pub use event::open_orders_snapshot_end;
-#[allow(unused_imports)]
-// adopted by the next lean-overhaul stream; remove with the first caller
-pub(crate) use event::{ChunkStamps, account_chunks};
 pub(crate) use event::{
-    amend_not_sent, blank, place_not_sent, request_timed_out, stream_ready, stream_reset,
+    ChunkStamps, account_chunks, amend_not_sent, blank, place_not_sent, request_timed_out,
+    stream_ready, stream_reset,
 };
 pub(crate) use exit::{EdgeHandle, ExecStop, ExitPlan, SessionOutcome};
 pub use identity::{EngineIdentity, LeaseNamespace, OrderOwnership, TeTag};

@@ -16,19 +16,10 @@ use crate::warn;
 // The sole mechanism for pacing cancel retries after the hot path stops.
 const SWEEP_RETRY: DurationUs = DurationUs::from_micros(500_000);
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct ExecStop {
     pub(crate) requested: Arc<AtomicBool>,
     pub(crate) settled: Arc<Notify>,
-}
-
-impl ExecStop {
-    pub(crate) fn new() -> Self {
-        Self {
-            requested: Arc::new(AtomicBool::new(false)),
-            settled: Arc::new(Notify::new()),
-        }
-    }
 }
 
 /// What the runtime holds after a venue edge is spawned. Dropping it detaches; shutting it down
@@ -53,7 +44,7 @@ impl EdgeHandle {
         sweep_deadline: Duration,
         start: impl FnOnce(ExecStop) -> JoinHandle<()>,
     ) -> Self {
-        let stop = ExecStop::new();
+        let stop = ExecStop::default();
         let join = start(stop.clone());
         Self {
             join,

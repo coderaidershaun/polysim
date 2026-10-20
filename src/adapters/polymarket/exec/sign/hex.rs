@@ -24,6 +24,9 @@ pub(super) fn prefixed_lower(bytes: &[u8]) -> String {
 }
 
 /// Optional `0x` prefix accepted; count must be even.
+///
+/// # Errors
+/// An odd number of characters, or a character that is not hex.
 pub fn decode(text: &str) -> Result<Vec<u8>, HexError> {
     let body = text.strip_prefix("0x").unwrap_or(text);
     if !body.len().is_multiple_of(2) {

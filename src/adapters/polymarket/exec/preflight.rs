@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use crate::adapters::http::TransportError;
 use crate::secrets::{EnvFile, SecretError};
 use crate::time::DurationUs;
 use crate::{info, warn};
@@ -12,7 +13,7 @@ use crate::{info, warn};
 use super::codec::{PROTOCOL_VERSION, collateral_balance, open_orders_page};
 use super::handle::WalletIdentity;
 use super::probe::{Geoblock, Probe, ProbeError};
-use super::rest::{ClobHttp, ClobHttpError, ClobResponse};
+use super::rest::{ClobHttp, ClobResponse};
 use super::sign::address::{Address, AddressError};
 use super::sign::key::{KeyError, SigningKey};
 use super::sign::l2::{ApiCredentials, RequestSigner};
@@ -225,7 +226,7 @@ async fn report_account(
     );
 }
 
-fn report_read(what: &str, answer: Result<ClobResponse, ClobHttpError>) {
+fn report_read(what: &str, answer: Result<ClobResponse, TransportError>) {
     match answer {
         Ok(response) if response.is_success() => {
             info!("polymarket {what} before arming: {}", response.excerpt());

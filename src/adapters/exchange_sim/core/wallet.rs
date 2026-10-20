@@ -173,7 +173,7 @@ impl SimWallet {
     }
 
     pub fn reserve(&mut self, request: ReservationRequest) -> ReserveOutcome {
-        let amount = total_reservation(request.side, request.price, request.qty);
+        let amount = request.side.spend(request.price, request.qty);
         let funds = self.funds_mut(WalletSlot::of(request.side, Reserved));
         if funds.free < amount {
             return ReserveOutcome::InsufficientFunds;
@@ -293,7 +293,7 @@ impl SimWallet {
             total_qty.0,
             reservation.cumulative_qty.0
         );
-        let new_total = total_reservation(reservation.side, reservation.price, total_qty);
+        let new_total = reservation.side.spend(reservation.price, total_qty);
         let released = reservation.total_reservation - new_total;
         reservation.total_qty = total_qty;
         reservation.total_reservation = new_total;
@@ -393,13 +393,6 @@ pub enum WalletError {
     SameAsset { asset: AssetId },
     #[error("opening balance {amount} for asset {} is negative", asset.0)]
     NegativeOpeningBalance { asset: AssetId, amount: i64 },
-}
-
-fn total_reservation(side: Side, price: Price, qty: Qty) -> i64 {
-    match side {
-        Side::Buy => price.notional(qty),
-        Side::Sell => qty.0,
-    }
 }
 
 fn narrow(amount: i128) -> i64 {

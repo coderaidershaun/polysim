@@ -36,27 +36,25 @@ pub struct SymbolInfo {
 pub struct SymbolFilter {
     #[serde(rename = "filterType")]
     pub filter_type: Box<str>,
-    #[serde(rename = "tickSize", default)]
+    #[serde(rename = "tickSize")]
     pub tick_size: Option<Box<str>>,
-    #[serde(rename = "stepSize", default)]
+    #[serde(rename = "stepSize")]
     pub step_size: Option<Box<str>>,
-    #[serde(rename = "minPrice", default)]
+    #[serde(rename = "minPrice")]
     pub min_price: Option<Box<str>>,
-    #[serde(rename = "maxPrice", default)]
+    #[serde(rename = "maxPrice")]
     pub max_price: Option<Box<str>>,
-    #[serde(rename = "minQty", default)]
+    #[serde(rename = "minQty")]
     pub min_qty: Option<Box<str>>,
-    #[serde(rename = "maxQty", default)]
+    #[serde(rename = "maxQty")]
     pub max_qty: Option<Box<str>>,
-    #[serde(rename = "minNotional", default)]
+    #[serde(rename = "minNotional")]
     pub min_notional: Option<Box<str>>,
-    #[serde(default)]
     pub notional: Option<Box<str>>,
-    #[serde(rename = "maxNumOrders", default)]
+    #[serde(rename = "maxNumOrders")]
     pub max_num_orders: Option<u32>,
-    #[serde(default)]
     pub limit: Option<u32>,
-    #[serde(rename = "maxNumOrderAmends", default)]
+    #[serde(rename = "maxNumOrderAmends")]
     pub max_num_order_amends: Option<u32>,
 }
 
@@ -135,7 +133,7 @@ pub struct OrderRecord {
     pub order_id: i64,
     #[serde(rename = "clientOrderId", default)]
     pub client_order_id: Box<str>,
-    #[serde(rename = "origClientOrderId", default)]
+    #[serde(rename = "origClientOrderId")]
     pub orig_client_order_id: Option<Box<str>>,
     pub price: Box<str>,
     #[serde(rename = "origQty", alias = "qty")]
@@ -147,10 +145,10 @@ pub struct OrderRecord {
     pub status: Box<str>,
     #[serde(default)]
     pub side: Box<str>,
-    #[serde(rename = "time", default)]
+    #[serde(rename = "time")]
     pub time_ms: Option<i64>,
-    #[serde(rename = "updateTime", default)]
+    #[serde(rename = "updateTime")]
     pub update_time_ms: Option<i64>,
-    #[serde(rename = "transactTime", default)]
+    #[serde(rename = "transactTime")]
     pub transact_time_ms: Option<i64>,
 }

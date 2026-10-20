@@ -15,7 +15,10 @@ pub(crate) mod lane;
 pub mod polymarket;
 pub mod rest_quiet;
 pub(crate) mod socket;
+pub(crate) mod venue;
 pub mod venue_clock;
+
+pub use venue::VenueError;
 
 /// How often a parked adapter looks up to see whether the run resumed. Slow enough to cost nothing
 /// while idle, quick enough that a resume is not felt.

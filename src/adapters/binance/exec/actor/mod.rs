@@ -20,12 +20,13 @@ use tokio::task::JoinHandle;
 use crate::adapters::binance::rest::BinanceEnv;
 use crate::adapters::binance::ws;
 use crate::adapters::edge::{
-    COMMAND_POLL, EdgeControl, EdgeDriver, EdgeSettings, EventFunnel, HOUSEKEEPING, OfflineStep,
-    RECENT_TRADES, RECONCILE_INTERVAL, Reader, Writer,
+    COMMAND_POLL, EdgeControl, EdgeDriver, EventFunnel, HOUSEKEEPING, OfflineStep, RECENT_TRADES,
+    RECONCILE_INTERVAL,
 };
 use crate::adapters::exec::{
     EngineIdentity, ExecCore, ExecSession, ExecStop, SessionOutcome, SessionSetup,
 };
+use crate::adapters::socket::{Reader, Writer};
 use crate::ids::{ClientOrderId, InstrumentId, TradeId, VenueOrderId};
 use crate::msg::exec::{CancelReason, ExecLaneItem};
 use crate::registry::AssetDictionary;
@@ -108,7 +109,11 @@ impl Actor {
             rest,
             commands,
             producer,
-            context,
+            env,
+            identity,
+            recv_window,
+            loud_clock_skew,
+            edge,
         } = setup;
         let symbols = SymbolTable::new(
             instruments
@@ -119,7 +124,7 @@ impl Actor {
         let api_key = frame::api_key_text(credentials.api_key())
             .expect("the binance api key must be text — it rides the ws api as a json param");
         let clock_offset = rest.clock_offset();
-        let channels = rest::spawn_rest_worker(rest, symbols.clone(), context.identity, rt);
+        let channels = rest::spawn_rest_worker(rest, symbols.clone(), identity, rt);
         let RestChannels {
             jobs: rest_jobs,
             outcomes: rest_outcomes,
@@ -134,30 +139,21 @@ impl Actor {
                 total.checked_add(limit)
             })
             .unwrap_or(0);
-        let settings = EdgeSettings {
-            clock: context.clock,
-            fatal: context.fatal,
-            run_state: context.run_state,
-            backoff: context.backoff,
-            sweep_deadline: context.sweep_deadline,
-            disconnect_sweep_after: context.disconnect_sweep_after,
-            max_orders_per_side: context.max_orders_per_side,
-        };
         Self {
             session: ExecSession::new(SessionSetup {
                 venue: "binance",
-                core: ExecCore::with_limits(settings.max_orders_per_side, mirror_capacity),
+                core: ExecCore::with_limits(edge.max_orders_per_side, mirror_capacity),
                 instruments: instruments.iter().map(|row| row.instrument_id).collect(),
-                events: EventFunnel::new(producer, settings.clock.clone()),
-                fatal: settings.fatal.clone(),
+                events: EventFunnel::new(producer, edge.clock.clone()),
+                fatal: edge.fatal.clone(),
             }),
             symbols,
             assets,
-            identity: context.identity,
-            env: context.env,
-            control: EdgeControl::new(&settings, stop),
-            recv_window: context.recv_window,
-            loud_clock_skew: context.loud_clock_skew,
+            identity,
+            env,
+            control: EdgeControl::new(&edge, stop),
+            recv_window,
+            loud_clock_skew,
             commands,
             signer,
             api_key,

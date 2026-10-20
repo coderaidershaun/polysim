@@ -1,17 +1,14 @@
-//! Link setup: bind the socket, hash the identity, resolve the peer topic names a config file gave
-//! against the ones this strategy declares in code.
-
-use std::net::SocketAddr;
+//! Link setup: bind the socket, hash the identity, and resolve each peer subscription the config
+//! file gave, before anything spawns.
 
 use tokio::net::UdpSocket;
 use tokio::runtime::Runtime;
 
-use crate::config::{Config, ConfigError, PeerSubscription, RunIdentity};
+use crate::config::{Config, RunIdentity};
 use crate::hot::strategy::Strategy;
 use crate::info;
 use crate::link::{
-    FrameGuard, LINK_NAME_LEN, LinkHash, LinkIdentity, PeerFeed, TopicId, TopicSet,
-    schema_hash_of_fields,
+    FrameGuard, LINK_NAME_LEN, LinkHash, LinkIdentity, PeerFeed, TopicId, schema_hash_of_fields,
 };
 use crate::registry::Registry;
 use crate::time::boot_stamp_us;
@@ -25,66 +22,6 @@ pub(super) struct BoundLink {
     pub peers: Vec<PeerFeed>,
     pub topic_count: usize,
     pub feature_count: u16,
-}
-
-fn resolve_peers(
-    subscriptions: &[PeerSubscription],
-    strategy_topics: &[&'static str],
-) -> Result<Vec<PeerFeed>, ConfigError> {
-    subscriptions
-        .iter()
-        .map(|peer| {
-            Ok(PeerFeed {
-                address: peer.address,
-                topics: resolve_topics(peer, strategy_topics)?,
-            })
-        })
-        .collect()
-}
-
-fn resolve_topics(
-    peer: &PeerSubscription,
-    strategy_topics: &[&'static str],
-) -> Result<TopicSet, ConfigError> {
-    if peer.topics.is_empty() {
-        return Ok(TopicSet::ALL);
-    }
-    let mut ids = Vec::with_capacity(peer.topics.len() + 1);
-    for name in &peer.topics {
-        let id =
-            resolve_topic(name, strategy_topics).ok_or_else(|| ConfigError::UnknownLinkTopic {
-                address: address_label(peer.address),
-                topic: name.clone(),
-            })?;
-        ids.push(id);
-    }
-    // Lifecycle not opt-out (heartbeat; receiver can't tell dead feed from quiet).
-    if !ids.contains(&TopicId::LIFECYCLE) {
-        ids.push(TopicId::LIFECYCLE);
-    }
-    TopicSet::new(&ids).map_err(|_| ConfigError::TooManyPeerTopics {
-        address: address_label(peer.address),
-        count: ids.len(),
-        max: crate::link::LINK_MAX_TOPICS,
-    })
-}
-
-fn resolve_topic(name: &str, strategy_topics: &[&'static str]) -> Option<TopicId> {
-    match name {
-        "books" => Some(TopicId::BOOKS),
-        "events" => Some(TopicId::EVENTS),
-        "catalog_instruments" => Some(TopicId::CATALOG_INSTRUMENTS),
-        "catalog_features" => Some(TopicId::CATALOG_FEATURES),
-        "lifecycle" => Some(TopicId::LIFECYCLE),
-        _ => strategy_topics
-            .iter()
-            .position(|declared| *declared == name)
-            .map(TopicId::strategy),
-    }
-}
-
-fn address_label(address: SocketAddr) -> Box<str> {
-    address.to_string().into_boxed_str()
 }
 
 /// Bind socket + settle identity, guard and peer set, or Ok(None) with no link: block.
@@ -124,7 +61,11 @@ pub(super) fn link_bring_up<P>(
     }
 
     let topics = strategy.link_topics();
-    let peers = resolve_peers(&link_config.subscribe, topics)?;
+    let peers = link_config
+        .subscribe
+        .iter()
+        .map(|peer| PeerFeed::resolve(peer, topics))
+        .collect::<Result<Vec<_>, _>>()?;
     let socket = runtime
         .block_on(UdpSocket::bind(link_config.bind))
         .map_err(|source| EngineError::LinkBind {

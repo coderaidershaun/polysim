@@ -25,6 +25,8 @@ pub struct SigningKey {
 }
 
 impl SigningKey {
+    /// # Errors
+    /// The secret is not hex text, does not decode to 32 bytes, or is not a valid secp256k1 key.
     pub fn from_secret(secret: &Secret) -> Result<Self, KeyError> {
         let text = str::from_utf8(secret.expose_bytes()).map_err(|_| KeyError::NotUtf8)?;
         let mut bytes = hex::decode(text.trim()).map_err(|source| KeyError::NotHex { source })?;

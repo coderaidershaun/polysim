@@ -95,6 +95,22 @@ impl TopicId {
     pub const fn is_strategy_topic(self) -> bool {
         self.0 >= Self::FIRST_STRATEGY.0
     }
+
+    /// The topic a config file names: an engine topic by its fixed name, else the strategy topic
+    /// declared under that name.
+    pub(crate) fn from_name(name: &str, strategy_topics: &[&'static str]) -> Option<Self> {
+        match name {
+            "books" => Some(TopicId::BOOKS),
+            "events" => Some(TopicId::EVENTS),
+            "catalog_instruments" => Some(TopicId::CATALOG_INSTRUMENTS),
+            "catalog_features" => Some(TopicId::CATALOG_FEATURES),
+            "lifecycle" => Some(TopicId::LIFECYCLE),
+            _ => strategy_topics
+                .iter()
+                .position(|declared| *declared == name)
+                .map(TopicId::strategy),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

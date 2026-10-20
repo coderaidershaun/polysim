@@ -5,6 +5,7 @@
 //! order is load-bearing. Committing a decision to a command lives in mint.rs, which the flatten
 //! pass reaches too — deciding and committing have different callers.
 
+use crate::config::MAX_QUOTE_LEVELS;
 use crate::hot::book::{Book, BookState};
 use crate::hot::ledger::PositionLedger;
 use crate::hot::strategy::{Actions, WindowInfo};
@@ -14,7 +15,7 @@ use crate::msg::inbound::SpinTick;
 use crate::msg::persist::OrderTransition;
 use crate::time::TsUs;
 
-use super::desired::{DesiredBook, DesiredQuote, MAX_QUOTE_LEVELS, QuoteLevel};
+use super::desired::{DesiredBook, DesiredQuote, QuoteLevel};
 use super::engine::{ExecEngine, resting_of};
 use super::gates::{ExposureCheck, HaltReason, QuotePermission, assess_exposure};
 use super::order::{MAX_ORDER_SLOTS, OrderState};

@@ -5,8 +5,8 @@ use crate::msg::exec::{Liquidity, OrderStyle, RejectClass};
 use crate::msg::persist::{FillRow, OrderRow};
 use crate::time::TsUs;
 
+use super::TableRow;
 use super::column::Column;
-use super::{TableRow, side_str};
 
 fn reject_str(reject: Option<RejectClass>) -> &'static str {
     reject.map_or("none", RejectClass::as_str)
@@ -37,7 +37,7 @@ impl TableRow for OrderRow {
         Column::Text("state", |row| row.state.as_str()),
         Column::Text("previous_state", |row| row.previous_state.as_str()),
         Column::Text("provenance", |row| row.provenance.as_str()),
-        Column::Text("side", |row| side_str(row.side)),
+        Column::Text("side", |row| row.side.as_str()),
         Column::Text("style", |row| style_str(row.style)),
         Column::Mantissa("price", |row| row.price.0),
         Column::Mantissa("qty", |row| row.qty.0),
@@ -65,7 +65,7 @@ impl TableRow for FillRow {
             row.quote_level.map(|level| level.get())
         }),
         Column::Text("provenance", |row| row.provenance.as_str()),
-        Column::Text("side", |row| side_str(row.side)),
+        Column::Text("side", |row| row.side.as_str()),
         Column::Text("liquidity", |row| liquidity_str(row.liquidity)),
         Column::Mantissa("last_price", |row| row.last_price.0),
         Column::Mantissa("last_qty", |row| row.last_qty.0),

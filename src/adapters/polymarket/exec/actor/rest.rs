@@ -16,12 +16,13 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::adapters::exec::{ExecRequest, RequestId};
+use crate::adapters::http::TransportError;
 use crate::ids::{AssetId, ClientOrderId, InstrumentId};
 use crate::time::{DurationUs, EngineClock};
 use crate::warn;
 
 use super::super::codec::{EncodedRequest, PlaceRequestContext};
-use super::super::rest::{ClobHttp, ClobHttpError, ClobResponse};
+use super::super::rest::{ClobHttp, ClobResponse};
 use super::super::sign::l2::RequestSigner;
 
 /// Backpressure on a stalled venue. A full lane means something upstream is wrong.
@@ -170,7 +171,7 @@ impl RestJob {
 #[derive(Debug)]
 pub(super) struct RestOutcome {
     pub purpose: RestPurpose,
-    pub answer: Result<ClobResponse, ClobHttpError>,
+    pub answer: Result<ClobResponse, TransportError>,
 }
 
 pub(super) struct RestLanes {
@@ -260,7 +261,7 @@ impl Worker {
         }
     }
 
-    async fn execute(&self, job: &RestJob) -> Result<ClobResponse, ClobHttpError> {
+    async fn execute(&self, job: &RestJob) -> Result<ClobResponse, TransportError> {
         match job.auth {
             Auth::Public => self.http.send_public(&job.request).await,
             Auth::Signed => {

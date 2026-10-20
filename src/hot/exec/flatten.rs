@@ -121,7 +121,7 @@ pub fn plan_flatten(input: FlattenInput) -> FlattenOutcome {
     let affordable = affordable_qty(side, price, funds, fee_model, taker_fee_rate);
     let within_notional = notional_capped_qty(price, limits.max_order_notional_quote);
     let wanted = held.min(affordable).min(within_notional);
-    let qty = Qty(wanted.0 - wanted.0.rem_euclid(grid.step));
+    let qty = wanted.floor_to_step(grid.step);
 
     if qty < grid.min_qty || qty.0 == 0 {
         // Distinguish the failure mode for operators: insufficient balance vs venue size too coarse.

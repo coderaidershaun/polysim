@@ -125,7 +125,7 @@ fn fit_recovers_a_and_k_and_warm_starts() {
 
     let now = ts(3999 * dt_us);
     let counts = tracker.intensity().expect("intensity configured");
-    let mut fit = IntensityFit::new();
+    let mut fit = IntensityFit::default();
     let estimate = fit.fit(counts, now);
     // Buy prints route to the ask side and nowhere else.
     assert!(estimate.bid.is_none(), "a buy print reached the bid side");

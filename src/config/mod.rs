@@ -21,7 +21,7 @@ use serde::Deserialize;
 use crate::time::DurationUs;
 
 pub use error::ConfigError;
-pub use execution::{ExecutionConfig, ExecutionMode};
+pub use execution::{ExecutionConfig, ExecutionMode, MAX_QUOTE_LEVELS};
 pub use identity::{RunIdentity, StrategyId, TradingEngineId};
 pub use link::{ControllerLoss, LinkConfig, PeerSubscription};
 pub use simulated::SimConfig;
@@ -35,7 +35,8 @@ pub use tracker::{
     TrackerSpec, VolumeBarsSpec, VolumeThreshold, WindowsSpec,
 };
 
-pub(crate) use execution::{DEFAULT_QUOTE_STOP_MARGIN_MS, MAX_ORDERS_PER_SIDE, validated_mantissa};
+pub(crate) use execution::{DEFAULT_QUOTE_STOP_MARGIN_MS, validated_mantissa};
+pub(crate) use tracker::TARGET_WINDOW_CANDLES;
 
 const MAX_OPERATIONAL_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 
@@ -51,11 +52,8 @@ pub struct Config<P = NoParams> {
     pub queues: QueuesConfig,
     pub source: SourceSpec,
     pub strategy: StrategySpec<P>,
-    #[serde(default)]
     pub persistence: Option<PersistenceConfig>,
-    #[serde(default)]
     pub link: Option<LinkConfig>,
-    #[serde(default)]
     pub execution: Option<ExecutionConfig>,
     #[serde(default)]
     pub exposure: ExposureConfig,
@@ -191,7 +189,6 @@ impl<P: serde::de::DeserializeOwned + Default> Config<P> {
 #[serde(deny_unknown_fields)]
 pub struct EngineConfig {
     /// This field is required on Linux; it is ignored on macOS.
-    #[serde(default)]
     pub hot_core_id: Option<usize>,
     #[serde(default = "default_tokio_workers")]
     pub tokio_workers: usize,

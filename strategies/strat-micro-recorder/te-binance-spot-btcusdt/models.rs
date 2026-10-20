@@ -17,7 +17,6 @@ use polysim::ids::{FIXED_SCALE, InstrumentId, Price, Qty, Side};
 use polysim::msg::inbound::Level;
 use polysim::time::{DurationUs, TsUs};
 
-use super::common::fresh;
 use super::features::{
     Features, GueantSideColumns, HawkesColumns, IntensityColumns, MarkoutColumns, QuoteSide,
 };
@@ -375,7 +374,7 @@ impl GueantScale {
         side: QuoteSide,
         estimate: Option<SideEstimate>,
     ) -> Option<Price> {
-        let estimate = fresh(estimate)?;
+        let estimate = estimate?.fresh()?;
         let half_spread_ticks = self.half_spread_bps * self.ticks_per_bp;
         let a_mid_per_sec = estimate.a_mid_per_sec(half_spread_ticks);
         let k_per_bp = estimate.k_per_tick * self.ticks_per_bp;
@@ -425,7 +424,7 @@ pub(crate) fn emit_side_intensity(
     ticks_per_bp: Option<f64>,
 ) {
     let IntensityColumns { a, k } = columns;
-    let Some(estimate) = fresh(side) else {
+    let Some(estimate) = side.and_then(SideEstimate::fresh) else {
         return;
     };
     ctx.emit(a, instrument, estimate.a_per_sec);

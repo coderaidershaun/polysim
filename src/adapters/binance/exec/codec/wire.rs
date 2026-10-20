@@ -98,9 +98,7 @@ pub(super) struct WireBalance {
 /// the method.
 #[derive(Deserialize)]
 pub(super) struct ResponseEnvelope {
-    #[serde(default)]
     pub result: Option<serde_json::Value>,
-    #[serde(default)]
     pub error: Option<ResponseError>,
 }
 

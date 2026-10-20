@@ -160,13 +160,10 @@ impl VenueMarket {
 
 /// No klines here (single market-data channel; unexpressable > default-true trap).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct PolySubscriptions {
-    #[serde(default = "default_true")]
     pub trades: bool,
-    #[serde(default = "default_true")]
     pub book_updates: bool,
-    #[serde(default = "default_true")]
     pub book_snapshots: bool,
 }
 
@@ -213,15 +210,11 @@ impl From<PolySubscriptions> for Subscriptions {
 
 /// All fields default true; omitted blocks enable the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct Subscriptions {
-    #[serde(default = "default_true")]
     pub trades: bool,
-    #[serde(default = "default_true")]
     pub book_updates: bool,
-    #[serde(default = "default_true")]
     pub book_snapshots: bool,
-    #[serde(default = "default_true")]
     pub klines: bool,
 }
 
@@ -335,8 +328,4 @@ fn default_book_capacity() -> usize {
 
 fn default_poly_book_capacity() -> usize {
     128
-}
-
-fn default_true() -> bool {
-    true
 }

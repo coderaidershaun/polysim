@@ -240,7 +240,7 @@ struct AggTrade {
     first_trade_id: Option<u64>,
     #[serde(rename = "l")]
     last_trade_id: Option<u64>,
-    #[serde(rename = "E", default)]
+    #[serde(rename = "E")]
     event_ts_ms: Option<i64>,
     #[serde(rename = "T")]
     trade_ts_ms: i64,

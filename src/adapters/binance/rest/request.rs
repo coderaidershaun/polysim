@@ -83,7 +83,7 @@ impl RestRequest {
             } => RequestPlan {
                 path: format!("{prefix}/myTrades"),
                 query: my_trades_query(symbol, *from_id, *limit),
-                // No orderId sent → weight is 20 (5 with orderId, 20 without).
+                // This request never sends an orderId, so it costs 20; with one it would cost 5.
                 weight: 20,
                 endpoint: "myTrades",
                 method: HttpMethod::Get,
@@ -92,7 +92,7 @@ impl RestRequest {
             RestRequest::OpenOrders { symbol } => RequestPlan {
                 path: format!("{prefix}/openOrders"),
                 query: vec![("symbol", symbol.to_uppercase())],
-                // Symbol always present → weight is 6 (80 without).
+                // The symbol is always sent, so this costs 6; without it the venue charges 80.
                 weight: 6,
                 endpoint: "openOrders",
                 method: HttpMethod::Get,

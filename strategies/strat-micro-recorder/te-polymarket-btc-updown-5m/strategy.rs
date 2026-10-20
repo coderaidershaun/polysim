@@ -362,7 +362,7 @@ fn role_at(window: WindowInfo, now: TsUs) -> Option<Role> {
 }
 
 fn write_side((a, k): (&mut f64, &mut f64), side: Option<SideEstimate>) {
-    let Some(estimate) = common::fresh(side) else {
+    let Some(estimate) = side.and_then(SideEstimate::fresh) else {
         return;
     };
     *a = estimate.a_per_sec;

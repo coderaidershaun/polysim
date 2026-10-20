@@ -8,28 +8,31 @@
 //! scanned for clock reads, because hot state has to replay identically from a recorded tape,
 //! whereas this file cannot do its job without reading one: pacing a reconnect and measuring how
 //! long an edge has been blind are both wall-clock questions.
+//!
+//! It also holds what every venue's bring-up is handed and what it hands back, so the runtime can
+//! start any venue without naming one.
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use futures_util::stream::{SplitSink, SplitStream};
-use tokio_tungstenite::tungstenite::Message;
 
 use crate::adapters::IDLE_POLL;
 use crate::adapters::backoff::BackoffCaps;
-use crate::adapters::exec::{EventSink, ExecStop, ExitPlan, SessionOutcome};
-use crate::adapters::socket::{Socket, connect};
-use crate::hot::spawn::QueueProducer;
+use crate::adapters::exec::{
+    EdgeHandle, EngineIdentity, EventSink, ExecStop, ExitPlan, SessionOutcome,
+};
+use crate::adapters::socket::{Reader, Writer, connect};
+use crate::config::ExecutionConfig;
+use crate::hot::spawn::{QueueProducer, SimTapGate};
 use crate::link::RunState;
-use crate::msg::exec::{AccountChunk, CancelReason, ExecEvent};
+use crate::msg::exec::{AccountChunk, CancelReason, ExecEvent, ExecLaneItem};
 use crate::msg::inbound::InboundMessage;
+use crate::registry::Registry;
 use crate::shutdown::{FatalSignal, RunStateCell};
 use crate::time::{DurationUs, EngineClock, TsUs};
 use crate::{info, warn};
-
-pub(crate) type Writer = SplitSink<Socket, Message>;
-pub(crate) type Reader = SplitStream<Socket>;
 
 // Polling the command ring every millisecond costs a little latency but avoids waking on every push.
 pub(crate) const COMMAND_POLL: Duration = Duration::from_millis(1);
@@ -40,15 +43,50 @@ pub(crate) const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 // Enough trade ids to cover one reconcile interval, so a fill read twice is recognised as seen.
 pub(crate) const RECENT_TRADES: usize = 256;
 
-/// The settings every live venue's edge is built from.
+/// The settings every venue's edge is built from. The runtime builds them once; a simulated venue
+/// reads only the ones it needs.
 pub(crate) struct EdgeSettings {
     pub(crate) clock: EngineClock,
     pub(crate) fatal: FatalSignal,
+    /// When the run goes idle, quotes are pulled and the socket drops, because resting orders
+    /// cannot simply be parked.
     pub(crate) run_state: RunStateCell,
     pub(crate) backoff: BackoffCaps,
+    /// Must stay inside the engine's drain deadline, since the watchdog force-exits once that
+    /// deadline is reached.
     pub(crate) sweep_deadline: Duration,
+    /// How long to stay blind before pulling orders. The venue gives no guidance here, so this is
+    /// the operator's judgment.
     pub(crate) disconnect_sweep_after: DurationUs,
     pub(crate) max_orders_per_side: usize,
+}
+
+/// What the runtime hands every venue's bring-up, whichever venue it is.
+pub(crate) struct EdgeInputs<'a> {
+    pub(crate) registry: &'a Registry,
+    pub(crate) execution: &'a ExecutionConfig,
+    pub(crate) identity: EngineIdentity,
+    pub(crate) commands: rtrb::Consumer<ExecLaneItem>,
+    pub(crate) producer: QueueProducer,
+    pub(crate) settings: EdgeSettings,
+    /// The market-data producers, in producer-group order. A venue that matches against the live
+    /// market attaches its taps here before the adapters that own these producers start.
+    pub(crate) groups: &'a mut Vec<QueueProducer>,
+    pub(crate) lane_capacity: usize,
+    pub(crate) spin_interval: DurationUs,
+    pub(crate) input_capacity: usize,
+}
+
+/// The chosen venue's setup, held until the hot thread exists: an edge is decided during bring-up
+/// but must not produce into the execution input queue before its consumer is running.
+pub(crate) type EdgeSpawn = Box<dyn FnOnce(&tokio::runtime::Handle) -> EdgeHandle + Send>;
+
+/// What a venue's bring-up hands back to the runtime.
+pub(crate) struct VenueEdge {
+    pub(crate) spawn: EdgeSpawn,
+    /// Only a venue that feeds itself from market taps has any to hold open across its own
+    /// shutdown sweep.
+    pub(crate) tap_gate: Option<Arc<SimTapGate>>,
 }
 
 /// What every venue edge runs under: the latches that can end the run, the clock its deadlines are

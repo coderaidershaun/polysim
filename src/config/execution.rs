@@ -16,9 +16,9 @@ use super::{ConfigError, MAX_OPERATIONAL_DURATION_MS, RunIdentity};
 
 /// The declarative ladder is fixed-size so quote publication, reconciliation and the UI all share
 /// one compile-time bound. Configuration chooses how much of it is active, never its allocation.
-pub(crate) const MAX_ORDERS_PER_SIDE: u32 = 8;
+pub const MAX_QUOTE_LEVELS: usize = 8;
 // The refusal text spells this bound out, so changing it must fail here until the text changes too.
-const _: () = assert!(MAX_ORDERS_PER_SIDE == 8);
+const _: () = assert!(MAX_QUOTE_LEVELS == 8);
 /// Named because bring-up compares against it: a venue whose markets never close reads a margin
 /// left at the default as "unset" and anything else as an operator expecting it to do something.
 pub(crate) const DEFAULT_QUOTE_STOP_MARGIN_MS: u64 = 3_000;
@@ -142,7 +142,6 @@ pub struct ExecutionConfig {
 
     /// Required when `mode` is `sim`. Under `off` or `live` it is still validated but unused, so
     /// switching modes is a one-line edit.
-    #[serde(default)]
     pub sim: Option<SimConfig>,
 }
 
@@ -184,7 +183,7 @@ impl ExecutionConfig {
                 expected: "a positive distance no greater than 10000 basis points (100%)",
             });
         }
-        if !(1..=MAX_ORDERS_PER_SIDE).contains(&self.max_orders_per_side) {
+        if !(1..=MAX_QUOTE_LEVELS).contains(&(self.max_orders_per_side as usize)) {
             return Err(ConfigError::Invalid {
                 field: "execution.max_orders_per_side",
                 value: self.max_orders_per_side.to_string().into(),

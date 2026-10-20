@@ -13,6 +13,7 @@ pub mod rest;
 pub mod book;
 pub mod discovery;
 pub mod parse;
+pub mod preflight;
 pub mod rotation;
 pub mod shadow;
 pub mod teardown;

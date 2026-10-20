@@ -64,14 +64,15 @@ engine branches solely on the normalised enums.
    settling, exit precedence (Shutdown > Fatal > Park), sweep pacing, and the stop
    protocol. A venue implements the ten-method `EdgeDriver` trait with only its own
    physics: its URL, its `select!` loop, its offline folding, its sweep step, its closing
-   report. The same file holds what a live venue builds its edge from: `EdgeSettings` (the
-   settings every live edge shares) and `EdgeControl::new`, the shared tick constants
-   (`COMMAND_POLL`, `HOUSEKEEPING`, `RECONCILE_INTERVAL`, `RECENT_TRADES`), and the
-   `EventSink` that feeds the venue's input queue. `EdgeHandle::spawn` gives a live venue
-   its handle; the simulator builds its own, because a sweep it misses invalidates the run
-   rather than leaving orders on a venue. The chassis file legitimately owns a clock;
-   everything under `adapters/exec/` is clock-free by scanned law — deadlines there take
-   `now` as a parameter.
+   report. The same file holds what a venue's bring-up is handed and hands back:
+   `EdgeInputs`, which carries `EdgeSettings` (the settings every edge shares, built once by
+   the runtime), and `VenueEdge`. It also holds what a live venue builds its edge from:
+   `EdgeControl::new`, the shared tick constants (`COMMAND_POLL`, `HOUSEKEEPING`,
+   `RECONCILE_INTERVAL`, `RECENT_TRADES`), and the `EventSink` that feeds the venue's input
+   queue. `EdgeHandle::spawn` gives a live venue its handle; the simulator builds its own,
+   because a sweep it misses invalidates the run rather than leaving orders on a venue. The
+   chassis file legitimately owns a clock; everything under `adapters/exec/` is clock-free by
+   scanned law — deadlines there take `now` as a parameter.
 
 4. **Written obligations** — the rules no signature can carry:
    - Every command is eventually answered. A refusal, a timeout, a disconnect — each
@@ -148,11 +149,12 @@ cancel+place before any wire code runs).
 ## What a new venue writes
 
 Everything venue-specific lives in `src/adapters/<venue>/exec/`. The registration cost
-outside it is one `VenuePreflight` variant with its probe branch, one bring-up arm, and a
-dependency-allowlist amendment if signing needs a new crate.
+outside it is one arm per dispatch in `src/adapters/venue.rs` plus its `VenueError`
+variant there, and a dependency-allowlist amendment if signing needs a new crate.
 
 1. `mod.rs` — credential env-var names, `capabilities()`, `lease_namespace(...)`.
-2. `handle.rs` — Setup/Context structs and `spawn(...) -> EdgeHandle`.
+2. `handle.rs` — the setup and `bring_up(...) -> VenueEdge`, which builds the setup from
+   the runtime's `EdgeInputs` and defers the `EdgeHandle::spawn` until the hot thread runs.
 3. `actor/` — the `EdgeDriver` impl. The actor composes `ExecSession` and `EdgeControl` and
    writes only its transport, its resync read set, its answer handlers and the order of its
    housekeeping steps. Same filename for the same concept as the existing adapters.
@@ -172,7 +174,8 @@ dependency-allowlist amendment if signing needs a new crate.
 8. `tests/fitness/<venue>_exec_codec.rs` — goldens over those fixtures: the full
    kind/status table, the reject table plus an unknown-input-halts proptest, id round-trip
    or correlation-policy pins, exactly-one-snapshot-end, byte-exact signed bodies.
-9. Registry stamps: scales, order caps, amend budget, order-rate buckets.
+9. Registry stamps: scales, order caps, amend budget, order-rate buckets, written by the
+   venue's startup scale preflight in `src/adapters/<venue>/preflight.rs`.
 
 The simulator is Binance-shaped and stays that way; a new venue's determinism evidence is
 its codec goldens plus a test double driven through its real codec, delivery-permutation

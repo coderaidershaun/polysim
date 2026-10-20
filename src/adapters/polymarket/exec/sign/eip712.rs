@@ -29,6 +29,9 @@ pub fn word_from_uint(value: u128) -> Word {
 }
 
 /// Token ids are uint256 decimal strings ~77 digits, which exceed `u128`.
+///
+/// # Errors
+/// The text is empty, holds a character that is not a digit, or does not fit 256 bits.
 pub fn word_from_decimal(digits: &str) -> Result<Word, Eip712Error> {
     if digits.is_empty() {
         return Err(Eip712Error::EmptyDecimal);

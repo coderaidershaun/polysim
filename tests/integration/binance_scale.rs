@@ -5,9 +5,9 @@
 //!
 //! Run: `cargo test --test integration -- --ignored binance_scale`
 
+use polysim::adapters::binance::preflight::check_order_rate_limits;
 use polysim::adapters::binance::rest::{BinanceEnv, RestClient, RestError};
 use polysim::config::BinanceMarket;
-use polysim::runtime::check_order_rate_limits;
 
 #[ignore = "live network, public production call — agent-run: cargo test --test integration -- --ignored binance_scale"]
 #[tokio::test]

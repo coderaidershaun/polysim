@@ -85,14 +85,6 @@ impl FundsView {
     }
 }
 
-#[inline]
-pub(super) fn spend_of(side: Side, price: Price, qty: Qty) -> i64 {
-    match side {
-        Side::Buy => price.notional(qty),
-        Side::Sell => qty.0,
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RestingOrder {
     pub price: Price,
@@ -208,7 +200,7 @@ pub fn reconcile_side(input: ReconcileInput) -> ReconcileOutcome {
     }
 
     let price = side.snap_passive(desired.price, grid.tick);
-    let qty = Qty(desired.qty.0 - desired.qty.0.rem_euclid(grid.step));
+    let qty = desired.qty.floor_to_step(grid.step);
 
     if qty < grid.min_qty {
         return ReconcileOutcome::Reject(RejectReason::QtyBelowMin);
@@ -233,7 +225,7 @@ pub fn reconcile_side(input: ReconcileInput) -> ReconcileOutcome {
         style: desired.style,
     };
     let Some(resting) = resting else {
-        if !funds.can_spend(spend_of(side, price, qty)) {
+        if !funds.can_spend(side.spend(price, qty)) {
             return ReconcileOutcome::Reject(RejectReason::Underfunded);
         }
         return ReconcileOutcome::Place(intent);

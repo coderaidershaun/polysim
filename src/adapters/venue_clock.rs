@@ -14,7 +14,6 @@ pub fn clamp_exchange_ts(venue_ms: i64, now: TsUs) -> TsUs {
 }
 
 /// The venue's own stamp when it sent one, else the moment this process received the message.
-#[allow(dead_code)] // adopted by the next lean-overhaul stream; remove with the first caller
 pub(crate) fn clamp_or_receipt(venue_ms: Option<i64>, received_ts_us: TsUs) -> TsUs {
     venue_ms.map_or(received_ts_us, |venue_ms| {
         clamp_exchange_ts(venue_ms, received_ts_us)

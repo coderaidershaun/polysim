@@ -86,6 +86,8 @@ impl SignatureType {
         }
     }
 
+    /// # Errors
+    /// The code is not one of 0 to 3.
     pub fn from_code(code: u8) -> Result<Self, OrderSignError> {
         match code {
             0 => Ok(SignatureType::Eoa),
@@ -117,6 +119,8 @@ impl Exchange {
 pub struct TokenId(String);
 
 impl TokenId {
+    /// # Errors
+    /// The text is not a decimal number that fits 256 bits.
     pub fn parse(digits: &str) -> Result<Self, Eip712Error> {
         eip712::word_from_decimal(digits)?;
         Ok(Self(digits.to_owned()))
@@ -196,6 +200,8 @@ fn order_struct_hash(order: &SignedOrderFields) -> Result<Word, Eip712Error> {
     ]))
 }
 
+/// # Errors
+/// The order's token id is not a decimal number that fits 256 bits.
 pub fn sign_order(
     key: &SigningKey,
     domain: &ExchangeDomain,

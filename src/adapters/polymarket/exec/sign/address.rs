@@ -20,6 +20,8 @@ impl Address {
         Self(bytes)
     }
 
+    /// # Errors
+    /// The text is not hex, or it does not decode to 20 bytes.
     pub fn parse(text: &str) -> Result<Self, AddressError> {
         let decoded = hex::decode(text.trim()).map_err(|source| AddressError::NotHex { source })?;
         let length = decoded.len();

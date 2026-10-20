@@ -6,7 +6,7 @@ use crate::hot::book::Book;
 use crate::hot::exec::{Balance, DesiredQuote, OrderView, QuoteLevel, TickGrid};
 use crate::hot::quant::volatility::EwmaVol;
 use crate::hot::tracker::MicroTracker;
-use crate::ids::{AssetId, ClientOrderId, InstrumentId, Qty, Side};
+use crate::ids::{AssetId, InstrumentId, Qty, Side};
 use crate::link::TopicId;
 use crate::log::{Level, LogRecord};
 use crate::msg::persist::{BookEventRow, FeatureId, FeatureRow, KlineRow, PersistRecord, TradeRow};
@@ -49,12 +49,6 @@ impl StrategyCtx<'_> {
         level: QuoteLevel,
     ) -> Option<OrderView> {
         self.exec.resting(instrument, side, level)
-    }
-
-    /// Any order this run knows about, by the id the engine minted for it.
-    #[inline]
-    pub fn order_view(&self, id: ClientOrderId) -> Option<OrderView> {
-        self.exec.order(id)
     }
 
     /// Free, locked, reserved per asset. READ only (not event): moves on every fill; engine funds-gates.

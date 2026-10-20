@@ -18,7 +18,7 @@ use crate::msg::inbound::{KlineEvent, TradeEvent};
 use crate::warn;
 
 pub use candles::{Candle, CandleSeries};
-pub use volume::{TARGET_WINDOW_CANDLES, VolumeBar, VolumeBarSeries};
+pub use volume::{VolumeBar, VolumeBarSeries};
 
 /// Backing multiple for every tracker FastQueue.
 const BACKING_MULTIPLE: usize = 20;
