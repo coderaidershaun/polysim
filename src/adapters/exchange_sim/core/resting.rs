@@ -4,7 +4,7 @@ use super::orders::{CORPUS_VENUE_ORDER_ID, SimOrder};
 use super::queue::SimOrderIndex;
 use super::wallet::Reservation;
 use crate::ids::{ClientOrderId, Price, Qty, Side, TradeId, VenueOrderId};
-use crate::msg::exec::{OrderStyle, VenueOrderStatus};
+use crate::msg::exec::VenueOrderStatus;
 use crate::time::{DurationUs, TsUs};
 
 const FIRST_TRADE_ID: TradeId = TradeId(778_291);
@@ -56,7 +56,6 @@ pub enum RefusalReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RestingOrder {
     pub order: SimOrder,
-    pub style: OrderStyle,
     pub phase: OrderPhase,
     pub generation: u32,
     pub amends_used: u8,
@@ -69,10 +68,9 @@ pub struct RestingOrder {
 }
 
 impl RestingOrder {
-    pub fn pending(order: SimOrder, style: OrderStyle, effective_ts_us: TsUs) -> Self {
+    pub fn pending(order: SimOrder, effective_ts_us: TsUs) -> Self {
         Self {
             order,
-            style,
             phase: OrderPhase::Pending,
             generation: 0,
             amends_used: 0,
@@ -93,9 +91,8 @@ impl RestingOrder {
         !self.is_open() && self.closed_ts_us.is_some_and(|closed| closed < at_ts_us)
     }
 
-    pub fn snapshot(&self, index: SimOrderIndex) -> OrderSnapshot {
+    pub fn snapshot(&self) -> OrderSnapshot {
         OrderSnapshot {
-            index,
             order: self.order,
             phase: self.phase,
             generation: self.generation,
@@ -108,7 +105,6 @@ impl RestingOrder {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OrderSnapshot {
-    pub index: SimOrderIndex,
     pub order: SimOrder,
     pub phase: OrderPhase,
     pub generation: u32,
@@ -179,7 +175,7 @@ impl RestingOrders {
     }
 
     pub fn snapshot(&self, index: SimOrderIndex) -> Option<OrderSnapshot> {
-        self.get(index).map(|record| record.snapshot(index))
+        self.get(index).map(RestingOrder::snapshot)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (SimOrderIndex, &RestingOrder)> {

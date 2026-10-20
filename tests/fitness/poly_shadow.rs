@@ -33,7 +33,7 @@ fn build_two_sided(detector: &mut CollapseDetector, venue_ts: i64) {
 
 #[test]
 fn same_ts_removal_burst_emptying_a_side_collapses() {
-    let mut detector = CollapseDetector::new();
+    let mut detector = CollapseDetector::default();
     build_two_sided(&mut detector, 1_000);
 
     // Burst at a single venue ts wipes the bid side: the second removal empties it.
@@ -53,7 +53,7 @@ fn only_a_confirmed_desync_resets_the_shadow() {
     let bids = [level(50_000_000, 100)];
     let asks = [level(51_000_000, 150)];
 
-    let mut validator = ShadowValidator::new();
+    let mut validator = ShadowValidator::default();
     assert_eq!(
         validator.on_venue_book(&bids, &asks),
         BookFrameOutcome::ForwardSnapshot
@@ -71,7 +71,7 @@ fn only_a_confirmed_desync_resets_the_shadow() {
         BookFrameOutcome::Validated
     );
 
-    let mut validator = ShadowValidator::new();
+    let mut validator = ShadowValidator::default();
     assert_eq!(
         validator.on_venue_book(&bids, &asks),
         BookFrameOutcome::ForwardSnapshot
@@ -98,7 +98,7 @@ fn only_a_confirmed_desync_resets_the_shadow() {
         BookFrameOutcome::Validated
     );
 
-    let mut validator = ShadowValidator::new();
+    let mut validator = ShadowValidator::default();
     assert_eq!(
         validator.on_venue_book(&bids, &asks),
         BookFrameOutcome::ForwardSnapshot

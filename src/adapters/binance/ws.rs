@@ -19,23 +19,27 @@ pub enum StreamCategory {
 impl StreamCategory {
     fn futures_route(self) -> &'static str {
         match self {
-            StreamCategory::Depth => "public",
-            StreamCategory::Trades | StreamCategory::Klines => "market",
+            StreamCategory::Depth => "/public",
+            StreamCategory::Trades | StreamCategory::Klines => "/market",
         }
     }
 }
 
 /// `@100ms` cadence (venue default is 1000ms on spot).
 pub fn depth_stream(symbol: &str) -> String {
-    format!("{}@depth@100ms", symbol.to_lowercase())
+    stream_name(symbol, "depth@100ms")
 }
 
 pub fn agg_trade_stream(symbol: &str) -> String {
-    format!("{}@aggTrade", symbol.to_lowercase())
+    stream_name(symbol, "aggTrade")
 }
 
 pub fn kline_stream(symbol: &str, interval: KlineInterval) -> String {
-    format!("{}@kline_{}", symbol.to_lowercase(), interval.as_str())
+    stream_name(symbol, &format!("kline_{}", interval.as_str()))
+}
+
+fn stream_name(symbol: &str, suffix: &str) -> String {
+    format!("{}@{suffix}", symbol.to_lowercase())
 }
 
 /// Stamps arrive in milliseconds. Spot can be asked for microseconds instead, and that request is
@@ -48,16 +52,12 @@ pub fn combined_stream_url(
     streams: &[String],
 ) -> String {
     let host = ws_host(market, env);
+    let route = match market {
+        BinanceMarket::Spot => "",
+        BinanceMarket::Perpetual => category.futures_route(),
+    };
     let joined = streams.join("/");
-    match market {
-        BinanceMarket::Spot => format!("{host}/stream?streams={joined}"),
-        BinanceMarket::Perpetual => {
-            format!(
-                "{host}/{}/stream?streams={joined}",
-                category.futures_route()
-            )
-        }
-    }
+    format!("{host}{route}/stream?streams={joined}")
 }
 
 fn ws_host(market: BinanceMarket, env: BinanceEnv) -> &'static str {

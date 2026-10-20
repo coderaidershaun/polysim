@@ -46,17 +46,10 @@ impl KlineSequencer {
     /// prefix only (anchor never jumps unfetched).
     pub fn on_backfill(&mut self, events: &[KlineEvent], emit: &mut impl FnMut(InboundMessage)) {
         for event in events {
-            if !event.is_closed {
+            if !event.is_closed || self.is_stale_open(event.open_ts_us) {
                 continue;
             }
-            let open_ts_us = event.open_ts_us;
-            if self
-                .last_closed_open_ts_us
-                .is_some_and(|last| open_ts_us <= last)
-            {
-                continue;
-            }
-            if self.opens_a_gap(open_ts_us) {
+            if self.gap_start(event.open_ts_us).is_some() {
                 return;
             }
             self.emit_closed(*event, emit);
@@ -69,16 +62,11 @@ impl KlineSequencer {
         emit: &mut impl FnMut(InboundMessage),
     ) -> KlineOutcome {
         let open_ts_us = event.open_ts_us;
-        if self
-            .last_closed_open_ts_us
-            .is_some_and(|last| open_ts_us <= last)
-        {
+        if self.is_stale_open(open_ts_us) {
             return KlineOutcome::Duplicate;
         }
         if event.is_closed {
-            if let Some(expected) = self.next_expected_open_ts_us()
-                && open_ts_us > expected
-            {
+            if let Some(expected) = self.gap_start(open_ts_us) {
                 return KlineOutcome::Gap {
                     missing_from_open_ts_us: expected,
                     next_open_ts_us: open_ts_us,
@@ -91,10 +79,16 @@ impl KlineSequencer {
         KlineOutcome::Forwarded
     }
 
-    /// open_ts_us past next expected = hole. 1M has no expected (never gap-checked).
-    fn opens_a_gap(&self, open_ts_us: TsUs) -> bool {
+    fn is_stale_open(&self, open_ts_us: TsUs) -> bool {
+        self.last_closed_open_ts_us
+            .is_some_and(|last| open_ts_us <= last)
+    }
+
+    /// Answers the expected open when `open_ts_us` lies past it, since that is where the hole
+    /// starts. A monthly interval has no expected open, so it is never gap-checked.
+    fn gap_start(&self, open_ts_us: TsUs) -> Option<TsUs> {
         self.next_expected_open_ts_us()
-            .is_some_and(|expected| open_ts_us > expected)
+            .filter(|&expected| open_ts_us > expected)
     }
 
     fn emit_closed(&mut self, mut event: KlineEvent, emit: &mut impl FnMut(InboundMessage)) {

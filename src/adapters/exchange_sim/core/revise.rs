@@ -27,13 +27,10 @@ impl SimVenue {
             .collect();
         let mut exited = Vec::with_capacity(open.len());
         for (index, was_pending) in open {
-            self.fold().close(index, ClosedReason::Canceled, at_ts_us);
-            let snapshot = self
-                .orders
-                .snapshot(index)
-                .expect("a forced order exit keeps its stable row");
+            let mut fold = self.fold();
+            fold.close(index, ClosedReason::Canceled, at_ts_us);
             exited.push(ForcedOrderExit {
-                snapshot,
+                snapshot: fold.snapshot(index),
                 was_pending,
             });
         }
@@ -47,16 +44,11 @@ impl RequestFold<'_> {
         client_id: ClientOrderId,
         effective_ts_us: TsUs,
     ) -> AdmitPlan {
-        let Some(index) = self.orders.find(client_id) else {
-            self.emissions.push(
-                effective_ts_us,
-                VenueEvent::CancelRefused {
-                    client_id,
-                    reason: RefusalReason::NoSuchOrder,
-                },
-            );
-            return None;
+        let refused = VenueEvent::CancelRefused {
+            client_id,
+            reason: RefusalReason::NoSuchOrder,
         };
+        let index = self.find_or_refuse(client_id, effective_ts_us, refused)?;
         Some((effective_ts_us, TimedAction::Cancel(index)))
     }
 
@@ -66,17 +58,25 @@ impl RequestFold<'_> {
         total_qty: Qty,
         effective_ts_us: TsUs,
     ) -> AdmitPlan {
-        let Some(index) = self.orders.find(client_id) else {
-            self.emissions.push(
-                effective_ts_us,
-                VenueEvent::AmendRefused {
-                    client_id,
-                    reason: RefusalReason::NoSuchOrder,
-                },
-            );
-            return None;
+        let refused = VenueEvent::AmendRefused {
+            client_id,
+            reason: RefusalReason::NoSuchOrder,
         };
+        let index = self.find_or_refuse(client_id, effective_ts_us, refused)?;
         Some((effective_ts_us, TimedAction::Amend { index, total_qty }))
+    }
+
+    fn find_or_refuse(
+        &mut self,
+        client_id: ClientOrderId,
+        at_ts_us: TsUs,
+        refused: VenueEvent,
+    ) -> Option<SimOrderIndex> {
+        let index = self.orders.find(client_id);
+        if index.is_none() {
+            self.emissions.push(at_ts_us, refused);
+        }
+        index
     }
 
     pub(super) fn cancel(&mut self, index: SimOrderIndex, at_ts_us: TsUs) {
@@ -95,10 +95,7 @@ impl RequestFold<'_> {
             return;
         }
         self.close(index, ClosedReason::Canceled, at_ts_us);
-        let snapshot = self
-            .orders
-            .snapshot(index)
-            .expect("a canceled simulated order keeps its verdict");
+        let snapshot = self.snapshot(index);
         self.emissions
             .push(at_ts_us, VenueEvent::Canceled { snapshot });
     }
@@ -125,7 +122,7 @@ impl RequestFold<'_> {
         self.wallet.amend(reservation, total_qty);
         record.order.qty = total_qty;
         record.amends_used += 1;
-        let snapshot = record.snapshot(index);
+        let snapshot = record.snapshot();
         self.emissions.push(
             at_ts_us,
             VenueEvent::Amended {

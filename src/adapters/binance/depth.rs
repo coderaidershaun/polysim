@@ -94,7 +94,7 @@ impl DepthSequencer {
             self.begin_resync(diff, emit);
             return DiffOutcome::Resync;
         }
-        if self.chains_onto_book(&diff) {
+        if self.chains_onto(self.book_update_id, &diff) {
             self.emit_delta(&diff, emit);
             self.book_update_id = diff.final_update_id;
             return DiffOutcome::Applied;
@@ -106,13 +106,12 @@ impl DepthSequencer {
         DiffOutcome::Resync
     }
 
-    fn chains_onto_book(&self, diff: &DepthDiff) -> bool {
+    fn chains_onto(&self, anchor: u64, diff: &DepthDiff) -> bool {
         match self.rule {
-            ChainRule::Spot => self
-                .book_update_id
+            ChainRule::Spot => anchor
                 .checked_add(1)
                 .is_some_and(|next| diff.first_update_id == next),
-            ChainRule::Perp => diff.prev_final_update_id == Some(self.book_update_id),
+            ChainRule::Perp => diff.prev_final_update_id == Some(anchor),
         }
     }
 
@@ -216,12 +215,7 @@ impl DepthSequencer {
                     }
                 }
             } else {
-                match self.rule {
-                    ChainRule::Spot => anchor
-                        .checked_add(1)
-                        .is_some_and(|next| diff.first_update_id == next),
-                    ChainRule::Perp => diff.prev_final_update_id == Some(anchor),
-                }
+                self.chains_onto(anchor, diff)
             };
             if !spans {
                 return false;

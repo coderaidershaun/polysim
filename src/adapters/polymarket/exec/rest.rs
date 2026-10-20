@@ -9,6 +9,10 @@
 
 use std::time::Duration;
 
+use reqwest::Method;
+
+use crate::adapters::http::{Deadlines, HttpClient, TransportError};
+
 use super::codec::{EncodedRequest, HttpAnswer};
 use super::sign::key::SigningKey;
 use super::sign::l1::{ClobAuthRequest, DEFAULT_NONCE, clob_auth_headers};
@@ -86,42 +90,30 @@ impl RateLimit {
     }
 }
 
-#[derive(thiserror::Error, Debug)]
-pub enum ClobHttpError {
-    #[error("building the polymarket http client failed")]
-    ClientBuild {
-        #[source]
-        source: reqwest::Error,
-    },
-    #[error("request to {url} failed")]
-    Transport {
-        url: String,
-        #[source]
-        source: reqwest::Error,
-    },
-}
+pub type ClobHttpError = TransportError;
 
 #[derive(Debug, Clone)]
 pub struct ClobHttp {
-    http: reqwest::Client,
+    http: HttpClient,
 }
 
 impl ClobHttp {
+    /// # Errors
+    /// [`TransportError::ClientBuild`] if the TLS backend fails to initialise.
     pub fn new(
         connect_timeout: Duration,
         request_timeout: Duration,
     ) -> Result<Self, ClobHttpError> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(connect_timeout)
-            .timeout(request_timeout)
-            .build()
-            .map_err(|source| ClobHttpError::ClientBuild { source })?;
+        let http = HttpClient::new(Deadlines {
+            connect: connect_timeout,
+            request: request_timeout,
+        })?;
         Ok(Self { http })
     }
 
     /// Unsigned, at an absolute url — the one check that does not live on the api host.
     pub async fn send_unsigned(&self, url: &str) -> Result<ClobResponse, ClobHttpError> {
-        self.send(self.http.get(url), url).await
+        self.send(self.http.request(Method::GET, url), url).await
     }
 
     pub async fn send_public(
@@ -184,11 +176,12 @@ impl ClobHttp {
     /// The body is handed over as the exact bytes that were signed; reqwest's own json helper would
     /// re-serialise and invalidate the header.
     fn builder(&self, request: &EncodedRequest, url: &str) -> reqwest::RequestBuilder {
-        let builder = match request.method {
-            HttpMethod::Get => self.http.get(url),
-            HttpMethod::Post => self.http.post(url),
-            HttpMethod::Delete => self.http.delete(url),
+        let method = match request.method {
+            HttpMethod::Get => Method::GET,
+            HttpMethod::Post => Method::POST,
+            HttpMethod::Delete => Method::DELETE,
         };
+        let builder = self.http.request(method, url);
         match request.body.is_empty() {
             true => builder,
             false => builder
@@ -202,14 +195,10 @@ impl ClobHttp {
         builder: reqwest::RequestBuilder,
         url: &str,
     ) -> Result<ClobResponse, ClobHttpError> {
-        let transport = |source| ClobHttpError::Transport {
-            url: url.to_owned(),
-            source,
-        };
-        let response = builder.send().await.map_err(transport)?;
+        let response = self.http.send(builder, url).await?;
         let status = response.status().as_u16();
         let rate_limit = RateLimit::from_response(&response);
-        let body = response.text().await.map_err(transport)?;
+        let body = self.http.body(response, url).await?;
         Ok(ClobResponse {
             status,
             body,

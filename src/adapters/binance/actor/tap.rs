@@ -2,8 +2,10 @@
 
 use std::time::Duration;
 
-use crate::adapters::binance::rest::{RestError, RestRequest};
+use crate::adapters::binance::parse::ParseContext;
+use crate::adapters::binance::rest::RestRequest;
 use crate::error;
+use crate::ids::InstrumentId;
 use crate::msg::inbound::TappedMessage;
 
 use super::{Actor, liveness};
@@ -23,26 +25,39 @@ impl Actor {
         if self.producer.has_tap() { self.tap_heartbeat } else { liveness::LIVENESS_POLL }
     }
 
-    /// Every REST read this actor makes goes through here, whichever lane it serves: a fetch that
-    /// outlives the heartbeat emits no watermark for its duration and stalls the simulator's
-    /// ordering gate. Falls through to a plain fetch when the lane carries no tap.
-    ///
-    /// # Errors
-    /// Returns the request error unchanged.
-    pub(super) async fn fetch_text_beating(
+    /// Every REST read this actor makes goes through here, because a fetch that outlives the
+    /// heartbeat would emit no watermark while it runs and so stall the simulator's ordering gate.
+    /// A lane with no tap fetches plainly. `None` means the failure has already been logged.
+    pub(super) async fn read_rest(
         &mut self,
-        request: &RestRequest,
-    ) -> Result<String, RestError> {
-        if !self.producer.has_tap() {
-            return self.rest.fetch_text(request).await;
-        }
-        let mut fetch = std::pin::pin!(self.rest.fetch_text(request));
-        loop {
-            match tokio::time::timeout(self.tap_heartbeat, &mut fetch).await {
-                Ok(result) => return result,
-                Err(_elapsed) => self.producer.push_tap_watermark(self.clock.now()),
+        instrument: InstrumentId,
+        what: &'static str,
+        plan: impl FnOnce(String) -> RestRequest,
+    ) -> Option<(String, ParseContext)> {
+        let Some(symbol) = self.venue_symbol(instrument) else {
+            self.on_unknown_symbol(instrument, &format!("its {what}"));
+            return None;
+        };
+        let request = plan(symbol);
+        let fetched = if self.producer.has_tap() {
+            let mut fetch = std::pin::pin!(self.rest.fetch_text(&request));
+            loop {
+                match tokio::time::timeout(self.tap_heartbeat, &mut fetch).await {
+                    Ok(result) => break result,
+                    Err(_elapsed) => self.producer.push_tap_watermark(self.clock.now()),
+                }
             }
-        }
+        } else {
+            self.rest.fetch_text(&request).await
+        };
+        let json = fetched
+            .map_err(|error| self.on_rest_error(&error, &format!("{what} {}", instrument.0)))
+            .ok()?;
+        let ctx = ParseContext {
+            instrument,
+            received_ts_us: self.clock.now(),
+        };
+        Some((json, ctx))
     }
 
     // Never reuse a sequence generation.

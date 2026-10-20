@@ -66,10 +66,6 @@ pub struct SymbolFilter {
 pub struct AccountInfo {
     #[serde(rename = "canTrade")]
     pub can_trade: bool,
-    #[serde(rename = "canWithdraw", default)]
-    pub can_withdraw: bool,
-    #[serde(rename = "canDeposit", default)]
-    pub can_deposit: bool,
     #[serde(rename = "accountType")]
     pub account_type: Box<str>,
     /// The account's trading groups. They are logged, never used as a gate.
@@ -79,8 +75,6 @@ pub struct AccountInfo {
     pub commission_rates: CommissionRates,
     #[serde(default)]
     pub balances: Vec<Balance>,
-    #[serde(default)]
-    pub uid: Option<u64>,
     #[serde(rename = "updateTime", default)]
     pub update_time_ms: i64,
 }
@@ -96,8 +90,6 @@ impl AccountInfo {
 pub struct CommissionRates {
     pub maker: Box<str>,
     pub taker: Box<str>,
-    pub buyer: Box<str>,
-    pub seller: Box<str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -125,15 +117,11 @@ pub struct AccountTrade {
     pub order_id: i64,
     pub price: Box<str>,
     pub qty: Box<str>,
-    #[serde(rename = "quoteQty")]
-    pub quote_qty: Box<str>,
     pub commission: Box<str>,
     #[serde(rename = "commissionAsset")]
     pub commission_asset: Box<str>,
     #[serde(rename = "time")]
     pub time_ms: i64,
-    #[serde(rename = "isBuyer")]
-    pub is_buyer: bool,
     #[serde(rename = "isMaker")]
     pub is_maker: bool,
 }
@@ -157,10 +145,6 @@ pub struct OrderRecord {
     #[serde(rename = "cummulativeQuoteQty", alias = "cumulativeQuoteQty", default)]
     pub cumulative_quote_qty: Box<str>,
     pub status: Box<str>,
-    #[serde(rename = "timeInForce", default)]
-    pub time_in_force: Box<str>,
-    #[serde(rename = "type", default)]
-    pub order_type: Box<str>,
     #[serde(default)]
     pub side: Box<str>,
     #[serde(rename = "time", default)]

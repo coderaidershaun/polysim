@@ -8,6 +8,7 @@ use polysim::adapters::binance::rest::{
     AccountInfo, BinanceEnv, FailureVerdict, HttpMethod, KlineQuery, OrderCountWindow, OrderRecord,
     RequestAuth, RestClient, RestError, RestRequest,
 };
+use polysim::adapters::http::TransportError;
 use polysim::config::{BinanceMarket, KlineInterval};
 
 /// Weights verified against <https://developers.binance.com/docs/binance-spot-api-docs/rest-api>
@@ -253,11 +254,11 @@ fn venue_failure_classification() {
         ),
         (
             "timed out reading the body (Timeout variant)",
-            RestError::Timeout {
+            RestError::Transport(TransportError::Timeout {
                 url: "https://api.binance.com/api/v3/exchangeInfo".to_owned(),
                 phase: "reading the response body",
                 limit_secs: 10,
-            },
+            }),
             FailureVerdict::Retry,
         ),
         (

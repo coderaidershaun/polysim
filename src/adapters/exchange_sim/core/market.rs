@@ -32,23 +32,6 @@ pub struct MarketRecovery {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TradeVerdict {
-    Matched,
-    Seeded,
-    Ignored,
-    Reset(ResetReason),
-    Suspended,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BookVerdict {
-    SnapshotApplied,
-    DeltaStaged,
-    DeltaCommitted,
-    Reset(ResetReason),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TradeEvidence {
     pub aggregate_id: AggregateTradeId,
     pub first_trade_id: RawTradeId,
@@ -106,31 +89,25 @@ impl TradeContinuity {
         if evidence.first_trade_id > evidence.last_trade_id {
             return ContinuityVerdict::Reset(ResetReason::InvertedTradeRange);
         }
-        if self.epoch != Some(evidence.stream_epoch) {
-            self.epoch = Some(evidence.stream_epoch);
-            self.accept(evidence);
-            return ContinuityVerdict::Seed;
-        }
-        if evidence.aggregate_id <= self.high_water_aggregate_id
-            || evidence.last_trade_id <= self.high_water_last_trade_id
-        {
+        let is_new_epoch = self.epoch != Some(evidence.stream_epoch);
+        let is_stale = evidence.aggregate_id <= self.high_water_aggregate_id
+            || evidence.last_trade_id <= self.high_water_last_trade_id;
+        if !is_new_epoch && is_stale {
             return ContinuityVerdict::Ignore;
         }
-        if evidence.first_trade_id <= self.high_water_last_trade_id {
-            self.accept(evidence);
-            return ContinuityVerdict::Reset(ResetReason::TradeRangeOverlap);
-        }
-        if evidence.first_trade_id.0 > self.high_water_last_trade_id.0 + 1 {
-            self.accept(evidence);
-            return ContinuityVerdict::Reset(ResetReason::TradeGap);
-        }
-        self.accept(evidence);
-        ContinuityVerdict::Accept
-    }
-
-    fn accept(&mut self, evidence: TradeEvidence) {
+        let verdict = if is_new_epoch {
+            ContinuityVerdict::Seed
+        } else if evidence.first_trade_id <= self.high_water_last_trade_id {
+            ContinuityVerdict::Reset(ResetReason::TradeRangeOverlap)
+        } else if evidence.first_trade_id.0 > self.high_water_last_trade_id.0 + 1 {
+            ContinuityVerdict::Reset(ResetReason::TradeGap)
+        } else {
+            ContinuityVerdict::Accept
+        };
+        self.epoch = Some(evidence.stream_epoch);
         self.high_water_aggregate_id = evidence.aggregate_id;
         self.high_water_last_trade_id = evidence.last_trade_id;
+        verdict
     }
 }
 
@@ -240,7 +217,7 @@ impl MarketFold {
 
     /// # Panics
     /// If a depth delta lacks its venue timestamp.
-    pub fn on_book_chunk(&mut self, chunk: &BookChunk, meta: VenueMeta) -> BookVerdict {
+    pub fn on_book_chunk(&mut self, chunk: &BookChunk, meta: VenueMeta) -> Option<ResetReason> {
         assert_eq!(
             chunk.instrument, self.instrument,
             "book chunk for instrument {} reached the venue for instrument {}",
@@ -252,13 +229,13 @@ impl MarketFold {
             return match self.book.apply_snapshot_chunk(chunk) {
                 SnapshotOutcome::Clean => {
                     self.recovery.snapshot_complete = chunk.is_last_chunk;
-                    BookVerdict::SnapshotApplied
+                    None
                 }
                 SnapshotOutcome::ImplicitReset => {
                     self.staged = None;
                     let reason = self.suspend_matching(ResetReason::BookReset);
                     self.recovery.snapshot_complete = chunk.is_last_chunk;
-                    BookVerdict::Reset(reason)
+                    Some(reason)
                 }
             };
         }
@@ -268,12 +245,12 @@ impl MarketFold {
         self.stage_delta(chunk, exchange_ts_us)
     }
 
-    fn stage_delta(&mut self, chunk: &BookChunk, venue_ts_us: TsUs) -> BookVerdict {
+    fn stage_delta(&mut self, chunk: &BookChunk, venue_ts_us: TsUs) -> Option<ResetReason> {
         if let Some(staged) = &self.staged
             && (staged.update_id != chunk.update_id || staged.venue_ts_us != venue_ts_us)
         {
             self.staged = None;
-            return BookVerdict::Reset(self.suspend_matching(ResetReason::DeltaTransactionBroken));
+            return Some(self.suspend_matching(ResetReason::DeltaTransactionBroken));
         }
         self.staged
             .get_or_insert_with(|| StagedDelta {
@@ -283,13 +260,13 @@ impl MarketFold {
             })
             .chunks
             .push(*chunk);
-        if !chunk.is_last_chunk {
-            return BookVerdict::DeltaStaged;
+        if chunk.is_last_chunk {
+            self.commit_delta();
         }
-        self.commit_delta()
+        None
     }
 
-    fn commit_delta(&mut self) -> BookVerdict {
+    fn commit_delta(&mut self) {
         let Some(staged) = self.staged.take() else {
             panic!("commit reached with no staged depth transaction");
         };
@@ -299,7 +276,6 @@ impl MarketFold {
         self.cap_queues_to_visible();
         self.last_commit_venue_ts_us = self.last_commit_venue_ts_us.max(staged.venue_ts_us);
         self.recovery.bridging_delta = self.recovery.snapshot_complete;
-        BookVerdict::DeltaCommitted
     }
 
     fn cap_queues_to_visible(&mut self) {
@@ -331,28 +307,22 @@ impl MarketFold {
         trade: &TradeEvent,
         evidence: TradeEvidence,
         take: &mut dyn FnMut(SimOrderIndex, Qty) -> OwnFill,
-    ) -> TradeVerdict {
+    ) -> Option<ResetReason> {
         assert_eq!(
             trade.instrument, self.instrument,
             "trade for instrument {} reached the venue for instrument {}",
             trade.instrument.0, self.instrument.0
         );
         match self.continuity.admit(evidence) {
-            ContinuityVerdict::Seed => return TradeVerdict::Seeded,
-            ContinuityVerdict::Ignore => return TradeVerdict::Ignored,
-            ContinuityVerdict::Reset(reason) => {
-                return TradeVerdict::Reset(self.suspend_matching(reason));
-            }
+            ContinuityVerdict::Seed | ContinuityVerdict::Ignore => return None,
+            ContinuityVerdict::Reset(reason) => return Some(self.suspend_matching(reason)),
             ContinuityVerdict::Accept => {}
         }
-        if !self.is_matching_live() {
-            return TradeVerdict::Suspended;
-        }
-        if trade.exchange_ts_us <= self.last_commit_venue_ts_us {
-            return TradeVerdict::Ignored;
+        if !self.is_matching_live() || trade.exchange_ts_us <= self.last_commit_venue_ts_us {
+            return None;
         }
         self.walk_aggressor(trade, take);
-        TradeVerdict::Matched
+        None
     }
 
     fn walk_aggressor(

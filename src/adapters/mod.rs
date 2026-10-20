@@ -10,6 +10,8 @@ pub mod decode;
 pub(crate) mod edge;
 pub mod exchange_sim;
 pub mod exec;
+pub mod http;
+pub(crate) mod lane;
 pub mod polymarket;
 pub mod rest_quiet;
 pub(crate) mod socket;

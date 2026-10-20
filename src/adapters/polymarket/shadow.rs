@@ -18,10 +18,6 @@ pub struct ShadowBook {
 }
 
 impl ShadowBook {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn apply(&mut self, side: Side, price: Price, qty: Qty) {
         let book = match side {
             Side::Buy => &mut self.bids,
@@ -46,11 +42,6 @@ impl ShadowBook {
                 book.insert(level.price, level.qty);
             }
         }
-    }
-
-    pub fn clear(&mut self) {
-        self.bids.clear();
-        self.asks.clear();
     }
 
     pub fn is_two_sided(&self) -> bool {
@@ -112,29 +103,21 @@ pub enum BookFrameOutcome {
 /// 3 consecutive mismatches (~450ms) vs 1 timing artefact; delta reconstruction is exact.
 const DIVERGENCE_CONFIRM: u32 = 3;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ShadowValidator {
     shadow: ShadowBook,
-    awaiting_first_book: bool,
+    has_first_book: bool,
     suspect_streak: u32,
 }
 
 impl ShadowValidator {
-    pub fn new() -> Self {
-        Self {
-            shadow: ShadowBook::new(),
-            awaiting_first_book: true,
-            suspect_streak: 0,
-        }
-    }
-
     pub fn on_forwarded_delta(&mut self, side: Side, price: Price, qty: Qty) {
         self.shadow.apply(side, price, qty);
     }
 
     pub fn on_venue_book(&mut self, bids: &[Level], asks: &[Level]) -> BookFrameOutcome {
-        if self.awaiting_first_book {
-            self.awaiting_first_book = false;
+        if !self.has_first_book {
+            self.has_first_book = true;
             self.suspect_streak = 0;
             self.shadow.rebuild(bids, asks);
             return BookFrameOutcome::ForwardSnapshot;
@@ -153,14 +136,6 @@ impl ShadowValidator {
     }
 
     pub fn resubscribe(&mut self) {
-        self.awaiting_first_book = true;
-        self.suspect_streak = 0;
-        self.shadow.clear();
-    }
-}
-
-impl Default for ShadowValidator {
-    fn default() -> Self {
-        Self::new()
+        *self = Self::default();
     }
 }

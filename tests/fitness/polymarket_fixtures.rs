@@ -154,11 +154,13 @@ impl Replay {
     }
 }
 
-/// The ascending best=last pin: after normalisation `best_bid` is the highest-priced bid and
-/// `best_ask` the lowest-priced ask, computed independently of the sort under test.
+/// The ascending best=last pin: after normalisation the first bid is the highest-priced bid and
+/// the first ask the lowest-priced ask, computed independently of the sort under test.
 fn snapshot_best_is_extremal(book: &PolyBook) -> bool {
-    let bid_ok = book.best_bid().map(|l| l.price) == book.bids.iter().map(|l| l.price).max();
-    let ask_ok = book.best_ask().map(|l| l.price) == book.asks.iter().map(|l| l.price).min();
+    let bid_ok =
+        book.bids.first().copied().map(|l| l.price) == book.bids.iter().map(|l| l.price).max();
+    let ask_ok =
+        book.asks.first().copied().map(|l| l.price) == book.asks.iter().map(|l| l.price).min();
     bid_ok && ask_ok
 }
 
@@ -309,7 +311,7 @@ mod collapse {
             Side::Sell => Side::Buy,
         };
 
-        let mut detector = CollapseDetector::new();
+        let mut detector = CollapseDetector::default();
         for &(side, price) in &removals {
             detector.observe(resting(side, price, seed_ts));
         }
@@ -365,7 +367,7 @@ mod collapse {
 
         // The concurrent live window, fed its real deltas, never collapses a fresh detector.
         for token in [&new.token_up, &new.token_down] {
-            let mut detector = CollapseDetector::new();
+            let mut detector = CollapseDetector::default();
             for line in COLLAPSE.lines() {
                 for frame in frames_in(line) {
                     let PolyFrame::PriceChange(change) = frame else {

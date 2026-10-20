@@ -15,10 +15,10 @@ pub(crate) mod schedule;
 /// carries, and a fill payload cannot be checked without the numbers behind it.
 pub mod wallet;
 
-use market::{BookVerdict, MarketFold, ResetReason, TradeEvidence, TradeVerdict};
-use ordering::{BufferedMarket, MarketBuffer, Phase, Timeline};
+use market::{MarketFold, ResetReason, TradeEvidence};
+use ordering::{Phase, Sequenced, SequencedByKey};
 use queue::{OwnFill, SimOrderIndex};
-use request::{AdmitPlan, RequestFold, TimedAction, close_order};
+use request::{RequestFold, TimedAction, close_order};
 use resting::{
     ClosedReason, InstrumentLimits, OrderPhase, OrderSnapshot, RefusalReason, RestingOrders,
 };
@@ -116,10 +116,11 @@ impl EmissionBook {
 #[derive(Debug)]
 pub(crate) struct SimVenue {
     market: MarketFold,
-    inbox: MarketBuffer,
+    inbox: SequencedByKey<(InboundMessage, VenueMeta)>,
+    inbox_capacity: usize,
     orders: RestingOrders,
     limits: InstrumentLimits,
-    timeline: Timeline,
+    timeline: SequencedByKey<TimedAction>,
     emissions: EmissionBook,
     wallet: SimWallet,
     verdict_retention: DurationUs,
@@ -149,10 +150,11 @@ impl SimVenue {
     pub fn new(setup: SimVenueSetup) -> Result<Self, WalletError> {
         Ok(Self {
             market: MarketFold::new(setup.instrument, setup.book_capacity),
-            inbox: MarketBuffer::new(setup.market_inbox_capacity),
+            inbox: SequencedByKey::default(),
+            inbox_capacity: setup.market_inbox_capacity,
             orders: RestingOrders::new(),
             limits: setup.limits,
-            timeline: Timeline::default(),
+            timeline: SequencedByKey::default(),
             emissions: EmissionBook::default(),
             wallet: SimWallet::new(setup.wallet)?,
             verdict_retention: setup.verdict_retention,
@@ -170,23 +172,29 @@ impl SimVenue {
     }
 
     pub fn on_request(&mut self, request: &ExecRequest, effective_ts_us: TsUs) {
-        let plan = self.fold().admit(request, effective_ts_us);
-        self.schedule(plan);
-    }
-
-    pub fn on_market_batch(&mut self, tapped: &[TappedMessage], latency: latency::LatencyBudget) {
-        for item in tapped {
-            let effective_ts_us = latency.market_effective(item.message.received_ts_us());
-            self.on_market(item, effective_ts_us);
+        if let Some((at_ts_us, action)) = self.fold().admit(request, effective_ts_us) {
+            self.timeline.push(at_ts_us, action.phase(), action);
         }
     }
 
-    pub fn on_market(&mut self, tapped: &TappedMessage, effective_ts_us: TsUs) {
-        let Some(phase) = self.phase_of(&tapped.message, tapped.venue_meta) else {
-            return;
-        };
-        self.inbox
-            .push(effective_ts_us, phase, (tapped.message, tapped.venue_meta));
+    /// # Panics
+    /// When the market inbox is full.
+    pub fn on_market_batch(&mut self, tapped: &[TappedMessage], latency: latency::LatencyBudget) {
+        for item in tapped {
+            let effective_ts_us = latency.market_effective(item.message.received_ts_us());
+            let Some(phase) = self.phase_of(&item.message, item.venue_meta) else {
+                continue;
+            };
+            assert!(
+                self.inbox.len() < self.inbox_capacity,
+                "the simulated venue's market inbox is full at {} events — the safe horizon \
+                 has lagged its receipts for longer than the declared delay bound allows, and \
+                 evicting one would silently change which orders filled",
+                self.inbox_capacity
+            );
+            self.inbox
+                .push(effective_ts_us, phase, (item.message, item.venue_meta));
+        }
     }
 
     pub fn advance_to_watermark(&mut self, horizon: TsUs, due: &mut Vec<SimEmission>) {
@@ -199,7 +207,7 @@ impl SimVenue {
                 }
                 Source::Scheduled => {
                     if let Some(entry) = self.timeline.pop() {
-                        self.fold().run(entry.action, entry.at_ts_us);
+                        self.fold().run(entry.item, entry.at_ts_us);
                     }
                 }
             }
@@ -260,22 +268,21 @@ impl SimVenue {
         }
     }
 
-    fn apply_market(&mut self, event: BufferedMarket) {
-        match &event.message {
-            InboundMessage::Trade(trade) => {
-                self.apply_trade(trade, event.venue_meta, event.at_ts_us)
-            }
-            InboundMessage::Book(chunk) => {
-                self.apply_book_chunk(chunk, event.venue_meta, event.at_ts_us)
-            }
+    fn apply_market(&mut self, event: Sequenced<(InboundMessage, VenueMeta)>) {
+        let (message, venue_meta) = event.item;
+        let reset = match &message {
+            InboundMessage::Trade(trade) => self.apply_trade(trade, venue_meta, event.at_ts_us),
+            InboundMessage::Book(chunk) => self.market.on_book_chunk(chunk, venue_meta),
             InboundMessage::BookReset(_) => {
-                let VenueMeta::DepthReset { exchange_ts_us } = event.venue_meta else {
+                let VenueMeta::DepthReset { exchange_ts_us } = venue_meta else {
                     panic!("a book reset reached the venue without its exchange stamp")
                 };
-                let reason = self.market.on_book_reset(exchange_ts_us);
-                self.record_reset(reason, event.at_ts_us);
+                Some(self.market.on_book_reset(exchange_ts_us))
             }
             other => panic!("a {other:?} reached the venue's market fold"),
+        };
+        if let Some(reason) = reset {
+            self.record_reset(reason, event.at_ts_us);
         }
     }
 
@@ -294,8 +301,8 @@ impl SimVenue {
             .map(|(index, _)| index)
             .collect();
         for index in deferred {
-            self.timeline
-                .schedule(at_ts_us, TimedAction::Activate(index));
+            let action = TimedAction::Activate(index);
+            self.timeline.push(at_ts_us, action.phase(), action);
         }
     }
 
@@ -304,84 +311,62 @@ impl SimVenue {
         self.record_reset(reason, at_ts_us);
     }
 
-    fn apply_book_chunk(
-        &mut self,
-        chunk: &crate::msg::inbound::BookChunk,
-        venue_meta: VenueMeta,
-        effective_ts_us: TsUs,
-    ) {
-        match self.market.on_book_chunk(chunk, venue_meta) {
-            BookVerdict::Reset(reason) => {
-                self.record_reset(reason, effective_ts_us);
-            }
-            BookVerdict::DeltaCommitted
-            | BookVerdict::DeltaStaged
-            | BookVerdict::SnapshotApplied => {}
-        }
-    }
-
     fn apply_trade(
         &mut self,
         trade: &crate::msg::inbound::TradeEvent,
         venue_meta: VenueMeta,
-        effective_ts_us: TsUs,
-    ) {
+        at_ts_us: TsUs,
+    ) -> Option<ResetReason> {
         let evidence = TradeEvidence::from_meta(venue_meta);
-        let at_ts_us = effective_ts_us;
-        let verdict = {
-            let SimVenue {
-                market,
-                orders,
-                emissions,
-                wallet,
-                ..
-            } = self;
-            let mut take = |index: SimOrderIndex, offered: Qty| {
-                let Some(record) = orders.get_mut(index) else {
-                    return VACATE;
-                };
-                record.prints_seen += 1;
-                if record.phase != OrderPhase::Resting {
-                    return VACATE;
-                }
-                let taken = record.order.take(offered);
-                let last_price = record.order.price;
-                let is_complete = record.order.is_complete();
-                if taken.0 == 0 {
-                    return OwnFill { taken, is_complete };
-                }
-                let settlement = wallet.fill(
-                    record
-                        .reservation
-                        .as_mut()
-                        .expect("a resting order filled with no reservation"),
-                    taken,
-                );
-                if is_complete {
-                    close_order(orders, wallet, index, ClosedReason::Filled, at_ts_us)
-                        .expect("the filled order still exists");
-                }
-                let snapshot = orders
-                    .snapshot(index)
-                    .expect("the filled order still has a snapshot");
-                let trade_id = orders.mint_trade_id();
-                emissions.push(
-                    at_ts_us,
-                    VenueEvent::Filled {
-                        snapshot,
-                        last_qty: taken,
-                        last_price,
-                        trade_id,
-                        settlement,
-                    },
-                );
-                OwnFill { taken, is_complete }
+        let SimVenue {
+            market,
+            orders,
+            emissions,
+            wallet,
+            ..
+        } = self;
+        let mut take = |index: SimOrderIndex, offered: Qty| {
+            let Some(record) = orders.get_mut(index) else {
+                return VACATE;
             };
-            market.on_trade(trade, evidence, &mut take)
+            record.prints_seen += 1;
+            if record.phase != OrderPhase::Resting {
+                return VACATE;
+            }
+            let taken = record.order.take(offered);
+            let last_price = record.order.price;
+            let is_complete = record.order.is_complete();
+            if taken.0 == 0 {
+                return OwnFill { taken, is_complete };
+            }
+            let settlement = wallet.fill(
+                record
+                    .reservation
+                    .as_mut()
+                    .expect("a resting order filled with no reservation"),
+                taken,
+            );
+            if is_complete {
+                close_order(orders, wallet, index, ClosedReason::Filled, at_ts_us)
+                    .expect("the filled order still exists");
+            }
+            let snapshot = orders
+                .snapshot(index)
+                .expect("the filled order still has a snapshot");
+            let trade_id = orders.mint_trade_id();
+            emissions.push(
+                at_ts_us,
+                VenueEvent::Filled {
+                    snapshot,
+                    last_qty: taken,
+                    last_price,
+                    trade_id,
+                    settlement,
+                },
+            );
+            OwnFill { taken, is_complete }
         };
-        if let TradeVerdict::Reset(reason) = verdict {
-            self.record_reset(reason, at_ts_us);
-        }
+        market.on_trade(trade, evidence, &mut take)
     }
 
     #[cold]
@@ -399,12 +384,6 @@ impl SimVenue {
         self.reset_announced = true;
         self.emissions
             .push(at_ts_us, VenueEvent::MarketReset { reason });
-    }
-
-    fn schedule(&mut self, plan: AdmitPlan) {
-        if let Some((at_ts_us, action)) = plan {
-            self.timeline.schedule(at_ts_us, action);
-        }
     }
 
     fn fold(&mut self) -> RequestFold<'_> {

@@ -13,8 +13,8 @@ use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::adapters::IDLE_POLL;
 use crate::adapters::backoff::BackoffCaps;
+use crate::adapters::lane::{Flow, Lane, LaneSpec, SessionEnd, run_lane};
 use crate::adapters::rest_quiet::SharedRestQuiet;
 use crate::config::{BinanceMarket, KlineInterval};
 use crate::hot::spawn::QueueProducer;
@@ -30,7 +30,7 @@ use super::kline::KlineSequencer;
 use super::parse::{ParseContext, ParseError, parse_agg_trade, parse_combined_frame};
 use super::rest::{BinanceEnv, RestClient, RestError};
 use super::ws::{self, StreamCategory};
-use crate::adapters::socket::{Socket, connect};
+use crate::adapters::socket::Socket;
 
 use depth_resync::DepthState;
 use liveness::LivenessMonitor;
@@ -47,23 +47,6 @@ struct KlineTarget {
     instrument: InstrumentId,
     interval: KlineInterval,
     backfill_limit: u32,
-}
-
-// `serverShutdown` = planned reconnect (spot only), not malformed.
-#[derive(PartialEq, Eq)]
-enum HandleOutcome {
-    Continue,
-    Reconnect,
-}
-
-enum SessionEnd {
-    Stopped,
-    Parked,
-    /// `has_carried_data` is the only thing that proves the endpoint healthy, so it is what decides
-    /// whether the reconnect backoff starts over.
-    Reconnect {
-        has_carried_data: bool,
-    },
 }
 
 #[derive(Clone)]
@@ -211,110 +194,18 @@ impl Actor {
         }
     }
 
-    async fn run(mut self) {
-        let mut attempt: u32 = 0;
-        loop {
-            if self.fatal.is_tripped() {
-                return;
-            }
-            if self.run_state.state() == RunState::Idle {
-                // Parked -> don't inflate backoff before resume.
-                tokio::time::sleep(IDLE_POLL).await;
-                continue;
-            }
-            let mut socket = match connect(&self.url).await {
-                Ok(socket) => {
-                    let Some(epoch) = self.stream_epoch.next() else {
-                        return self.on_epoch_exhausted();
-                    };
-                    self.stream_epoch = epoch;
-                    info!("binance adapter connected {}", self.label);
-                    socket
-                }
-                Err(error) => {
-                    warn!("binance adapter connect failed {}: {error}", self.label);
-                    tokio::time::sleep(self.backoff.delay(attempt)).await;
-                    attempt = attempt.saturating_add(1);
-                    continue;
-                }
-            };
-
-            self.liveness.arm();
-            if self.category == StreamCategory::Klines {
-                self.backfill_klines().await;
-            }
-
-            match self.run_session(&mut socket).await {
-                SessionEnd::Stopped => return,
-                SessionEnd::Parked => {
-                    info!("binance adapter {} parked — socket dropped", self.label);
-                    attempt = 0;
-                }
-                SessionEnd::Reconnect { has_carried_data } => {
-                    if has_carried_data {
-                        attempt = 0;
-                    }
-                    warn!("binance adapter disconnected, reconnecting {}", self.label);
-                    tokio::time::sleep(self.backoff.delay(attempt)).await;
-                    attempt = attempt.saturating_add(1);
-                }
-            }
-        }
+    async fn run(self) {
+        let spec = LaneSpec {
+            name: format!("binance adapter {}", self.label),
+            url: self.url.clone(),
+            fatal: self.fatal.clone(),
+            run_state: self.run_state.clone(),
+            backoff: self.backoff,
+        };
+        run_lane(spec, self).await;
     }
 
-    async fn run_session(&mut self, socket: &mut Socket) -> SessionEnd {
-        let mut has_carried_data = false;
-        loop {
-            if self.fatal.is_tripped() {
-                return SessionEnd::Stopped;
-            }
-            if self.run_state.state() == RunState::Idle {
-                return SessionEnd::Parked;
-            }
-            // Check liveness even with no frame.
-            let poll = tokio::time::timeout(self.poll_period(), socket.next()).await;
-            if matches!(poll, Ok(Some(Ok(_)))) {
-                self.liveness.note_message();
-            }
-            match poll {
-                Ok(Some(Ok(Message::Text(text)))) => {
-                    has_carried_data = true;
-                    let received_ts_us = self.clock.now();
-                    if self.handle_text(text.as_str(), received_ts_us).await
-                        == HandleOutcome::Reconnect
-                    {
-                        return SessionEnd::Reconnect { has_carried_data };
-                    }
-                }
-                Ok(Some(Ok(Message::Ping(payload)))) => {
-                    if ws::reply_to_ping(&mut *socket, payload).await.is_err() {
-                        return SessionEnd::Reconnect { has_carried_data };
-                    }
-                }
-                Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
-                    return SessionEnd::Reconnect { has_carried_data };
-                }
-                Ok(Some(Ok(Message::Pong(_) | Message::Binary(_) | Message::Frame(_)))) => {}
-                Ok(Some(Err(error))) => {
-                    warn!("binance adapter stream {}: {error}", self.label);
-                    return SessionEnd::Reconnect { has_carried_data };
-                }
-                // Watermarks distinguish quiet lanes from stalled ones.
-                Err(_elapsed) => self.producer.push_tap_watermark(self.clock.now()),
-            }
-            if let Some(silent_for) = self.liveness.socket_silence() {
-                warn!(
-                    "binance adapter {} silent {}s — reconnecting",
-                    self.label,
-                    silent_for.as_secs()
-                );
-                return SessionEnd::Reconnect { has_carried_data };
-            }
-            self.liveness.warn_silent(&self.label);
-        }
-    }
-
-    async fn handle_text(&mut self, raw: &str, received_ts_us: TsUs) -> HandleOutcome {
+    async fn handle_text(&mut self, raw: &str, received_ts_us: TsUs) -> Flow {
         let frame = match parse_combined_frame(raw) {
             Ok(frame) => frame,
             Err(error) => {
@@ -322,7 +213,7 @@ impl Actor {
                     return self.on_server_shutdown();
                 }
                 self.on_parse_error(error);
-                return HandleOutcome::Continue;
+                return Flow::Continue;
             }
         };
         if is_server_shutdown(&frame.stream) {
@@ -332,7 +223,7 @@ impl Actor {
         // hold the liveness guard open while delivering nothing.
         let Some(&instrument) = self.routing.get(stream_symbol(&frame.stream)) else {
             self.on_unroutable_frame(format_args!("stream {}", frame.stream));
-            return HandleOutcome::Continue;
+            return Flow::Continue;
         };
         self.liveness.mark_seen(&frame.stream);
         let ctx = ParseContext {
@@ -344,22 +235,19 @@ impl Actor {
             StreamCategory::Depth => self.handle_depth(&frame.data, ctx).await,
             StreamCategory::Klines => self.handle_kline(&frame.data, ctx).await,
         }
-        HandleOutcome::Continue
+        Flow::Continue
     }
 
-    fn on_server_shutdown(&self) -> HandleOutcome {
+    fn on_server_shutdown(&self) -> Flow {
         info!(
             "binance adapter {} received serverShutdown — reconnecting",
             self.label
         );
-        HandleOutcome::Reconnect
+        Flow::Reconnect
     }
 
     fn handle_trade(&mut self, data: &str, ctx: ParseContext) {
-        let event = match parse_agg_trade(data, ctx) {
-            Ok(event) => event,
-            Err(error) => return self.on_parse_error(error),
-        };
+        let Some(event) = self.parsed(parse_agg_trade(data, ctx)) else { return };
         self.flush_tapped(vec![TappedMessage {
             message: InboundMessage::Trade(event.trade),
             venue_meta: VenueMeta::Trade {
@@ -377,6 +265,10 @@ impl Actor {
             message.set_queued_ts_us(self.clock.now());
             self.producer.push(message);
         }
+    }
+
+    fn parsed<T>(&mut self, result: Result<T, ParseError>) -> Option<T> {
+        result.map_err(|error| self.on_parse_error(error)).ok()
     }
 
     // Mantissa overflow is fatal (never truncate market data).
@@ -445,6 +337,71 @@ impl Actor {
     }
 }
 
+impl Lane for Actor {
+    async fn session(&mut self, mut socket: Socket) -> SessionEnd {
+        let Some(epoch) = self.stream_epoch.next() else {
+            self.on_epoch_exhausted();
+            return SessionEnd::Stopped;
+        };
+        self.stream_epoch = epoch;
+        self.liveness.arm();
+        if self.category == StreamCategory::Klines {
+            self.backfill_klines().await;
+        }
+
+        let mut is_endpoint_proven = false;
+        loop {
+            if self.fatal.is_tripped() {
+                return SessionEnd::Stopped;
+            }
+            if self.run_state.state() == RunState::Idle {
+                return SessionEnd::Parked;
+            }
+            // The timeout lets liveness be checked even when no frame arrives.
+            let poll = tokio::time::timeout(self.poll_period(), socket.next()).await;
+            if matches!(poll, Ok(Some(Ok(_)))) {
+                self.liveness.note_message();
+            }
+            match poll {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    // Only a data frame proves the endpoint healthy. A socket that opens and then
+                    // closes must keep backing off.
+                    is_endpoint_proven = true;
+                    let received_ts_us = self.clock.now();
+                    if self.handle_text(text.as_str(), received_ts_us).await == Flow::Reconnect {
+                        return SessionEnd::Reconnect { is_endpoint_proven };
+                    }
+                }
+                Ok(Some(Ok(Message::Ping(payload)))) => {
+                    if ws::reply_to_ping(&mut socket, payload).await.is_err() {
+                        return SessionEnd::Reconnect { is_endpoint_proven };
+                    }
+                }
+                Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
+                    return SessionEnd::Reconnect { is_endpoint_proven };
+                }
+                Ok(Some(Ok(Message::Pong(_) | Message::Binary(_) | Message::Frame(_)))) => {}
+                Ok(Some(Err(error))) => {
+                    warn!("binance adapter stream {}: {error}", self.label);
+                    return SessionEnd::Reconnect { is_endpoint_proven };
+                }
+                // Watermarks distinguish quiet lanes from stalled ones.
+                Err(_elapsed) => self.producer.push_tap_watermark(self.clock.now()),
+            }
+            if let Some(silent_for) = self.liveness.socket_silence() {
+                warn!(
+                    "binance adapter {} silent {}s — reconnecting",
+                    self.label,
+                    silent_for.as_secs()
+                );
+                return SessionEnd::Reconnect { is_endpoint_proven };
+            }
+            self.liveness.warn_silent(&self.label);
+        }
+    }
+}
+
+// `serverShutdown` is a planned reconnect the spot venue announces, not a malformed frame.
 fn is_server_shutdown(raw: &str) -> bool {
     raw.contains("serverShutdown")
 }

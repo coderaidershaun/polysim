@@ -1,6 +1,7 @@
 //! Admission and execution of simulated venue requests.
 
 use super::market::MarketFold;
+use super::ordering::Phase;
 use super::orders::SimOrder;
 use super::queue::{QueueAhead, SimOrderIndex};
 use super::resting::{
@@ -24,6 +25,17 @@ pub enum TimedAction {
     },
     AnswerOrderStatus(ClientOrderId),
     AnswerOpenOrders,
+}
+
+impl TimedAction {
+    pub fn phase(self) -> Phase {
+        match self {
+            TimedAction::Activate(_) | TimedAction::Cancel(_) | TimedAction::Amend { .. } => {
+                Phase::OrderAction
+            }
+            TimedAction::AnswerOrderStatus(_) | TimedAction::AnswerOpenOrders => Phase::Reconcile,
+        }
+    }
 }
 
 pub struct RequestFold<'a> {
@@ -105,7 +117,6 @@ impl RequestFold<'_> {
                 filled: Qty(0),
                 filled_quote: 0,
             },
-            placement.style,
             placement.effective_ts_us,
         ));
         if let Some(reason) = self.refuse_placement(&placement) {
@@ -136,7 +147,7 @@ impl RequestFold<'_> {
         if record.phase != OrderPhase::Pending {
             return;
         }
-        let (side, price) = (record.order.side, record.order.price);
+        let (side, price, qty) = (record.order.side, record.order.price, record.order.qty);
         // The order stays Pending and its timeline entry is spent: a venue that cannot see its own
         // book cannot judge a post-only cross. `SimVenue::restore_matching` reschedules every
         // Pending order once the book is whole again, and a run that ends first withdraws them as
@@ -155,20 +166,13 @@ impl RequestFold<'_> {
             self.refuse(index, RefusalReason::MaxOrders, at_ts_us);
             return;
         }
-        let Some(request) = self.orders.get(index).map(|record| ReservationRequest {
-            side: record.order.side,
-            price: record.order.price,
-            qty: record.order.qty,
-        }) else {
-            return;
-        };
-        match self.wallet.reserve(request) {
+        match self.wallet.reserve(ReservationRequest { side, price, qty }) {
             ReserveOutcome::Reserved(reservation) => {
                 if let Some(record) = self.orders.get_mut(index) {
                     record.reservation = Some(reservation);
                 }
             }
-            ReserveOutcome::InsufficientFunds { .. } => {
+            ReserveOutcome::InsufficientFunds => {
                 self.refuse(index, RefusalReason::InsufficientFunds, at_ts_us);
                 return;
             }
@@ -233,7 +237,7 @@ impl RequestFold<'_> {
         ladder.drop_vacant();
     }
 
-    fn snapshot(&self, index: SimOrderIndex) -> OrderSnapshot {
+    pub(super) fn snapshot(&self, index: SimOrderIndex) -> OrderSnapshot {
         self.orders
             .snapshot(index)
             .unwrap_or_else(|| panic!("simulated order snapshot missing for slot {}", index.0))

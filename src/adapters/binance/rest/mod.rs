@@ -11,10 +11,9 @@ mod request;
 mod signed;
 mod weight;
 
-use std::time::Duration;
-
 use serde::de::DeserializeOwned;
 
+use crate::adapters::http::{self, Deadlines, HttpClient, TransportError};
 use crate::config::{BinanceMarket, KlineInterval};
 use crate::secrets::Secret;
 use crate::time::TsUs;
@@ -31,9 +30,6 @@ pub use payload::{
 pub use request::{HttpMethod, RequestAuth, RequestPlan};
 pub use signed::{SignedRestClient, SignedRestConfig};
 pub use weight::OrderCountWindow;
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Request shape enables typed getters + recorder's fetch_text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,27 +87,8 @@ pub enum FailureVerdict {
 
 #[derive(thiserror::Error, Debug)]
 pub enum RestError {
-    #[error("building the binance rest client failed")]
-    ClientBuild {
-        #[source]
-        source: reqwest::Error,
-    },
-    #[error("request to {url} failed")]
-    Transport {
-        url: String,
-        #[source]
-        source: reqwest::Error,
-    },
-    // The url goes last because a log record cuts a long line off at the end, and a signed url is
-    // long enough to hide anything written after it.
-    #[error(
-        "request timed out after {limit_secs}s while {phase} — slow or blocked route to the venue (vpn, proxy, firewall): {url}"
-    )]
-    Timeout {
-        url: String,
-        phase: &'static str,
-        limit_secs: u64,
-    },
+    #[error(transparent)]
+    Transport(#[from] TransportError),
     #[error(
         "binance rate limited {url}: http {status}, retry after {retry_after_secs:?}s (code {code:?}: {message:?})"
     )]
@@ -159,12 +136,13 @@ pub enum RestError {
 impl RestError {
     pub fn verdict(&self) -> FailureVerdict {
         match self {
-            RestError::Transport { .. }
-            | RestError::Timeout { .. }
+            RestError::Transport(
+                TransportError::Request { .. } | TransportError::Timeout { .. },
+            )
             | RestError::RateLimited { .. } => FailureVerdict::Retry,
             // A decode failure means the venue said something this build cannot read; the same
             // request will say it again.
-            RestError::ClientBuild { .. }
+            RestError::Transport(TransportError::ClientBuild { .. })
             | RestError::ApiKeyHeader
             | RestError::RequiresSignature { .. }
             | RestError::Sign { .. }
@@ -205,7 +183,7 @@ fn new_order_rejected_verdict(message: Option<&str>) -> FailureVerdict {
 
 /// REST client for one (market, deployment).
 pub struct RestClient {
-    http: reqwest::Client,
+    http: HttpClient,
     market: BinanceMarket,
     env: BinanceEnv,
     weight: WeightBudget,
@@ -214,13 +192,9 @@ pub struct RestClient {
 
 impl RestClient {
     /// # Errors
-    /// [`RestError::ClientBuild`] if the TLS backend fails to initialise.
+    /// [`RestError::Transport`] if the TLS backend fails to initialise.
     pub fn new(market: BinanceMarket, env: BinanceEnv) -> Result<Self, RestError> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map_err(|source| RestError::ClientBuild { source })?;
+        let http = HttpClient::new(Deadlines::STANDARD)?;
         Ok(Self {
             http,
             market,
@@ -291,47 +265,37 @@ impl RestClient {
             builder = builder.header("X-MBX-APIKEY", api_key_header(api_key)?);
         }
 
-        let response = builder
-            .send()
-            .await
-            .map_err(|source| transport_error(&url, "waiting for the response", source))?;
+        let response = self.http.send(builder, &url).await?;
 
         let status = response.status().as_u16();
         self.observe_limit_headers(response.headers());
-        if status == 429 || status == 418 {
-            let retry_after_secs = header_value(response.headers(), "retry-after");
-            let (code, message) = binance_error(response).await;
-            return Err(RestError::RateLimited {
-                url,
-                status,
-                retry_after_secs,
-                code,
-                message,
-            });
-        }
-        if status == 401 || status == 403 {
-            let (code, message) = binance_error(response).await;
-            return Err(RestError::Unauthorized {
-                url,
-                status,
-                code,
-                message,
-            });
-        }
         if !(200..300).contains(&status) {
+            let retry_after_secs = http::retry_after_secs(response.headers());
             let (code, message) = binance_error(response).await;
-            return Err(RestError::Status {
-                url,
-                status,
-                code,
-                message,
+            return Err(match status {
+                429 | 418 => RestError::RateLimited {
+                    url,
+                    status,
+                    retry_after_secs,
+                    code,
+                    message,
+                },
+                401 | 403 => RestError::Unauthorized {
+                    url,
+                    status,
+                    code,
+                    message,
+                },
+                _ => RestError::Status {
+                    url,
+                    status,
+                    code,
+                    message,
+                },
             });
         }
 
-        let body = response
-            .text()
-            .await
-            .map_err(|source| transport_error(&url, "reading the response body", source))?;
+        let body = self.http.body(response, &url).await?;
         Ok(Fetched { url, body })
     }
 
@@ -386,27 +350,6 @@ fn method_of(method: HttpMethod) -> reqwest::Method {
     match method {
         HttpMethod::Get => reqwest::Method::GET,
         HttpMethod::Delete => reqwest::Method::DELETE,
-    }
-}
-
-/// One deadline covers both the wait for headers and the body read, and reqwest reports a slow
-/// body as a timeout wrapped in a decoding error. The phase says which of the two ran out of time.
-fn transport_error(url: &str, phase: &'static str, source: reqwest::Error) -> RestError {
-    let url = url.to_owned();
-    if !source.is_timeout() {
-        return RestError::Transport { url, source };
-    }
-    if source.is_connect() {
-        return RestError::Timeout {
-            url,
-            phase: "connecting",
-            limit_secs: CONNECT_TIMEOUT.as_secs(),
-        };
-    }
-    RestError::Timeout {
-        url,
-        phase,
-        limit_secs: REQUEST_TIMEOUT.as_secs(),
     }
 }
 

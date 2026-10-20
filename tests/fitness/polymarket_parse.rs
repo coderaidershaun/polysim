@@ -66,8 +66,14 @@ mod book_snapshot {
             panic!("book frame classifies as Book");
         };
         assert_eq!(&*book.asset_id, "TOKEN_UP");
-        assert_eq!(book.best_bid(), Some(level(50_000_000, 30_000_000_000)));
-        assert_eq!(book.best_ask(), Some(level(51_000_000, 2_000_000_000)));
+        assert_eq!(
+            book.bids.first().copied(),
+            Some(level(50_000_000, 30_000_000_000))
+        );
+        assert_eq!(
+            book.asks.first().copied(),
+            Some(level(51_000_000, 2_000_000_000))
+        );
         // full ordering: bids from high to low, asks from low to high
         assert_eq!(
             book.bids,

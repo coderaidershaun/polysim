@@ -39,10 +39,6 @@ impl PriceQueue {
         Self::default()
     }
 
-    pub fn is_vacant(&self) -> bool {
-        !self.holds_own_liquidity()
-    }
-
     pub fn holds_own_liquidity(&self) -> bool {
         self.nodes
             .iter()
@@ -132,12 +128,14 @@ impl PriceQueue {
         }
     }
 
-    pub fn remove_own(&mut self, index: SimOrderIndex) -> bool {
-        let Some(at) = self.position_of(index) else {
-            return false;
-        };
-        self.nodes.remove(at);
-        true
+    pub fn remove_own(&mut self, index: SimOrderIndex) {
+        let own = self
+            .nodes
+            .iter()
+            .position(|node| matches!(node, QueueNode::Own(owner) if *owner == index));
+        if let Some(at) = own {
+            self.nodes.remove(at);
+        }
     }
 
     pub fn walk(
@@ -180,12 +178,6 @@ impl PriceQueue {
                 false => at += 1,
             }
         }
-    }
-
-    fn position_of(&self, index: SimOrderIndex) -> Option<usize> {
-        self.nodes
-            .iter()
-            .position(|node| matches!(node, QueueNode::Own(owner) if *owner == index))
     }
 }
 
@@ -239,7 +231,7 @@ impl PriceLadder {
     }
 
     pub fn drop_vacant(&mut self) {
-        self.levels.retain(|(_, queue)| !queue.is_vacant());
+        self.levels.retain(|(_, queue)| queue.holds_own_liquidity());
     }
 
     pub fn holds_liquidity_crossing(&self, price: Price) -> bool {

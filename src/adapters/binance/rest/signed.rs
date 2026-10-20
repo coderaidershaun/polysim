@@ -59,7 +59,7 @@ impl SignedRestClient {
     /// against the same per-IP allowance, so a rate limit either of them earns must hold both off.
     ///
     /// # Errors
-    /// [`RestError::ClientBuild`] if the TLS backend fails to initialise.
+    /// [`RestError::Transport`] if the TLS backend fails to initialise.
     pub fn new(
         credentials: Credentials,
         config: SignedRestConfig,

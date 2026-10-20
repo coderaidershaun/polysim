@@ -1,8 +1,9 @@
-//! Wire-visible lifecycle transitions for simulated orders.
+//! Wire-visible lifecycle transitions and reconciliation answers for simulated orders.
 
 use crate::ids::ClientOrderId;
+use crate::msg::exec::VenueOrderStatus;
 
-use super::super::resting::OrderSnapshot;
+use super::super::resting::{OrderPhase, OrderSnapshot};
 use super::super::wallet::FillSettlement;
 use super::voice::refusal;
 use super::{
@@ -152,9 +153,48 @@ impl DeliverySchedule {
         );
     }
 
+    pub(super) fn status(&mut self, snapshot: OrderSnapshot, at: Landing) {
+        self.push(
+            None,
+            AnswerKind::Observation,
+            at,
+            VenueVoice::Response(VenueAnswer::Status {
+                order: snapshot.order,
+                status: status_of(snapshot),
+            }),
+        );
+    }
+
+    pub(super) fn no_such_order(&mut self, client_id: ClientOrderId, at: Landing) {
+        self.push(
+            None,
+            AnswerKind::Observation,
+            at,
+            refusal(client_id, Rejection::NoSuchOrder, AnswerSubject::Query),
+        );
+    }
+
+    pub(super) fn snapshot(&mut self, rows: &[OrderSnapshot], at: Landing) {
+        let listed = rows.iter().map(|row| row.order).collect();
+        self.push(
+            None,
+            AnswerKind::Observation,
+            at,
+            VenueVoice::Response(VenueAnswer::OpenOrders(listed)),
+        );
+    }
+
     fn has_pending_terminal(&self, key: GenerationKey) -> bool {
         self.pending
             .iter()
             .any(|entry| entry.key == Some(key) && entry.voice.terminal_half().is_some())
+    }
+}
+
+fn status_of(snapshot: OrderSnapshot) -> VenueOrderStatus {
+    match snapshot.phase {
+        OrderPhase::Closed(reason) => reason.venue_status(),
+        _ if snapshot.order.filled.0 > 0 => VenueOrderStatus::PartiallyFilled,
+        _ => VenueOrderStatus::New,
     }
 }

@@ -1,6 +1,5 @@
 //! Delivery ordering for simulated venue answers.
 
-mod reconcile;
 mod transition;
 mod voice;
 
@@ -161,18 +160,7 @@ impl DeliverySchedule {
     }
 
     fn open_barrier(&mut self, key: GenerationKey, due_ts_us: TsUs) {
-        if let Some(spoken) = self.spoken_mut(key) {
-            spoken.new_barrier_ts_us = Some(due_ts_us);
-            return;
-        }
-        self.spoken.push(Spoken {
-            key,
-            has_said_new: false,
-            has_said_terminal_ack: false,
-            has_said_terminal_report: false,
-            cumulative_qty: Qty(0),
-            new_barrier_ts_us: Some(due_ts_us),
-        });
+        self.ensure_spoken(key).new_barrier_ts_us = Some(due_ts_us);
     }
 
     fn push(
@@ -200,18 +188,15 @@ impl DeliverySchedule {
         });
     }
 
-    fn ensure_spoken(&mut self, key: GenerationKey) {
-        if self.spoken_mut(key).is_some() {
-            return;
-        }
-        self.spoken.push(Spoken {
-            key,
-            has_said_new: false,
-            has_said_terminal_ack: false,
-            has_said_terminal_report: false,
-            cumulative_qty: Qty(0),
-            new_barrier_ts_us: None,
-        });
+    fn ensure_spoken(&mut self, key: GenerationKey) -> &mut Spoken {
+        let at = match self.spoken.iter().position(|spoken| spoken.key == key) {
+            Some(at) => at,
+            None => {
+                self.spoken.push(Spoken::new(key));
+                self.spoken.len() - 1
+            }
+        };
+        &mut self.spoken[at]
     }
 
     fn next_speakable(&self, horizon: TsUs) -> Option<usize> {
@@ -270,6 +255,17 @@ impl DeliverySchedule {
 }
 
 impl Spoken {
+    fn new(key: GenerationKey) -> Self {
+        Self {
+            key,
+            has_said_new: false,
+            has_said_terminal_ack: false,
+            has_said_terminal_report: false,
+            cumulative_qty: Qty(0),
+            new_barrier_ts_us: None,
+        }
+    }
+
     fn record(&mut self, kind: AnswerKind, voice: &VenueVoice) {
         assert!(
             !self.has_said_terminal_report,

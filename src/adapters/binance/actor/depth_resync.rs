@@ -9,7 +9,7 @@ use crate::adapters::binance::parse::{
 use crate::adapters::binance::rest::RestRequest;
 use crate::config::BinanceMarket;
 use crate::ids::InstrumentId;
-use crate::msg::inbound::TappedMessage;
+use crate::msg::inbound::{InboundMessage, TappedMessage, VenueMeta};
 use crate::time::TsUs;
 
 use super::Actor;
@@ -50,10 +50,7 @@ impl Actor {
             BinanceMarket::Spot => parse_spot_depth_diff(data, ctx),
             BinanceMarket::Perpetual => parse_perp_depth_diff(data, ctx),
         };
-        let diff = match diff {
-            Ok(diff) => diff,
-            Err(error) => return self.on_parse_error(error),
-        };
+        let Some(diff) = self.parsed(diff) else { return };
         let final_update_id = diff.final_update_id;
 
         let mut out = Vec::new();
@@ -62,12 +59,7 @@ impl Actor {
                 return self
                     .on_unroutable_frame(format_args!("depth on instrument {}", ctx.instrument.0));
             };
-            let outcome = state.sequencer.on_diff(diff, &mut |message, venue_meta| {
-                out.push(TappedMessage {
-                    message,
-                    venue_meta,
-                })
-            });
+            let outcome = state.sequencer.on_diff(diff, &mut tapped_into(&mut out));
             state.latest_update_id = state.latest_update_id.max(final_update_id);
             if matches!(outcome, DiffOutcome::Resync | DiffOutcome::Overflow) {
                 // Snapshot predates break -> drop, fetch fresh. The throttle stands: a break is
@@ -92,12 +84,7 @@ impl Actor {
             state.sequencer.note_emit_floor(received_ts_us);
             state
                 .sequencer
-                .apply_snapshot(snapshot, &mut |message, venue_meta| {
-                    out.push(TappedMessage {
-                        message,
-                        venue_meta,
-                    })
-                });
+                .apply_snapshot(snapshot, &mut tapped_into(&mut out));
         }
         self.flush_tapped(out);
     }
@@ -134,32 +121,26 @@ impl Actor {
             state.last_snapshot_at = Some(now);
         }
 
-        let Some(symbol) = self.venue_symbol(instrument) else {
-            return self.on_unknown_symbol(instrument, "its depth snapshot");
-        };
-        let request = RestRequest::DepthSnapshot {
+        let plan = |symbol| RestRequest::DepthSnapshot {
             symbol,
             limit: DEPTH_SNAPSHOT_LIMIT,
         };
-        let json = match self.fetch_text_beating(&request).await {
-            Ok(json) => json,
-            Err(error) => {
-                self.on_rest_error(&error, &format!("depth snapshot {}", instrument.0));
-                return;
-            }
+        let Some((json, ctx)) = self.read_rest(instrument, "depth snapshot", plan).await else {
+            return;
         };
-        let ctx = ParseContext {
-            instrument,
-            received_ts_us: self.clock.now(),
-        };
-        match parse_depth_snapshot(&json, ctx) {
-            Ok(snapshot) => {
-                if let Some(state) = self.depth_states.get_mut(&instrument) {
-                    state.pending_snapshot = Some(snapshot);
-                }
-            }
-            Err(error) => self.on_parse_error(error),
+        let Some(snapshot) = self.parsed(parse_depth_snapshot(&json, ctx)) else { return };
+        if let Some(state) = self.depth_states.get_mut(&instrument) {
+            state.pending_snapshot = Some(snapshot);
         }
+    }
+}
+
+fn tapped_into(out: &mut Vec<TappedMessage>) -> impl FnMut(InboundMessage, VenueMeta) {
+    move |message, venue_meta| {
+        out.push(TappedMessage {
+            message,
+            venue_meta,
+        })
     }
 }
 

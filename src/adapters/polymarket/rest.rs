@@ -1,20 +1,17 @@
 //! REST layer: Gamma market discovery + CLOB `/book` probe. Deterministic slug. Teardown trusts 404
 //! only. `Gamma*` names are the vendor's own word for the events API, not this module's identity.
 
-use std::time::Duration;
-
+use reqwest::Method;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
+use crate::adapters::http::{self, Deadlines, HttpClient, TransportError};
 use crate::config::PolySeries;
 use crate::ids::{FIXED_SCALE, Price, Qty};
 use crate::time::TsUs;
 
 const GAMMA_BASE: &str = "https://gamma-api.polymarket.com";
 const CLOB_BASE: &str = "https://clob.polymarket.com";
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GammaMarket {
@@ -36,17 +33,8 @@ pub enum BookProbe {
 
 #[derive(thiserror::Error, Debug)]
 pub enum GammaError {
-    #[error("building the polymarket rest client failed")]
-    ClientBuild {
-        #[source]
-        source: reqwest::Error,
-    },
-    #[error("request to {url} failed")]
-    Transport {
-        url: String,
-        #[source]
-        source: reqwest::Error,
-    },
+    #[error(transparent)]
+    Transport(#[from] TransportError),
     #[error(
         "polymarket rate limited {url}: http {status}, {}",
         format_retry_after(retry_after_secs)
@@ -89,7 +77,7 @@ pub fn fallback_url(series: PolySeries, now: TsUs) -> String {
     format!(
         "{GAMMA_BASE}/events?series_id={}&closed=false&end_date_min={}&order=endDate&ascending=true&limit=4",
         series.gamma_series_id(),
-        iso8601_utc(to_unix_seconds(now))
+        iso8601_utc(now)
     )
 }
 
@@ -128,19 +116,15 @@ pub fn parse_fallback(
 
 #[derive(Debug)]
 pub struct PolyRest {
-    http: reqwest::Client,
+    http: HttpClient,
     series: PolySeries,
 }
 
 impl PolyRest {
     /// # Errors
-    /// [`GammaError::ClientBuild`] if the TLS backend fails to initialise.
+    /// [`GammaError::Transport`] if the TLS backend fails to initialise.
     pub fn new(series: PolySeries) -> Result<Self, GammaError> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map_err(|source| GammaError::ClientBuild { source })?;
+        let http = HttpClient::new(Deadlines::STANDARD)?;
         Ok(Self { http, series })
     }
 
@@ -175,24 +159,11 @@ impl PolyRest {
     }
 
     async fn fetch(&self, url: &str) -> Result<RawResponse, GammaError> {
-        let response = self
-            .http
-            .get(url)
-            .send()
-            .await
-            .map_err(|source| GammaError::Transport {
-                url: url.to_owned(),
-                source,
-            })?;
+        let request = self.http.request(Method::GET, url);
+        let response = self.http.send(request, url).await?;
         let status = response.status().as_u16();
-        let retry_after_secs = retry_after_seconds(response.headers());
-        let body = response
-            .text()
-            .await
-            .map_err(|source| GammaError::Transport {
-                url: url.to_owned(),
-                source,
-            })?;
+        let retry_after_secs = http::retry_after_secs(response.headers());
+        let body = self.http.body(response, url).await?;
         Ok(RawResponse {
             status,
             retry_after_secs,
@@ -228,17 +199,6 @@ fn check_status(url: &str, status: u16, retry_after_secs: Option<u64>) -> Result
         });
     }
     Ok(())
-}
-
-/// Delta-seconds only (HTTP-date form reads as absent since calendar parser off allowlist).
-fn retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    headers
-        .get(reqwest::header::RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
 }
 
 fn format_retry_after(retry_after_secs: &Option<u64>) -> String {
@@ -328,12 +288,12 @@ fn mantissa(value: f64) -> i64 {
     (value * FIXED_SCALE as f64).round() as i64
 }
 
-fn iso8601_utc(unix_s: i64) -> String {
-    let days = unix_s.div_euclid(86_400);
-    let seconds = unix_s.rem_euclid(86_400);
-    let (year, month, day) = crate::time::civil_from_days(days);
-    let (hour, minute, second) = (seconds / 3_600, (seconds % 3_600) / 60, seconds % 60);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+fn iso8601_utc(at: TsUs) -> String {
+    let civil = at.civil();
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        civil.year, civil.month, civil.day, civil.hour, civil.minute, civil.second
+    )
 }
 
 fn first_market(events: &[RawEvent]) -> Option<&RawMarket> {

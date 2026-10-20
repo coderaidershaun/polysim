@@ -9,15 +9,15 @@ pub use core::{DriverEffect, PolyDriverCore, SlotLegs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio::time::Interval;
 use tokio_tungstenite::tungstenite::{Error as ProtocolError, Message};
 
-use crate::adapters::IDLE_POLL;
 use crate::adapters::backoff::BackoffCaps;
+use crate::adapters::lane::{Flow, Lane, LaneSpec, SessionEnd, run_lane};
 use crate::adapters::rest_quiet::RestQuiet;
 use crate::config::PolySeries;
 use crate::hot::spawn::QueueProducer;
@@ -26,26 +26,19 @@ use crate::msg::persist::RotationRow;
 use crate::registry::{InstrumentRow, ProducerGroup};
 use crate::shutdown::{FatalSignal, RunStateCell};
 use crate::time::{EngineClock, TsUs};
-use crate::{error, info, warn};
+use crate::{error, warn};
 
 use super::discovery::{PolySchedule, Slot};
 use super::parse::{is_frameless, parse_market_frame};
 use super::rest::PolyRest;
-use super::rotation::{WindowAssignment, WindowTokens};
+use super::rotation::WindowAssignment;
 use super::ws;
-use crate::adapters::socket::{Socket, connect};
+use crate::adapters::socket::{Socket, Writer};
 
-use effects::CoreEvent;
+use effects::{CoreEvent, Pending};
 
 const TICK_INTERVAL: Duration = Duration::from_secs(1);
 const RESULTS_CAPACITY: usize = 32;
-
-/// The longest venue-supplied `Retry-After` this adapter will honour. A rotation is five minutes, so
-/// parking REST past one window resolves nothing that the next window would not have to resolve
-/// again — and an hour-long value from the venue would silently stop the rotation for an hour.
-const MAX_REST_QUIET_SECS: u64 = 60;
-
-type Writer = SplitSink<Socket, Message>;
 
 #[derive(Clone)]
 pub struct PolymarketAdapterContext {
@@ -86,12 +79,6 @@ impl PolymarketAdapter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Flow {
-    Continue,
-    Reconnect,
-}
-
 struct Actor {
     core: PolyDriverCore,
     schedule: PolySchedule,
@@ -107,8 +94,7 @@ struct Actor {
     window_assignments: Option<mpsc::Sender<WindowAssignment>>,
     dropped_rotations: u64,
     dropped_bindings: u64,
-    inflight: Vec<TsUs>,
-    probing: Vec<WindowTokens>,
+    inflight: Vec<Pending>,
     dropped_frames: u64,
     suppressed_rest: u64,
     divergences: u64,
@@ -147,7 +133,6 @@ impl Actor {
             dropped_rotations: 0,
             dropped_bindings: 0,
             inflight: Vec::new(),
-            probing: Vec::new(),
             dropped_frames: 0,
             suppressed_rest: 0,
             divergences: 0,
@@ -156,75 +141,26 @@ impl Actor {
         (actor, results_rx)
     }
 
-    async fn run(mut self, mut results_rx: mpsc::Receiver<CoreEvent>) {
-        let mut ticks = tokio::time::interval(TICK_INTERVAL);
-        let mut ping = tokio::time::interval(ws::PING_INTERVAL);
+    async fn run(mut self, results_rx: mpsc::Receiver<CoreEvent>) {
+        // The timers are made here, inside the spawned task, because a tokio timer panics when it
+        // is made outside a runtime and `spawn` runs on the caller's thread.
+        let ticks = tokio::time::interval(TICK_INTERVAL);
+        let ping = tokio::time::interval(ws::PING_INTERVAL);
         self.bootstrap().await;
-
-        let mut attempt: u32 = 0;
-        loop {
-            if self.fatal.is_tripped() {
-                return;
-            }
-            if self.run_state.state() == RunState::Idle {
-                tokio::time::sleep(IDLE_POLL).await;
-                continue;
-            }
-            let socket = match connect(ws::MARKET_URL).await {
-                Ok(socket) => {
-                    info!("polymarket adapter {} connected", self.label);
-                    socket
-                }
-                Err(error) => {
-                    warn!("polymarket adapter {} connect failed: {error}", self.label);
-                    tokio::time::sleep(self.backoff.delay(attempt)).await;
-                    attempt = attempt.saturating_add(1);
-                    continue;
-                }
-            };
-            let (mut writer, mut reader) = socket.split();
-            if !self.prime_connection(&mut writer).await {
-                tokio::time::sleep(self.backoff.delay(attempt)).await;
-                attempt = attempt.saturating_add(1);
-                continue;
-            }
-            attempt = 0;
-
-            let mut is_parked = false;
-            loop {
-                if self.fatal.is_tripped() {
-                    return;
-                }
-                if self.run_state.state() == RunState::Idle {
-                    is_parked = true;
-                    break;
-                }
-                let flow = tokio::select! {
-                    frame = reader.next() => self.on_socket_message(frame, &mut writer).await,
-                    _ = ticks.tick() => {
-                        let now = self.clock.now();
-                        self.drive_tick(now, &mut writer).await
-                    }
-                    _ = ping.tick() => self.send_ping(&mut writer).await,
-                    event = results_rx.recv() => self.on_core_event(event, &mut writer).await,
-                };
-                if flow == Flow::Reconnect {
-                    break;
-                }
-            }
-
-            if is_parked {
-                info!("polymarket adapter {} parked — socket dropped", self.label);
-                attempt = 0;
-                continue;
-            }
-            warn!(
-                "polymarket adapter {} disconnected — reconnecting",
-                self.label
-            );
-            tokio::time::sleep(self.backoff.delay(attempt)).await;
-            attempt = attempt.saturating_add(1);
-        }
+        let spec = LaneSpec {
+            name: format!("polymarket adapter {}", self.label),
+            url: ws::MARKET_URL.to_owned(),
+            fatal: self.fatal.clone(),
+            run_state: self.run_state.clone(),
+            backoff: self.backoff,
+        };
+        let lane = MarketLane {
+            actor: self,
+            ticks,
+            ping,
+            results_rx,
+        };
+        run_lane(spec, lane).await;
     }
 
     /// Resolve current window for initial subscribe set. WS ops deferred to connect; Rotation/BookReset land now.
@@ -333,7 +269,7 @@ impl Actor {
         };
         match event {
             CoreEvent::ResolveOk { start, market } => {
-                self.clear_inflight(start);
+                self.clear_inflight(&Pending::Resolve(start));
                 let now = self.clock.now();
                 let assignment = self.core.assignment_from_market(start, &market);
                 let effects =
@@ -341,7 +277,7 @@ impl Actor {
                 self.execute(effects, writer).await
             }
             CoreEvent::ResolveErr { start } => {
-                self.clear_inflight(start);
+                self.clear_inflight(&Pending::Resolve(start));
                 warn!(
                     "polymarket adapter {} resolve of window {} failed — scheduler retries",
                     self.label,
@@ -349,21 +285,8 @@ impl Actor {
                 );
                 Flow::Continue
             }
-            CoreEvent::ResolveRateLimited {
-                start,
-                retry_after_secs,
-            } => {
-                self.clear_inflight(start);
-                let wait = self.open_rest_quiet(retry_after_secs);
-                warn!(
-                    "polymarket adapter {} gamma rate limited — rest quiet {}s",
-                    self.label,
-                    wait.as_secs()
-                );
-                Flow::Continue
-            }
             CoreEvent::Probed { tokens, outcome } => {
-                self.clear_probing(&tokens);
+                self.clear_inflight(&Pending::Probe(tokens.clone()));
                 let Some(outcome) = outcome else {
                     return Flow::Continue;
                 };
@@ -372,25 +295,66 @@ impl Actor {
                     collect_effects(|emit| self.core.on_probe_result(now, tokens, outcome, emit));
                 self.execute(effects, writer).await
             }
-            CoreEvent::ProbeRateLimited {
-                tokens,
+            CoreEvent::RateLimited {
+                pending,
                 retry_after_secs,
             } => {
-                self.clear_probing(&tokens);
-                let wait = self.open_rest_quiet(retry_after_secs);
+                self.clear_inflight(&pending);
+                let wait = self.rest_quiet.open(retry_after_secs, Instant::now());
                 warn!(
-                    "polymarket adapter {} clob rate limited — rest quiet {}s",
+                    "polymarket adapter {} {} rate limited — rest quiet {}s",
                     self.label,
+                    pending.api(),
                     wait.as_secs()
                 );
                 Flow::Continue
             }
         }
     }
+}
 
-    fn open_rest_quiet(&mut self, retry_after_secs: Option<u64>) -> Duration {
-        let honoured = retry_after_secs.map(|seconds| seconds.min(MAX_REST_QUIET_SECS));
-        self.rest_quiet.open(honoured, Instant::now())
+/// The actor plus what outlives any one socket, so the tick and ping timers keep their schedule
+/// across a reconnect.
+struct MarketLane {
+    actor: Actor,
+    ticks: Interval,
+    ping: Interval,
+    results_rx: mpsc::Receiver<CoreEvent>,
+}
+
+impl Lane for MarketLane {
+    async fn session(&mut self, socket: Socket) -> SessionEnd {
+        let actor = &mut self.actor;
+        let (mut writer, mut reader) = socket.split();
+        if !actor.prime_connection(&mut writer).await {
+            return SessionEnd::Reconnect {
+                is_endpoint_proven: false,
+            };
+        }
+        loop {
+            if actor.fatal.is_tripped() {
+                return SessionEnd::Stopped;
+            }
+            if actor.run_state.state() == RunState::Idle {
+                return SessionEnd::Parked;
+            }
+            let flow = tokio::select! {
+                frame = reader.next() => actor.on_socket_message(frame, &mut writer).await,
+                _ = self.ticks.tick() => {
+                    let now = actor.clock.now();
+                    actor.drive_tick(now, &mut writer).await
+                }
+                _ = self.ping.tick() => actor.send_ping(&mut writer).await,
+                event = self.results_rx.recv() => actor.on_core_event(event, &mut writer).await,
+            };
+            if flow == Flow::Reconnect {
+                // The connection primed, and that proves the endpoint healthy even if no frame has
+                // arrived yet.
+                return SessionEnd::Reconnect {
+                    is_endpoint_proven: true,
+                };
+            }
+        }
     }
 }
 

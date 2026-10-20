@@ -89,10 +89,8 @@ pub(crate) fn rewound(base: TsUs, span: DurationUs) -> TsUs {
 }
 
 fn stamp(micros: i128) -> TsUs {
-    TsUs::from_micros(narrow(micros, "stamp"))
-}
-
-fn narrow(value: i128, kind: &str) -> i64 {
-    i64::try_from(value)
-        .unwrap_or_else(|_| panic!("simulated latency {kind} {value}µs does not fit i64"))
+    TsUs::from_micros(
+        i64::try_from(micros)
+            .unwrap_or_else(|_| panic!("simulated latency stamp {micros}µs does not fit i64")),
+    )
 }

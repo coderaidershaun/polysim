@@ -5,6 +5,7 @@
 use serde::Deserialize;
 
 use crate::ids::{DecimalError, Price, Qty, Side};
+use crate::msg::inbound::Level;
 
 /// `MantissaOverflow` is fatal — a venue number this scale cannot hold escalates, never truncates.
 #[derive(thiserror::Error, Debug)]
@@ -76,12 +77,25 @@ pub(crate) fn qty_field(field: &'static str, text: &str) -> Result<Qty, DecimalF
 }
 
 pub(crate) fn mantissa_field(field: &'static str, text: &str) -> Result<i64, DecimalFault> {
-    Qty::parse_decimal(text)
-        .map(|qty| qty.0)
-        .map_err(|error| decimal_fault(field, text, error))
+    qty_field(field, text).map(|qty| qty.0)
 }
 
-#[allow(dead_code)] // adopted by the next lean-overhaul stream; remove with the first caller
+pub(crate) fn levels<'a>(
+    price_name: &'static str,
+    qty_name: &'static str,
+    pairs: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<Vec<Level>, DecimalFault> {
+    let pairs = pairs.into_iter();
+    let mut levels = Vec::with_capacity(pairs.size_hint().0);
+    for (price, qty) in pairs {
+        levels.push(Level {
+            price: price_field(price_name, price)?,
+            qty: qty_field(qty_name, qty)?,
+        });
+    }
+    Ok(levels)
+}
+
 pub(crate) fn order_side(field: &'static str, text: &str) -> Result<Side, DecimalFault> {
     [Side::Buy, Side::Sell]
         .into_iter()

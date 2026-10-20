@@ -3,7 +3,9 @@
 
 use serde::Deserialize;
 
-use crate::adapters::decode::{DecimalFault, JsonFrame, mantissa_field, price_field, qty_field};
+use crate::adapters::decode::{
+    DecimalFault, JsonFrame, levels, mantissa_field, price_field, qty_field,
+};
 use crate::adapters::venue_clock::{boundary_ts, clamp_exchange_ts};
 use crate::config::KlineInterval;
 use crate::ids::{AggregateTradeId, InstrumentId, RawTradeId, Side};
@@ -167,8 +169,8 @@ pub fn parse_spot_depth_diff(json: &str, ctx: ParseContext) -> Result<DepthDiff,
         first_update_id: raw.first_update_id,
         final_update_id: raw.final_update_id,
         prev_final_update_id: None,
-        bids: parse_levels("bid price", "bid qty", &raw.bids)?,
-        asks: parse_levels("ask price", "ask qty", &raw.asks)?,
+        bids: levels("bid price", "bid qty", raw.bids.iter().map(price_and_qty))?,
+        asks: levels("ask price", "ask qty", raw.asks.iter().map(price_and_qty))?,
         exchange_ts_us: clamp_exchange_ts(raw.event_ts_ms, ctx.received_ts_us),
         received_ts_us: ctx.received_ts_us,
     })
@@ -185,8 +187,8 @@ pub fn parse_perp_depth_diff(json: &str, ctx: ParseContext) -> Result<DepthDiff,
         first_update_id: raw.first_update_id,
         final_update_id: raw.final_update_id,
         prev_final_update_id: Some(raw.prev_final_update_id),
-        bids: parse_levels("bid price", "bid qty", &raw.bids)?,
-        asks: parse_levels("ask price", "ask qty", &raw.asks)?,
+        bids: levels("bid price", "bid qty", raw.bids.iter().map(price_and_qty))?,
+        asks: levels("ask price", "ask qty", raw.asks.iter().map(price_and_qty))?,
         exchange_ts_us: clamp_exchange_ts(raw.transaction_ts_ms, ctx.received_ts_us),
         received_ts_us: ctx.received_ts_us,
     })
@@ -199,8 +201,8 @@ pub fn parse_depth_snapshot(json: &str, ctx: ParseContext) -> Result<DepthSnapsh
     Ok(DepthSnapshot {
         instrument: ctx.instrument,
         last_update_id: raw.last_update_id,
-        bids: parse_levels("bid price", "bid qty", &raw.bids)?,
-        asks: parse_levels("ask price", "ask qty", &raw.asks)?,
+        bids: levels("bid price", "bid qty", raw.bids.iter().map(price_and_qty))?,
+        asks: levels("ask price", "ask qty", raw.asks.iter().map(price_and_qty))?,
         received_ts_us: ctx.received_ts_us,
     })
 }
@@ -222,19 +224,8 @@ fn taker_side(buyer_is_maker: bool) -> Side {
     if buyer_is_maker { Side::Sell } else { Side::Buy }
 }
 
-fn parse_levels(
-    price_name: &'static str,
-    qty_name: &'static str,
-    raw: &[[String; 2]],
-) -> Result<Vec<Level>, DecimalFault> {
-    let mut levels = Vec::with_capacity(raw.len());
-    for [price, qty] in raw {
-        levels.push(Level {
-            price: price_field(price_name, price)?,
-            qty: qty_field(qty_name, qty)?,
-        });
-    }
-    Ok(levels)
+fn price_and_qty([price, qty]: &[String; 2]) -> (&str, &str) {
+    (price, qty)
 }
 
 #[derive(Deserialize)]

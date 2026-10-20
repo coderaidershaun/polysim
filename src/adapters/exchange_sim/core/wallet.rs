@@ -51,11 +51,7 @@ pub struct ReservationRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReserveOutcome {
     Reserved(Reservation),
-    InsufficientFunds {
-        asset: AssetId,
-        required: i64,
-        free: i64,
-    },
+    InsufficientFunds,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -178,15 +174,9 @@ impl SimWallet {
 
     pub fn reserve(&mut self, request: ReservationRequest) -> ReserveOutcome {
         let amount = total_reservation(request.side, request.price, request.qty);
-        let slot = WalletSlot::of(request.side, Reserved);
-        let asset = self.asset_of(slot);
-        let funds = self.funds_mut(slot);
+        let funds = self.funds_mut(WalletSlot::of(request.side, Reserved));
         if funds.free < amount {
-            return ReserveOutcome::InsufficientFunds {
-                asset,
-                required: amount,
-                free: funds.free,
-            };
+            return ReserveOutcome::InsufficientFunds;
         }
         let free = checked_sub(funds.free, amount, "free balance while reserving");
         let locked = checked_add(funds.locked, amount, "locked balance while reserving");
@@ -327,15 +317,10 @@ impl SimWallet {
     /// # Panics
     /// The account stamp reaching `u64::MAX`.
     pub fn settle(&mut self, due_ts_ms: u64) -> Settlement {
-        let update_ts_ms = [self.account_ts_ms, due_ts_ms]
-            .into_iter()
-            .map(|stamp| {
-                stamp
-                    .checked_add(1)
-                    .unwrap_or_else(|| panic!("account stamp {stamp}ms cannot advance"))
-            })
-            .max()
-            .unwrap_or_default();
+        let stamp = self.account_ts_ms.max(due_ts_ms);
+        let update_ts_ms = stamp
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("account stamp {stamp}ms cannot advance"));
         self.account_ts_ms = update_ts_ms;
         Settlement {
             balances: [

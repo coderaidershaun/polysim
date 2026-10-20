@@ -27,7 +27,7 @@ pub enum CollapseSignal {
 const MIN_BURST_REMOVALS: u32 = 2;
 
 /// One detector per token book; OR the two books' collapsed state before signalling slot FSM.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CollapseDetector {
     book: ShadowBook,
     burst_ts: Option<TsUs>,
@@ -37,16 +37,6 @@ pub struct CollapseDetector {
 }
 
 impl CollapseDetector {
-    pub fn new() -> Self {
-        Self {
-            book: ShadowBook::new(),
-            burst_ts: None,
-            burst_removals: 0,
-            two_sided_at_burst_start: false,
-            collapsed: false,
-        }
-    }
-
     pub fn observe(&mut self, update: LevelUpdate) -> CollapseSignal {
         let is_removal = update.qty == Qty(0);
         if is_removal {
@@ -81,16 +71,6 @@ impl CollapseDetector {
     }
 
     pub fn reset(&mut self) {
-        self.book.clear();
-        self.burst_ts = None;
-        self.burst_removals = 0;
-        self.two_sided_at_burst_start = false;
-        self.collapsed = false;
-    }
-}
-
-impl Default for CollapseDetector {
-    fn default() -> Self {
-        Self::new()
+        *self = Self::default();
     }
 }

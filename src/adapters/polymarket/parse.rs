@@ -5,7 +5,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::adapters::decode::{DecimalFault, JsonFrame, price_field, qty_field};
+use crate::adapters::decode::{DecimalFault, JsonFrame, levels, price_field, qty_field};
 use crate::adapters::venue_clock::clamp_exchange_ts;
 use crate::ids::{Price, Qty, Side};
 use crate::msg::inbound::Level;
@@ -30,18 +30,6 @@ pub struct PolyBook {
     pub asks: Vec<Level>,
     pub exchange_ts_us: TsUs,
     pub received_ts_us: TsUs,
-}
-
-impl PolyBook {
-    #[inline]
-    pub fn best_bid(&self) -> Option<Level> {
-        self.bids.first().copied()
-    }
-
-    #[inline]
-    pub fn best_ask(&self) -> Option<Level> {
-        self.asks.first().copied()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,8 +110,14 @@ fn frame_from(raw: RawFrame, received_ts_us: TsUs) -> Result<PolyFrame, ParseErr
 }
 
 fn parse_book(raw: &RawBook, received_ts_us: TsUs) -> Result<PolyBook, ParseError> {
-    let mut bids = parse_levels(&raw.bids)?;
-    let mut asks = parse_levels(&raw.asks)?;
+    let side = |entries: &[RawLevel]| {
+        let texts = entries
+            .iter()
+            .map(|entry| (entry.price.as_str(), entry.size.as_str()));
+        levels("book price", "book size", texts)
+    };
+    let mut bids = side(&raw.bids)?;
+    let mut asks = side(&raw.asks)?;
     // Venue delivers best=last (inverse of Binance); sort to engine best-first.
     bids.sort_unstable_by(|a, b| b.price.cmp(&a.price));
     asks.sort_unstable_by(|a, b| a.price.cmp(&b.price));
@@ -195,17 +189,6 @@ fn parse_stamp(s: &str, now: TsUs) -> Result<TsUs, DecimalFault> {
         reason: "non-integer millisecond timestamp",
     })?;
     Ok(clamp_exchange_ts(venue_ms, now))
-}
-
-fn parse_levels(raw: &[RawLevel]) -> Result<Vec<Level>, DecimalFault> {
-    let mut levels = Vec::with_capacity(raw.len());
-    for entry in raw {
-        levels.push(Level {
-            price: price_field("book price", &entry.price)?,
-            qty: qty_field("book size", &entry.size)?,
-        });
-    }
-    Ok(levels)
 }
 
 fn parse_side(s: &str) -> Result<Side, ParseError> {

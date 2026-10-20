@@ -22,8 +22,8 @@ impl Leg {
         Self {
             instrument,
             token: None,
-            shadow: ShadowValidator::new(),
-            collapse: CollapseDetector::new(),
+            shadow: ShadowValidator::default(),
+            collapse: CollapseDetector::default(),
             normaliser: BookNormaliser::new(instrument),
         }
     }
