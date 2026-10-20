@@ -15,7 +15,7 @@ use crate::time::TsUs;
 use crate::{error, warn};
 
 /// Keeps market taps open until the simulator finishes its final sweep.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SimTapGate {
     phase: AtomicU8,
 }
@@ -24,20 +24,17 @@ const TAP_ENABLED: u8 = 0;
 const TAP_SWEEPING: u8 = 1;
 const TAP_DISABLED: u8 = 2;
 
+// The derived default starts the phase at zero, so zero must be the enabled phase.
+const _: () = assert!(TAP_ENABLED == 0);
+
 impl SimTapGate {
     pub fn new() -> Self {
-        Self {
-            phase: AtomicU8::new(TAP_ENABLED),
-        }
+        Self::default()
     }
 
     #[inline]
     pub fn is_enabled(&self) -> bool {
         self.phase.load(Ordering::Acquire) != TAP_DISABLED
-    }
-
-    pub fn is_sweeping(&self) -> bool {
-        self.phase.load(Ordering::Acquire) == TAP_SWEEPING
     }
 
     pub fn begin_sweep(&self) {
@@ -53,12 +50,6 @@ impl SimTapGate {
             "the simulator market tap was closed before its forced sweep was declared — the \
              shutdown sequence is sweep, then disable, then drop the consumers"
         );
-    }
-}
-
-impl Default for SimTapGate {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -109,7 +100,7 @@ impl QueueProducer {
     /// Full queue = engine stalled: trips fatal signal (never silent, never backpressure).
     pub fn push(&mut self, message: InboundMessage) {
         if self.producer.push(message).is_err() {
-            self.signal_queue_full();
+            self.signal_full(FullRing::Input);
         }
     }
 
@@ -122,10 +113,10 @@ impl QueueProducer {
             return self.push(message);
         }
         if self.producer.is_full() {
-            return self.signal_queue_full();
+            return self.signal_full(FullRing::Input);
         }
         if tap.producer.is_full() {
-            return self.signal_tap_full();
+            return self.signal_full(FullRing::MarketTap);
         }
         tap.high_water_ts_us = tap.high_water_ts_us.max(message.received_ts_us());
         let tapped = MarketTapItem::Event(TappedMessage {
@@ -153,39 +144,39 @@ impl QueueProducer {
             received_ts_us: tap.high_water_ts_us,
         };
         if tap.producer.push(watermark).is_err() {
-            self.signal_tap_full();
+            self.signal_full(FullRing::MarketTap);
         }
     }
 
-    /// Cold path: full queue is fatal, never steady-state.
+    /// A full ring means its consumer has stalled, so it is fatal rather than waited out.
     #[cold]
-    fn signal_queue_full(&self) {
-        let capacity = self.producer.buffer().capacity();
+    fn signal_full(&self, ring: FullRing) {
+        let (ring_name, capacity, stalled) = match ring {
+            FullRing::Input => ("input queue", self.producer.buffer().capacity(), "engine"),
+            FullRing::MarketTap => {
+                let capacity = self
+                    .tap
+                    .as_ref()
+                    .map_or(0, |tap| tap.producer.buffer().capacity());
+                ("market tap ring for input queue", capacity, "simulator")
+            }
+        };
+        let queue = self.queue_id.0;
         error!(
-            "input queue {} (source {}) full at capacity {} — engine cannot keep up",
-            self.queue_id.0, self.source_id.0, capacity
+            "{ring_name} {queue} (source {}) full at capacity {capacity} — {stalled} cannot keep up",
+            self.source_id.0
         );
         self.fatal.trip(format!(
-            "input queue {} full at capacity {} — engine cannot keep up",
-            self.queue_id.0, capacity
+            "{ring_name} {queue} full at capacity {capacity} — {stalled} cannot keep up"
         ));
     }
+}
 
-    #[cold]
-    fn signal_tap_full(&self) {
-        let capacity = self
-            .tap
-            .as_ref()
-            .map_or(0, |tap| tap.producer.buffer().capacity());
-        error!(
-            "market tap ring for input queue {} (source {}) full at capacity {} — simulator cannot keep up",
-            self.queue_id.0, self.source_id.0, capacity
-        );
-        self.fatal.trip(format!(
-            "market tap ring for input queue {} full at capacity {} — simulator cannot keep up",
-            self.queue_id.0, capacity
-        ));
-    }
+/// The two rings an input producer writes; the fatal message names the one that filled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FullRing {
+    Input,
+    MarketTap,
 }
 
 /// Link input: drop+count (untrusted remote producer). Fatal-on-full would expose remote-kill.

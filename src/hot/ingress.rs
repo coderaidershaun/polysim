@@ -55,12 +55,4 @@ impl IngressQueues {
     pub fn backlog(&self) -> usize {
         self.consumers.iter().map(Consumer::slots).sum()
     }
-
-    pub fn len(&self) -> usize {
-        self.consumers.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.consumers.is_empty()
-    }
 }

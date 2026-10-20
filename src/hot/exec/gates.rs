@@ -1,4 +1,5 @@
-//! Safety gates: readiness, reject counters, loss thresholds, halt latch. Halt stops quoting only, permanent (restart recovers). Verdicts = pure functions (testable without engine).
+//! Safety gates and what they report: readiness, the loss and exposure limits, the one-way halt
+//! latch, and why a side is not quoting. Each verdict is a pure function, testable without an engine.
 
 use crate::hot::ledger::{PositionLedger, narrow};
 use crate::ids::{InstrumentId, Price, Qty, Side};
@@ -7,6 +8,10 @@ use crate::time::TsUs;
 use crate::warn;
 
 use super::engine::ExecEngine;
+use super::order::MAX_ORDER_INSTRUMENTS;
+use super::reconcile::RejectReason;
+use super::spin::SpinInput;
+use super::view::{OrderReject, RejectOrigin};
 
 labelled_enum! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -56,12 +61,6 @@ impl QuotePermission {
             QuotePermission::Neither => false,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RejectSeverity {
-    Routine,
-    Hard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -210,45 +209,78 @@ labelled_enum! {
     pub fn label;
 }
 
-/// Reject counters: streak, routine total, hard total (message-driven, replay-exact).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct RejectCounters {
-    consecutive_hard: u32,
-    routine_total: u64,
-    hard_total: u64,
+const SIDES: usize = 2;
+const MAX_REFUSALS: usize = MAX_ORDER_INSTRUMENTS * SIDES;
+
+/// Why a side is not quoting, reported when the answer CHANGES rather than every spin. A refusal
+/// usually persists, so reporting each one-second spin would bury the transitions that matter, and
+/// reporting once forever would leave the panel showing a reason that has since changed. The latch
+/// reports the first spin of a reason and of its replacement, and clears when the side quotes.
+/// Nothing here reads a clock, so a replay reports the same reasons in the same order.
+#[derive(Default)]
+pub struct RefusalLatch {
+    current: [[Option<RejectReason>; SIDES]; MAX_ORDER_INSTRUMENTS],
+    pending: [Option<OrderReject>; MAX_REFUSALS],
+    len: usize,
 }
 
-impl RejectCounters {
-    #[inline]
-    pub fn record(&mut self, severity: RejectSeverity) {
-        match severity {
-            RejectSeverity::Routine => self.routine_total += 1,
-            RejectSeverity::Hard => {
-                self.hard_total += 1;
-                self.consecutive_hard += 1;
+impl RefusalLatch {
+    fn observe(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        reason: Option<RejectReason>,
+        at: TsUs,
+    ) {
+        let Some(cell) = self.slot_mut(instrument, side) else {
+            return;
+        };
+        if *cell == reason {
+            return;
+        }
+        *cell = reason;
+        let Some(reason) = reason else {
+            return;
+        };
+        self.push(OrderReject {
+            instrument,
+            client_id: None,
+            side,
+            level: None,
+            origin: RejectOrigin::Local(reason),
+            event_ts_us: at,
+        });
+        refusal_warning(instrument, side, reason);
+    }
+
+    pub fn drain_into(&mut self, sink: &mut impl FnMut(&OrderReject)) {
+        for slot in self.pending.iter_mut().take(self.len) {
+            if let Some(reject) = slot.take() {
+                sink(&reject);
             }
         }
+        self.len = 0;
     }
 
-    /// Acceptance ends streak (one success = not categorically wrong).
-    #[inline]
-    pub fn record_accepted(&mut self) {
-        self.consecutive_hard = 0;
+    pub fn forget(&mut self) {
+        self.current = [[None; SIDES]; MAX_ORDER_INSTRUMENTS];
     }
 
-    #[inline]
-    pub fn consecutive_hard(self) -> u32 {
-        self.consecutive_hard
+    fn slot_mut(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+    ) -> Option<&mut Option<RejectReason>> {
+        let row = self.current.get_mut(usize::from(instrument.0))?;
+        Some(&mut row[side.index()])
     }
 
-    #[inline]
-    pub fn routine_total(self) -> u64 {
-        self.routine_total
-    }
-
-    #[inline]
-    pub fn hard_total(self) -> u64 {
-        self.hard_total
+    fn push(&mut self, reject: OrderReject) {
+        if self.len >= MAX_REFUSALS {
+            return;
+        }
+        self.pending[self.len] = Some(reject);
+        self.len += 1;
     }
 }
 
@@ -356,4 +388,28 @@ impl ExecEngine {
         }
         permission
     }
+
+    pub(super) fn record_refusal(
+        &mut self,
+        instrument: InstrumentId,
+        side: Side,
+        reason: Option<RejectReason>,
+        input: &SpinInput<'_>,
+    ) {
+        let reason = reason.or_else(|| {
+            let top = self.book_top(instrument, input);
+            (!top.is_quotable(self.settings.limits.max_book_age))
+                .then_some(RejectReason::BookNotQuotable)
+        });
+        self.refusals
+            .observe(instrument, side, reason, input.tick.received_ts_us);
+    }
+}
+
+#[cold]
+fn refusal_warning(instrument: InstrumentId, side: Side, reason: RejectReason) {
+    warn!(
+        "quote refused locally on instrument {} {side:?}: {reason:?}",
+        instrument.0
+    );
 }

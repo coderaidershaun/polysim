@@ -1,5 +1,4 @@
-//! EWMA (RiskMetrics): streaming [`EwmaVol`] + stateless window fold via [`VolSeries`].
-//! [`VolSeries`]: super::VolSeries
+//! EWMA (RiskMetrics): streaming [`EwmaVol`], one log return folded in per microprice.
 
 /// RiskMetrics: λ weights prior var, (1−λ) weights fresh squared return. λ = 2^(−1/H) for half-life H.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,16 +48,6 @@ impl EwmaVol {
         self.prev_price = None;
         self.variance = None;
     }
-}
-
-/// Stateless RiskMetrics window fold, fresh seed per call. Non-finite prices skipped. `None` until first return.
-pub(super) fn ewma_vol_over(
-    prices: impl Iterator<Item = f64>,
-    halflife_events: u32,
-) -> Option<f64> {
-    let mut folded = EwmaVol::new(halflife_events);
-    prices.for_each(|price| folded.on_microprice(price));
-    folded.volatility()
 }
 
 #[inline]

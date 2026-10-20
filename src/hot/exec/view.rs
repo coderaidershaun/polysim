@@ -10,7 +10,7 @@ use crate::ids::{AssetId, ClientOrderId, InstrumentId, Price, Qty, Side, TradeId
 use crate::msg::exec::{Liquidity, RejectClass};
 use crate::time::TsUs;
 
-use super::level::QuoteLevel;
+use super::desired::QuoteLevel;
 use super::order::OrderState;
 use super::reconcile::RejectReason;
 
@@ -41,18 +41,23 @@ pub struct WorkingOrderView {
 
 impl OrderView {
     #[inline]
-    pub fn is_in_flight(self) -> bool {
-        self.state.is_in_flight()
-    }
-
-    #[inline]
-    pub fn is_working(self) -> bool {
-        self.state.is_working()
-    }
-
-    #[inline]
     pub fn remaining(self) -> Qty {
         Qty((self.qty.0 - self.filled.0).max(0))
+    }
+
+    #[inline]
+    pub(crate) fn updated_at(self, event_ts_us: TsUs) -> OrderUpdate {
+        OrderUpdate {
+            instrument: self.instrument,
+            client_id: self.client_id,
+            side: self.side,
+            level: self.level,
+            state: self.state,
+            price: self.price,
+            qty: self.qty,
+            filled: self.filled,
+            event_ts_us,
+        }
     }
 }
 

@@ -21,21 +21,13 @@ pub fn realised_vol_per_sec(
     if interval_secs <= 0.0 {
         return None;
     }
-    let mut previous: Option<f64> = None;
     let mut count = 0usize;
     let mut sum = 0.0;
     let mut sum_squares = 0.0;
-    for close in closes.filter(|close| close.is_finite() && *close > 0.0) {
-        if let Some(previous) = previous {
-            let value = match returns {
-                Returns::Log => (close / previous).ln(),
-                Returns::Absolute => close - previous,
-            };
-            count += 1;
-            sum += value;
-            sum_squares += value * value;
-        }
-        previous = Some(close);
+    for value in consecutive_returns(closes, returns) {
+        count += 1;
+        sum += value;
+        sum_squares += value * value;
     }
     if count == 0 {
         return None;
@@ -44,4 +36,23 @@ pub fn realised_vol_per_sec(
     let mean = sum / count;
     let variance = (sum_squares / count - mean * mean).max(0.0);
     Some(variance.sqrt() / interval_secs.sqrt())
+}
+
+/// Returns between consecutive usable closes. A non-finite or non-positive close is skipped, so the
+/// closes either side of it pair into one return.
+pub(super) fn consecutive_returns(
+    closes: impl Iterator<Item = f64>,
+    returns: Returns,
+) -> impl Iterator<Item = f64> {
+    let mut previous: Option<f64> = None;
+    closes
+        .filter(|close| close.is_finite() && *close > 0.0)
+        .filter_map(move |close| {
+            let value = previous.map(|previous| match returns {
+                Returns::Log => (close / previous).ln(),
+                Returns::Absolute => close - previous,
+            });
+            previous = Some(close);
+            value
+        })
 }

@@ -51,15 +51,14 @@ impl ExecSink {
 
 pub(crate) struct PendingCommands {
     banked: Vec<ExecCommand>,
-    /// Overflow = leak (transition already applied). Loud alert.
-    overflowed: u64,
+    banked_total: u64,
 }
 
 impl PendingCommands {
     pub(crate) fn new() -> Self {
         Self {
             banked: Vec::with_capacity(COMMAND_BANK_CAPACITY),
-            overflowed: 0,
+            banked_total: 0,
         }
     }
 
@@ -68,10 +67,10 @@ impl PendingCommands {
     #[must_use]
     pub(crate) fn bank(&mut self, command: ExecCommand) -> bool {
         if self.banked.len() == self.banked.capacity() {
-            self.overflowed += 1;
             return false;
         }
         self.banked.push(command);
+        self.banked_total += 1;
         true
     }
 
@@ -95,7 +94,7 @@ impl PendingCommands {
     }
 
     #[inline]
-    pub(crate) fn overflowed(&self) -> u64 {
-        self.overflowed
+    pub(crate) fn banked_total(&self) -> u64 {
+        self.banked_total
     }
 }

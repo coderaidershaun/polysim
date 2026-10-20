@@ -6,7 +6,6 @@ pub struct Optimum<const N: usize> {
     pub x: [f64; N],
     pub value: f64,
     pub iterations: usize,
-    pub evaluations: usize,
     pub converged: bool,
 }
 
@@ -87,7 +86,6 @@ impl<const N: usize> NelderMead<N> {
         for vertex in 0..SIMPLEX {
             values[vertex] = objective(&simplex[vertex]);
         }
-        let mut evaluations = SIMPLEX;
         let mut iterations = 0;
         let mut converged = false;
 
@@ -116,7 +114,6 @@ impl<const N: usize> NelderMead<N> {
             }
             clamp(&mut reflected);
             let reflected_value = objective(&reflected);
-            evaluations += 1;
 
             if values[0] <= reflected_value && reflected_value < values[worst - 1] {
                 simplex[worst] = reflected;
@@ -128,7 +125,6 @@ impl<const N: usize> NelderMead<N> {
                 }
                 clamp(&mut expanded);
                 let expanded_value = objective(&expanded);
-                evaluations += 1;
                 if expanded_value < reflected_value {
                     simplex[worst] = expanded;
                     values[worst] = expanded_value;
@@ -144,7 +140,6 @@ impl<const N: usize> NelderMead<N> {
                 }
                 clamp(&mut contracted);
                 let contracted_value = objective(&contracted);
-                evaluations += 1;
                 if contracted_value < values[worst] {
                     simplex[worst] = contracted;
                     values[worst] = contracted_value;
@@ -157,7 +152,6 @@ impl<const N: usize> NelderMead<N> {
                         clamp(&mut simplex[vertex]);
                         values[vertex] = objective(&simplex[vertex]);
                     }
-                    evaluations += worst;
                 }
             }
         }
@@ -172,7 +166,6 @@ impl<const N: usize> NelderMead<N> {
             x: simplex[best],
             value: values[best],
             iterations,
-            evaluations,
             converged,
         }
     }

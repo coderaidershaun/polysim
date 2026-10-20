@@ -3,6 +3,8 @@
 use crate::hot::quant::optimise::NelderMead;
 use crate::time::DurationUs;
 
+use super::realised::{Returns, consecutive_returns};
+
 /// `[omega, gamma, theta, beta]`: baseline log-variance, news-impact magnitude/asymmetry, persistence.
 /// `ω/(1−β) = −14` seeds σ ≈ 1e-3 per 1m close.
 const COLD_START: [f64; 4] = [-1.4, 0.1, -0.05, 0.9];
@@ -113,19 +115,10 @@ impl Egarch {
     /// Mean-centre log returns of usable closes. Returns seed log-variance (floored) or `None` if <2.
     fn fill_centred_returns(&mut self, closes: &[f64]) -> Option<f64> {
         self.returns.clear();
-        let mut previous: Option<f64> = None;
         let mut sum = 0.0;
-        for close in closes
-            .iter()
-            .copied()
-            .filter(|close| close.is_finite() && *close > 0.0)
-        {
-            if let Some(previous) = previous {
-                let log_return = (close / previous).ln();
-                sum += log_return;
-                self.returns.push(log_return);
-            }
-            previous = Some(close);
+        for log_return in consecutive_returns(closes.iter().copied(), Returns::Log) {
+            sum += log_return;
+            self.returns.push(log_return);
         }
         if self.returns.len() < 2 {
             return None;

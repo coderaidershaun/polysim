@@ -62,8 +62,6 @@ impl GueantParams {
             return None;
         }
         Some(QuoteCoefficients {
-            c1,
-            c2,
             half_spread,
             skew_per_inventory,
         })
@@ -91,26 +89,15 @@ impl GueantParams {
     }
 }
 
-/// Solved depth coefficients (caller's depth unit): h (half-spread), j (per-inventory skew), c1, c2 (intermediate).
+/// Solved depth coefficients in the caller's depth unit: the half-spread h and the skew per unit of
+/// inventory j.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QuoteCoefficients {
-    c1: f64,
-    c2: f64,
     half_spread: f64,
     skew_per_inventory: f64,
 }
 
 impl QuoteCoefficients {
-    #[inline]
-    pub fn c1(&self) -> f64 {
-        self.c1
-    }
-
-    #[inline]
-    pub fn c2(&self) -> f64 {
-        self.c2
-    }
-
     /// h = c1 + (Δ/2)·σ·c2 (zero-inventory continuous half-spread).
     #[inline]
     pub fn half_spread(&self) -> f64 {

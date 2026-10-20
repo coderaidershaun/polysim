@@ -1,7 +1,9 @@
-//! Callback gate: warmup + run state from message sequence (not clock); replay determinism requires it.
+//! When the strategy may be called back: warmup and run state follow the message sequence, never
+//! the clock, so a replay calls back at the same points. Peer link frames are recorded here rather
+//! than at the link actor, so a frame dropped on a full ring never reaches the tape.
 
 use crate::info;
-use crate::link::{RunState, TopicId};
+use crate::link::{InboundLink, RunState, TopicId};
 use crate::msg::inbound::RunControl;
 use crate::msg::persist::{LinkFrameRow, LinkRowKind, PersistRecord};
 use crate::shutdown::{RunAssertion, RunStateCell};
@@ -66,6 +68,39 @@ impl HotEngine {
     #[inline]
     pub(super) fn is_strategy_live(&self) -> bool {
         self.warmup.is_complete && self.run.state == RunState::Running
+    }
+
+    /// The frame is recorded before the strategy sees it, so on the tape it comes ahead of anything
+    /// the strategy writes in reply.
+    pub(super) fn on_link(&mut self, link: &InboundLink) {
+        self.record_link_payload(link);
+        if !self.is_strategy_live() {
+            return;
+        }
+        let mut ctx = self.state.ctx(link.received_ts_us);
+        self.strategy.on_link(&mut ctx, &link.frame);
+    }
+
+    fn record_link_payload(&mut self, link: &InboundLink) {
+        let origin = link.frame.origin;
+        let payload = &link.frame.payload;
+        let values = payload.values();
+        let count = values.len() as u16;
+        for (slot, value) in values.iter().enumerate() {
+            self.state
+                .actions
+                .push_persist(PersistRecord::LinkFrame(LinkFrameRow {
+                    kind: LinkRowKind::Payload,
+                    sender_te_hash: origin.sender_te_hash.0,
+                    topic: origin.topic.0,
+                    seq: origin.seq,
+                    slot: slot as u16,
+                    count,
+                    value: *value,
+                    event_ts_us: payload.event_ts_us,
+                    received_ts_us: link.received_ts_us,
+                }));
+        }
     }
 
     /// Only run-state input to dispatch (level-triggered markers; epoch dedups; republish ack cell).

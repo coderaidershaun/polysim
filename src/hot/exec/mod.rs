@@ -15,12 +15,9 @@ mod engine;
 mod event;
 mod flatten;
 mod gates;
-mod level;
 mod mint;
 mod order;
-mod prior_run;
 mod reconcile;
-mod refusal;
 mod spin;
 mod transition;
 mod view;
@@ -29,14 +26,13 @@ mod window;
 pub use account::{AccountTable, AccountWatermark, Balance, ReleaseOutcome};
 pub use budget::{MAX_ORDER_BUDGET_WINDOWS, OrderBudget, OrderBudgetWindow};
 pub use command::{ExecLaneBudget, exec_lane_capacity};
-pub use desired::{DesiredBook, DesiredQuote};
-pub use engine::{ExecCounters, ExecEngine, ExecEngineSetup, ExecSettings};
+pub use desired::{DesiredBook, DesiredQuote, MAX_QUOTE_LEVELS, QuoteLevel};
+pub use engine::{ExecEngine, ExecEngineSetup, ExecSettings};
 pub use flatten::{FeeModel, FlattenInput, FlattenOutcome, plan_flatten};
 pub use gates::{
-    ExecHalt, ExposureCheck, HaltReason, LossVerdict, QuotePermission, ReadinessGap,
-    RejectCounters, RejectSeverity, SessionPnl, assess_exposure, assess_loss,
+    ExecHalt, ExposureCheck, HaltReason, LossVerdict, QuotePermission, ReadinessGap, SessionPnl,
+    assess_exposure, assess_loss,
 };
-pub use level::{InvalidQuoteLevel, MAX_QUOTE_LEVELS, QuoteLevel};
 pub use order::{
     ClientIdLayout, CloseReason, FillDelta, MAX_ORDER_INSTRUMENTS, MAX_ORDER_SLOTS, OrderClaim,
     OrderSlot, OrderState, OrderTable, ReconcilePass, level_of_slot, side_base,

@@ -1,9 +1,10 @@
-//! Linear exponential-kernel Hawkes. Scalar excitation -> O(1) per event/query (no history scan).
+//! The exponential kernel and its live evaluator. An exponential kernel lets one decaying sum stand
+//! in for the whole event history, so each event and each intensity query costs constant time.
 
 use super::HawkesEvents;
-use crate::time::{DurationUs, TsUs};
+use crate::time::TsUs;
 
-/// Exponential kernel, rates per second. Branching ratio = alpha/beta.
+/// Exponential kernel parameters, every rate per second.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HawkesParams {
     pub mu: f64,
@@ -34,22 +35,12 @@ impl HawkesParams {
     }
 
     #[inline]
-    pub fn is_stationary(&self) -> bool {
-        self.branching_ratio() < 1.0
-    }
-
-    #[inline]
     pub fn half_life_secs(&self) -> f64 {
         core::f64::consts::LN_2 / self.beta
     }
-
-    pub fn long_run_rate(&self) -> Option<f64> {
-        self.is_stationary()
-            .then(|| self.mu / (1.0 - self.branching_ratio()))
-    }
 }
 
-/// Live evaluator: (last stamp, excitation), no history scan.
+/// Live intensity that keeps only the last stamp and one decayed excitation sum.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UnivariateHawkes {
     params: HawkesParams,
@@ -66,16 +57,11 @@ impl UnivariateHawkes {
         }
     }
 
-    #[inline]
-    pub fn params(&self) -> HawkesParams {
-        self.params
-    }
-
     pub fn set_params(&mut self, params: HawkesParams) {
         self.params = params;
     }
 
-    /// O(n), once per refit, off the per-event path.
+    /// Walks the whole window, so it runs once per refit and never once per event.
     pub fn reseed_from(&mut self, events: &HawkesEvents) {
         let Some(last_ts) = events.last_ts() else {
             self.clear();
@@ -110,22 +96,6 @@ impl UnivariateHawkes {
         };
         let elapsed = now.diff(last).to_secs().max(0.0);
         self.params.mu + self.params.alpha * (-self.params.beta * elapsed).exp() * self.excitation
-    }
-
-    /// Forward count per-quote (offspring excluded). Closed form, O(1).
-    pub fn expected_events(&self, now: TsUs, horizon: DurationUs) -> f64 {
-        let HawkesParams { mu, alpha, beta } = self.params;
-        let span = horizon.to_secs().max(0.0);
-        let decayed = match self.last_ts {
-            Some(last) => (-beta * now.diff(last).to_secs().max(0.0)).exp() * self.excitation,
-            None => 0.0,
-        };
-        mu * span + (alpha / beta) * decayed * (1.0 - (-beta * span).exp())
-    }
-
-    /// P(≥1 event). Exact: intensity monotone decays on no-event path.
-    pub fn event_probability(&self, now: TsUs, horizon: DurationUs) -> f64 {
-        1.0 - (-self.expected_events(now, horizon)).exp()
     }
 
     pub fn clear(&mut self) {

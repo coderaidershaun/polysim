@@ -86,7 +86,7 @@ impl FundsView {
 }
 
 #[inline]
-fn spend_of(side: Side, price: Price, qty: Qty) -> i64 {
+pub(super) fn spend_of(side: Side, price: Price, qty: Qty) -> i64 {
     match side {
         Side::Buy => price.notional(qty),
         Side::Sell => qty.0,

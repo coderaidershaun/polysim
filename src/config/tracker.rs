@@ -14,8 +14,6 @@ pub struct TrackerSpec {
     #[serde(default)]
     pub microprice: Option<WindowsSpec>,
     #[serde(default)]
-    pub spread: Option<WindowsSpec>,
-    #[serde(default)]
     pub imbalance: Option<ImbalanceSpec>,
     #[serde(default)]
     pub candles: Option<CandlesSpec>,

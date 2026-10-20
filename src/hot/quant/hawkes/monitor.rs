@@ -1,8 +1,7 @@
 //! Per-aggressor-side arrival monitor: the rolling window the fitter reads, the paced re-solve that
 //! keeps it current, and the resident evaluator answering λ between fits.
 
-use crate::hot::quant::hawkes::estimation::{HawkesEstimate, HawkesMle};
-use crate::hot::quant::hawkes::univariate::{HawkesEvents, UnivariateHawkes};
+use super::{HawkesEstimate, HawkesEvents, HawkesMle, UnivariateHawkes};
 use crate::time::TsUs;
 
 /// Hawkes monitor rolling window, fit floor, refit cadence. Strategy constants, not config.
@@ -101,6 +100,12 @@ impl HawkesSide {
     #[inline]
     pub fn live(&self) -> Option<&UnivariateHawkes> {
         self.live.as_ref()
+    }
+
+    /// A lifetime count, so [`HawkesSide::reset`] does not zero it.
+    #[inline]
+    pub fn out_of_order_count(&self) -> u64 {
+        self.events.out_of_order_count()
     }
 
     /// Reset to post-new state keeping allocator. Window + fitter (warm-start inline) rebuilt from floor.

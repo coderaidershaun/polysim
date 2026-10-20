@@ -344,36 +344,30 @@ impl MarkoutTracker {
         }
     }
 
-    /// Arm bid (9/10 threshold fills); re-arm same keeps position.
+    /// Arms one side's quote, which fills once nine tenths of the queue shown at its level has
+    /// traded. Re-arming at the same price keeps the place in the queue already earned.
     #[inline]
-    pub fn arm_bid(&mut self, price: Price, level_qty: Qty) {
+    pub fn arm(&mut self, side: MarkoutSide, price: Price, level_qty: Qty) {
         debug_assert!(
             price.0 > 0,
-            "armed bid is the forward-markout denominator, got {}",
+            "armed {side:?} quote is the forward-markout denominator, got {}",
             price.0
         );
-        self.bid.arm(price, level_qty);
+        self.side_mut(side).arm(price, level_qty);
+    }
+
+    /// Withdraws one side's quote without a fill, because a level we are not quoting must not fill.
+    #[inline]
+    pub fn disarm(&mut self, side: MarkoutSide) {
+        self.side_mut(side).armed = None;
     }
 
     #[inline]
-    pub fn arm_ask(&mut self, price: Price, level_qty: Qty) {
-        debug_assert!(
-            price.0 > 0,
-            "armed ask is the forward-markout denominator, got {}",
-            price.0
-        );
-        self.ask.arm(price, level_qty);
-    }
-
-    /// Drop bid without filling (level not currently quoted must not fill).
-    #[inline]
-    pub fn disarm_bid(&mut self) {
-        self.bid.armed = None;
-    }
-
-    #[inline]
-    pub fn disarm_ask(&mut self) {
-        self.ask.armed = None;
+    fn side_mut(&mut self, side: MarkoutSide) -> &mut SideMarkouts {
+        match side {
+            MarkoutSide::Bid => &mut self.bid,
+            MarkoutSide::Ask => &mut self.ask,
+        }
     }
 
     /// Route print by aggressor (seller->bid, buyer->ask). Fill at OUR armed level (not print), stamped at receipt.

@@ -11,8 +11,8 @@ use polysim::config::{RecordedTables, TrackerSpec};
 use polysim::exposure::InstrumentExposure;
 use polysim::hot::dispatch::{ExecWiring, ExposureWiring, HotEngine, HotEngineSetup};
 use polysim::hot::exec::{
-    ClientIdLayout, DesiredQuote, ExecLimits, ExecSettings, ExposureCheck, FeeModel, OrderBudget,
-    QuoteLevel, QuotePermission, assess_exposure, side_base,
+    ClientIdLayout, DesiredQuote, ExecHalt, ExecLimits, ExecSettings, ExposureCheck, FeeModel,
+    HaltReason, OrderBudget, QuoteLevel, QuotePermission, assess_exposure, side_base,
 };
 use polysim::hot::strategy::{Strategy, StrategyCtx};
 use polysim::ids::{AssetId, ClientOrderId, InstrumentId, Price, Qty, Side};
@@ -725,6 +725,59 @@ fn an_edge_refusal_never_ends_a_venue_reject_streak() {
     );
 }
 
+/// FITNESS: a post-only refusal neither extends nor ends a hard-reject streak.
+///
+/// A maker earns these all day. Counting one toward the kill switch parks the engine exactly when
+/// the market is moving; letting one reset the count lets a venue that refuses everything else keep
+/// the engine quoting for as long as a single quote crosses now and then. The halt is read off the
+/// workstation feed, so the reason asserted is the one an operator is shown.
+#[test]
+fn a_post_only_refusal_neither_extends_nor_ends_a_hard_reject_streak() {
+    let mut extended = engine_holding_one_live_order();
+    for reject in 0..REJECT_STREAK - 1 {
+        dispatch_exec(&mut extended.engine, hard_reject(100 + i64::from(reject)));
+    }
+    for refusal in 0..REJECT_STREAK {
+        dispatch_exec(
+            &mut extended.engine,
+            refused_reject(150 + i64::from(refusal)),
+        );
+    }
+    spin_at(&mut extended.engine, 1, 200);
+    assert!(
+        !has_halted(&mut extended.commands),
+        "post-only refusals were counted toward the hard-reject streak and halted the engine"
+    );
+    assert_eq!(
+        latest_halt(&mut extended.ui_events),
+        Some(ExecHalt::Armed),
+        "one hard reject short of the limit, the kill switch must still read armed"
+    );
+
+    let mut ended = engine_holding_one_live_order();
+    for reject in 0..REJECT_STREAK - 1 {
+        dispatch_exec(&mut ended.engine, hard_reject(100 + i64::from(reject)));
+    }
+    dispatch_exec(&mut ended.engine, refused_reject(150));
+    dispatch_exec(&mut ended.engine, hard_reject(160));
+    spin_at(&mut ended.engine, 1, 200);
+    assert!(
+        has_halted(&mut ended.commands),
+        "a post-only refusal reset the hard-reject streak, and the kill switch never fired"
+    );
+    let halt = latest_halt(&mut ended.ui_events);
+    assert!(
+        matches!(
+            halt,
+            Some(ExecHalt::Halted {
+                reason: HaltReason::RejectStreak,
+                ..
+            })
+        ),
+        "the halt must be reported as the reject streak: {halt:?}"
+    );
+}
+
 /// The configured streak in [`exec_settings`], named so the case above cannot drift from it.
 const REJECT_STREAK: u32 = 5;
 
@@ -775,6 +828,16 @@ fn hard_reject(when: i64) -> ExecEvent {
     }
 }
 
+/// The venue refusing a post-only order the book has moved through: exactly what post-only asks for,
+/// and the routine cost of making markets.
+fn refused_reject(when: i64) -> ExecEvent {
+    ExecEvent {
+        kind: ExecKind::AckFailed,
+        reject: Some(RejectClass::Refused),
+        ..live_order_event(when)
+    }
+}
+
 fn dispatch_exec(engine: &mut HotEngine, event: ExecEvent) {
     engine.dispatch(pop(0, 0), &InboundMessage::Exec(event));
 }
@@ -791,4 +854,15 @@ pub(crate) fn has_halted(commands: &mut Consumer<ExecLaneItem>) -> bool {
             }
         )
     })
+}
+
+/// The kill switch as the workstation was last told it. The engine restates it every spin, so the
+/// newest frame is its current answer.
+fn latest_halt(ui_events: &mut Consumer<UiEvent>) -> Option<ExecHalt> {
+    std::iter::from_fn(|| ui_events.pop().ok())
+        .filter_map(|event| match event {
+            UiEvent::Execution { halt, .. } => Some(halt),
+            _ => None,
+        })
+        .last()
 }

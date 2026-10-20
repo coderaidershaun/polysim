@@ -1,4 +1,5 @@
-//! Volatility: [`VolSeries`] toolkit + [`EwmaVol`] streaming resident. Pure functions of input.
+//! Volatility estimators: EGARCH and realised volatility read over a rolling [`FastQueue<f64>`]
+//! window, and [`EwmaVol`] folds one return at a time. Each is a pure function of its input.
 
 mod egarch;
 mod ewma;
@@ -10,26 +11,15 @@ pub use realised::{Returns, realised_vol_per_sec};
 
 use crate::hot::series::FastQueue;
 use crate::time::DurationUs;
-use ewma::ewma_vol_over;
 
-/// Volatility estimators over [`FastQueue<f64>`] window. Implemented only for f64 (one-way dep).
-pub trait VolSeries {
-    fn egarch(&self, state: &mut Egarch) -> Option<EgarchEstimate>;
-    fn realised_volatility(&self, returns: Returns, interval: DurationUs) -> Option<f64>;
-    /// Stateless RiskMetrics EWMA over window.
-    fn ewma_volatility(&self, halflife_events: u32) -> Option<f64>;
-}
-
-impl VolSeries for FastQueue<f64> {
-    fn egarch(&self, state: &mut Egarch) -> Option<EgarchEstimate> {
+/// Written here rather than beside the series type so the dependency runs one way: the series
+/// module never imports quant.
+impl FastQueue<f64> {
+    pub fn egarch(&self, state: &mut Egarch) -> Option<EgarchEstimate> {
         state.fit(self.as_slice())
     }
 
-    fn realised_volatility(&self, returns: Returns, interval: DurationUs) -> Option<f64> {
+    pub fn realised_volatility(&self, returns: Returns, interval: DurationUs) -> Option<f64> {
         realised_vol_per_sec(self.iter(), returns, interval)
-    }
-
-    fn ewma_volatility(&self, halflife_events: u32) -> Option<f64> {
-        ewma_vol_over(self.iter(), halflife_events)
     }
 }

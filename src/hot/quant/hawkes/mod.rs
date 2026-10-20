@@ -1,23 +1,12 @@
-//! Hawkes processes: self- and cross-exciting point-process calculators — O(1)-per-event intensity
-//! recursions, closed-form-compensator likelihoods, MLE + EM fitters, seeded simulators.
+//! Self-exciting trade-arrival model: one exponential kernel whose intensity updates in constant
+//! time per event, fitted by a warm-started simplex over a rolling window of event times.
 
-mod estimation;
+mod events;
+mod fit;
+mod kernel;
 mod monitor;
-mod multivariate;
-mod simulate;
-mod univariate;
-mod window;
 
-pub use estimation::{
-    DiscreteEstimate, DiscreteMle, HawkesEm, HawkesEstimate, HawkesMle, LogisticEstimate,
-    LogisticMle, MultivariateEm, MultivariateEstimate,
-};
+pub use events::HawkesEvents;
+pub use fit::{HawkesEstimate, HawkesMle};
+pub use kernel::{HawkesParams, UnivariateHawkes};
 pub use monitor::{HawkesChoice, HawkesSide};
-pub use multivariate::{MultivariateEvents, MultivariateHawkes, MultivariateParams};
-pub use simulate::{
-    DiscreteSimulation, ExpSimulation, Lcg, LogisticSimulation, MultivariateSimulation,
-};
-pub use univariate::{
-    DiscreteCounts, DiscreteParams, HawkesEvents, HawkesParams, LogisticParams, LogisticShape,
-    QuadraticParams, UnivariateHawkes,
-};

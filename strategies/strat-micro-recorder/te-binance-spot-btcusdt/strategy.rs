@@ -5,7 +5,7 @@ use polysim::hot::quant::hawkes::HawkesChoice;
 use polysim::hot::quant::liquidity::KylesLambdaSpec;
 use polysim::hot::quant::micro::{PriceBand, ResilienceSample, banded_imbalance};
 use polysim::hot::quant::pricing::{GueantParams, Objective};
-use polysim::hot::quant::toxicity::vpin;
+use polysim::hot::quant::toxicity::{MarkoutSide, vpin};
 use polysim::hot::quant::volatility::Returns;
 use polysim::hot::strategy::{
     BookState, DesiredQuote, EngineView, FeatureId, LinkFrame, OrderStyle, QuoteLevel,
@@ -197,7 +197,7 @@ impl Strategy for MicroRecorder {
             return;
         }
         let model = &mut state.binance;
-        let _candidate = model.markouts.on_trade(event);
+        model.markouts.on_trade(event);
         let hawkes = match event.side {
             Side::Buy => &mut model.hawkes_ask,
             Side::Sell => &mut model.hawkes_bid,
@@ -493,20 +493,38 @@ fn record_spin(
         bid_quote.map(Price::to_f64),
         ask_quote.map(Price::to_f64),
     );
+    let (markouts_bid, markouts_ask) = (model.markouts.bid(), model.markouts.ask());
+    polysim::strategy_info!(
+        ctx,
+        "drops i{} markout gaps={}/{} stale={}/{} overflow={}/{} hawkes_out_of_order={}/{}",
+        instrument.0,
+        markouts_bid.reverse_gap_count(),
+        markouts_ask.reverse_gap_count(),
+        markouts_bid.stale_maturation_count(),
+        markouts_ask.stale_maturation_count(),
+        markouts_bid.pending_overflow_count(),
+        markouts_ask.pending_overflow_count(),
+        model.hawkes_bid.out_of_order_count(),
+        model.hawkes_ask.out_of_order_count(),
+    );
     // A side we would not be quoting this spin must not fill: no quote disarms it until one returns.
     // The level's current qty arms the queue gate — an order joining that level now would rest
     // behind exactly what is showing there.
     match bid_quote {
-        Some(price) => model
-            .markouts
-            .arm_bid(price, level_qty_at(ctx.book(instrument).bids(), price)),
-        None => model.markouts.disarm_bid(),
+        Some(price) => model.markouts.arm(
+            MarkoutSide::Bid,
+            price,
+            level_qty_at(ctx.book(instrument).bids(), price),
+        ),
+        None => model.markouts.disarm(MarkoutSide::Bid),
     }
     match ask_quote {
-        Some(price) => model
-            .markouts
-            .arm_ask(price, level_qty_at(ctx.book(instrument).asks(), price)),
-        None => model.markouts.disarm_ask(),
+        Some(price) => model.markouts.arm(
+            MarkoutSide::Ask,
+            price,
+            level_qty_at(ctx.book(instrument).asks(), price),
+        ),
+        None => model.markouts.disarm(MarkoutSide::Ask),
     }
     declare(ctx, instrument, Side::Buy, bid_quote, cfg.order_notional);
     declare(ctx, instrument, Side::Sell, ask_quote, cfg.order_notional);

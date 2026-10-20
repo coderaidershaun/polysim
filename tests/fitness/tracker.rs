@@ -221,7 +221,6 @@ fn full_spec() -> TrackerSpec {
         trades_buy: Some(WindowsSpec { windows: vec![4] }),
         trades_sell: Some(WindowsSpec { windows: vec![4] }),
         microprice: Some(WindowsSpec { windows: vec![4] }),
-        spread: Some(WindowsSpec { windows: vec![4] }),
         imbalance: Some(ImbalanceSpec {
             top_n: 3,
             windows: vec![4],

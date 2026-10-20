@@ -3,7 +3,44 @@
 use crate::ids::{InstrumentId, Price, Qty, Side};
 use crate::msg::exec::OrderStyle;
 
-use super::level::{MAX_QUOTE_LEVELS, QuoteLevel};
+pub const MAX_QUOTE_LEVELS: usize = 8;
+
+/// A stable ladder identity, not a position in a sorted list: a price change never makes one live
+/// order masquerade as another level, and an absent level has exactly one meaning, which is to
+/// withdraw the order carrying that identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct QuoteLevel(u8);
+
+impl QuoteLevel {
+    pub const ZERO: Self = Self(0);
+
+    /// Every rung, in ladder order. A pass over the ladder walks this rather than round-tripping
+    /// each index through the fallible constructor.
+    pub const ALL: [Self; MAX_QUOTE_LEVELS] = {
+        let mut levels = [Self(0); MAX_QUOTE_LEVELS];
+        let mut index = 0;
+        while index < MAX_QUOTE_LEVELS {
+            levels[index] = Self(index as u8);
+            index += 1;
+        }
+        levels
+    };
+
+    #[inline]
+    pub const fn new(value: u8) -> Option<Self> {
+        if (value as usize) < MAX_QUOTE_LEVELS { Some(Self(value)) } else { None }
+    }
+
+    #[inline]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    #[inline]
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DesiredQuote {

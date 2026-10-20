@@ -13,9 +13,9 @@ use crate::ids::{FIXED_SCALE, InstrumentId, Price, Qty, Side};
 use crate::msg::exec::OrderStyle;
 use crate::warn;
 
+use super::desired::QuoteLevel;
 use super::engine::ExecEngine;
 use super::gates::reducing_side;
-use super::level::QuoteLevel;
 use super::reconcile::{BookTop, ExecLimits, FundsView, PlaceIntent, RejectReason, TickGrid};
 use super::spin::SpinInput;
 
@@ -222,13 +222,12 @@ impl ExecEngine {
             {
                 continue;
             }
-            let assets = &self.instruments[index];
             let outcome = plan_flatten(FlattenInput {
                 position_base: position,
-                grid: assets.grid,
+                grid: self.instruments[index].grid,
                 top: self.book_top(instrument, input),
                 limits: self.settings.limits,
-                funds: self.funds_view(side, assets.base_asset, assets.quote_asset),
+                funds: self.funds_view(instrument, side),
                 slack_ticks: self.settings.flatten_slack_ticks,
                 fee_model: self.settings.fee_model,
                 taker_fee_rate: self.settings.taker_fee_rate,
@@ -262,7 +261,6 @@ impl ExecEngine {
                 );
             }
             FlattenOutcome::Refuse(reason) => {
-                self.counters.local_rejects += 1;
                 if self.instruments[index].flatten_refusal.replace(reason) != Some(reason) {
                     report_unflattened(
                         instrument,

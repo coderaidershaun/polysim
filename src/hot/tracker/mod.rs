@@ -12,7 +12,7 @@ use crate::config::{KlineInterval, SpinField, TrackerSpec};
 use crate::hot::book::Book;
 use crate::hot::quant::intensity::IntensityCounts;
 use crate::hot::quant::micro;
-use crate::hot::series::{Element, FastQueue};
+use crate::hot::series::FastQueue;
 use crate::ids::{Price, Side};
 use crate::msg::inbound::{KlineEvent, TradeEvent};
 use crate::warn;
@@ -32,11 +32,11 @@ pub enum SideFilter {
 
 /// Rolling series per window, matched on FastQueue::window().
 #[derive(Debug, Clone, PartialEq)]
-struct Windows<T: Element> {
-    series: Vec<FastQueue<T>>,
+struct Windows {
+    series: Vec<FastQueue<f64>>,
 }
 
-impl<T: Element> Windows<T> {
+impl Windows {
     fn new(windows: &[usize]) -> Self {
         Self {
             series: windows
@@ -46,13 +46,13 @@ impl<T: Element> Windows<T> {
         }
     }
 
-    fn push(&mut self, value: T) {
+    fn push(&mut self, value: f64) {
         for queue in &mut self.series {
             queue.push(value);
         }
     }
 
-    fn get(&self, window: usize) -> Option<&FastQueue<T>> {
+    fn get(&self, window: usize) -> Option<&FastQueue<f64>> {
         self.series.iter().find(|queue| queue.window() == window)
     }
 
@@ -64,38 +64,9 @@ impl<T: Element> Windows<T> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct TradeStream {
-    price: Windows<f64>,
-    qty: Windows<i64>,
-    notional: Windows<i64>,
-}
-
-impl TradeStream {
-    fn new(windows: &[usize]) -> Self {
-        Self {
-            price: Windows::new(windows),
-            qty: Windows::new(windows),
-            notional: Windows::new(windows),
-        }
-    }
-
-    fn push(&mut self, price: f64, qty: i64, notional: i64) {
-        self.price.push(price);
-        self.qty.push(qty);
-        self.notional.push(notional);
-    }
-
-    fn clear(&mut self) {
-        self.price.clear();
-        self.qty.clear();
-        self.notional.clear();
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
 struct ImbalanceStream {
     top_n: usize,
-    series: Windows<f64>,
+    series: Windows,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -119,11 +90,10 @@ impl Latest {
 /// Per-instrument tracker (series optional when unconfigured).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MicroTracker {
-    trades_all: Option<TradeStream>,
-    trades_buy: Option<TradeStream>,
-    trades_sell: Option<TradeStream>,
-    microprice: Option<Windows<f64>>,
-    spread: Option<Windows<f64>>,
+    trades_all: Option<Windows>,
+    trades_buy: Option<Windows>,
+    trades_sell: Option<Windows>,
+    microprice: Option<Windows>,
     imbalance: Option<ImbalanceStream>,
     candles: Option<CandleBook>,
     spin: Option<SpinSampler>,
@@ -144,20 +114,10 @@ impl MicroTracker {
         tick_size: Option<Price>,
     ) -> Self {
         Self {
-            trades_all: spec
-                .trades_all
-                .as_ref()
-                .map(|w| TradeStream::new(&w.windows)),
-            trades_buy: spec
-                .trades_buy
-                .as_ref()
-                .map(|w| TradeStream::new(&w.windows)),
-            trades_sell: spec
-                .trades_sell
-                .as_ref()
-                .map(|w| TradeStream::new(&w.windows)),
+            trades_all: spec.trades_all.as_ref().map(|w| Windows::new(&w.windows)),
+            trades_buy: spec.trades_buy.as_ref().map(|w| Windows::new(&w.windows)),
+            trades_sell: spec.trades_sell.as_ref().map(|w| Windows::new(&w.windows)),
             microprice: spec.microprice.as_ref().map(|w| Windows::new(&w.windows)),
-            spread: spec.spread.as_ref().map(|w| Windows::new(&w.windows)),
             imbalance: spec.imbalance.as_ref().map(|s| ImbalanceStream {
                 top_n: s.top_n,
                 series: Windows::new(&s.windows),
@@ -201,26 +161,16 @@ impl MicroTracker {
     }
 
     fn push_trade_series(&mut self, event: &TradeEvent) {
-        let side_configured = match event.side {
-            Side::Buy => self.trades_buy.is_some(),
-            Side::Sell => self.trades_sell.is_some(),
-        };
-        // `Price::notional` panics on i64 overflow — compute only when a storing stream exists
-        if self.trades_all.is_none() && !side_configured {
-            return;
-        }
-        let price = event.price.to_f64();
-        let qty = event.qty.0;
-        let notional = event.price.notional(event.qty);
-        if let Some(stream) = self.trades_all.as_mut() {
-            stream.push(price, qty, notional);
-        }
         let side_stream = match event.side {
             Side::Buy => self.trades_buy.as_mut(),
             Side::Sell => self.trades_sell.as_mut(),
         };
-        if let Some(stream) = side_stream {
-            stream.push(price, qty, notional);
+        let price = event.price.to_f64();
+        for stream in [self.trades_all.as_mut(), side_stream]
+            .into_iter()
+            .flatten()
+        {
+            stream.push(price);
         }
     }
 
@@ -245,9 +195,6 @@ impl MicroTracker {
         if let Some(series) = self.microprice.as_mut() {
             series.push(microprice);
         }
-        if let Some(series) = self.spread.as_mut() {
-            series.push(spread);
-        }
         if let Some(stream) = self.imbalance.as_mut() {
             let value = micro::imbalance(book.bids(), book.asks(), stream.top_n);
             stream.series.push(value);
@@ -268,24 +215,17 @@ impl MicroTracker {
     /// `unconfigured_klines` counter is not window state and survives.
     #[cold]
     pub fn on_rotation(&mut self) {
-        for stream in [
+        for series in [
             self.trades_all.as_mut(),
             self.trades_buy.as_mut(),
             self.trades_sell.as_mut(),
+            self.microprice.as_mut(),
+            self.imbalance.as_mut().map(|stream| &mut stream.series),
         ]
         .into_iter()
         .flatten()
         {
-            stream.clear();
-        }
-        if let Some(series) = self.microprice.as_mut() {
             series.clear();
-        }
-        if let Some(series) = self.spread.as_mut() {
-            series.clear();
-        }
-        if let Some(stream) = self.imbalance.as_mut() {
-            stream.series.clear();
         }
         if let Some(candles) = self.candles.as_mut() {
             candles.clear();
@@ -368,30 +308,13 @@ impl MicroTracker {
         sampler.series.sample(latest, last_trade, trades);
     }
 
-    #[inline]
-    pub fn last_trade(&self) -> Option<TradeEvent> {
-        self.last_trade
-    }
-
     /// The rolling series for `window`; `None` when this stream or window is not configured.
     pub fn trades_price(&self, side: SideFilter, window: usize) -> Option<&FastQueue<f64>> {
-        self.trade_stream(side)?.price.get(window)
-    }
-
-    pub fn trades_qty(&self, side: SideFilter, window: usize) -> Option<&FastQueue<i64>> {
-        self.trade_stream(side)?.qty.get(window)
-    }
-
-    pub fn trades_notional(&self, side: SideFilter, window: usize) -> Option<&FastQueue<i64>> {
-        self.trade_stream(side)?.notional.get(window)
+        self.trade_stream(side)?.get(window)
     }
 
     pub fn microprice_series(&self, window: usize) -> Option<&FastQueue<f64>> {
         self.microprice.as_ref()?.get(window)
-    }
-
-    pub fn spread_series(&self, window: usize) -> Option<&FastQueue<f64>> {
-        self.spread.as_ref()?.get(window)
     }
 
     pub fn imbalance_series(&self, window: usize) -> Option<&FastQueue<f64>> {
@@ -462,7 +385,7 @@ impl MicroTracker {
         self.intensity.as_ref()
     }
 
-    fn trade_stream(&self, side: SideFilter) -> Option<&TradeStream> {
+    fn trade_stream(&self, side: SideFilter) -> Option<&Windows> {
         match side {
             SideFilter::All => self.trades_all.as_ref(),
             SideFilter::Buy => self.trades_buy.as_ref(),

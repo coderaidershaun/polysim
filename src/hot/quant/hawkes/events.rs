@@ -1,22 +1,23 @@
-//! The rolling event-time window both the univariate and the multivariate processes are built on.
-//! It lives here rather than in either of them because the clamping push below is a precondition of
-//! every recursion in the module, and two copies of it could disagree.
+//! The rolling window of event times that the fitter and the live evaluator both read. Its push
+//! clamps a late stamp to the one before it, because every recursion here assumes time never runs
+//! backwards.
 
 use crate::hot::series::FastQueue;
 use crate::time::{DurationUs, TsUs};
 
+/// Event times as seconds since the first event; a full window evicts the oldest.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct EventWindow {
+pub struct HawkesEvents {
     times: FastQueue<f64>,
     origin: Option<TsUs>,
     last_secs: f64,
     out_of_order: u64,
 }
 
-impl EventWindow {
+impl HawkesEvents {
     /// # Panics
     /// `max_events == 0` (config bug).
-    pub(super) fn new(max_events: usize) -> Self {
+    pub fn new(max_events: usize) -> Self {
         assert!(max_events != 0, "hawkes event window must be non-zero");
         Self {
             times: FastQueue::new(max_events, 2),
@@ -27,8 +28,8 @@ impl EventWindow {
     }
 
     /// An earlier stamp than its predecessor is clamped to that predecessor so every recursion still
-    /// sees `dt >= 0`, and counted.
-    pub(super) fn push(&mut self, ts: TsUs) {
+    /// sees `dt >= 0`, and is counted in [`HawkesEvents::out_of_order_count`].
+    pub fn push(&mut self, ts: TsUs) {
         let origin = *self.origin.get_or_insert(ts);
         let secs = ts.diff(origin).to_secs();
         if secs < self.last_secs {
@@ -39,27 +40,28 @@ impl EventWindow {
         self.times.push(self.last_secs);
     }
 
-    /// Wipes the window and its time origin; the lifetime anomaly counter survives.
-    pub(super) fn clear(&mut self) {
+    /// Wipes the window and its time origin; the lifetime out-of-order count survives.
+    pub fn clear(&mut self) {
         self.times.clear();
         self.origin = None;
         self.last_secs = 0.0;
     }
 
-    pub(super) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.times.len()
     }
 
-    pub(super) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.times.is_empty()
     }
 
-    pub(super) fn out_of_order_count(&self) -> u64 {
+    /// Events whose stamp preceded their predecessor and were clamped, over the whole lifetime.
+    pub fn out_of_order_count(&self) -> u64 {
         self.out_of_order
     }
 
     /// Oldest-first relative seconds — always one contiguous slice.
-    pub(super) fn times_secs(&self) -> &[f64] {
+    pub fn times_secs(&self) -> &[f64] {
         self.times.as_slice()
     }
 

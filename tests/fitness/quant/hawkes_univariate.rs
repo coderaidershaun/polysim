@@ -4,7 +4,6 @@
 
 use super::ts;
 use polysim::hot::quant::hawkes::{HawkesEvents, HawkesParams, UnivariateHawkes};
-use polysim::time::DurationUs;
 
 #[test]
 fn recursion_matches_the_direct_kernel_sum_and_relaxes_to_baseline() {
@@ -41,16 +40,5 @@ fn recursion_matches_the_direct_kernel_sum_and_relaxes_to_baseline() {
 fn known_worked_example_reads_back_from_the_accessors() {
     let params = HawkesParams::new(2.0, 1.5, 4.0);
     assert!((params.branching_ratio() - 0.375).abs() < 1e-12);
-    assert!((params.long_run_rate().expect("stationary") - 3.2).abs() < 1e-12);
     assert!((params.half_life_secs() - 0.1733).abs() < 1e-4);
-    assert!(HawkesParams::new(2.0, 5.0, 4.0).long_run_rate().is_none());
-
-    let mut hawkes = UnivariateHawkes::new(params);
-    hawkes.on_event(ts(0.0));
-    let horizon = DurationUs::from_micros(100_000);
-    assert!((hawkes.expected_events(ts(0.0), horizon) - 0.324).abs() < 1e-3);
-    assert!((hawkes.event_probability(ts(0.0), horizon) - 0.277).abs() < 1e-3);
-
-    let idle = UnivariateHawkes::new(params);
-    assert!((idle.expected_events(ts(0.0), horizon) - 0.2).abs() < 1e-12);
 }

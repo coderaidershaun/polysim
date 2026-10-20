@@ -3,10 +3,7 @@
 use core::fmt;
 
 use crate::hot::book::Book;
-use crate::hot::exec::{
-    Balance, DesiredBook, DesiredQuote, ExecEngine, OrderView, QuoteLevel, TickGrid,
-};
-use crate::hot::ledger::PositionLedger;
+use crate::hot::exec::{Balance, DesiredQuote, OrderView, QuoteLevel, TickGrid};
 use crate::hot::quant::volatility::EwmaVol;
 use crate::hot::tracker::MicroTracker;
 use crate::ids::{AssetId, ClientOrderId, InstrumentId, Qty, Side};
@@ -15,40 +12,9 @@ use crate::log::{Level, LogRecord};
 use crate::msg::persist::{BookEventRow, FeatureId, FeatureRow, KlineRow, PersistRecord, TradeRow};
 use crate::time::TsUs;
 
-use super::{Actions, StrategyCtx, WindowInfo};
+use super::{StrategyCtx, WindowInfo};
 
-/// Context parts. Struct avoids opaque 10-arg call sites.
-pub(crate) struct CtxParts<'a> {
-    pub books: &'a [Book],
-    pub trackers: &'a [MicroTracker],
-    pub ewma: &'a [Option<EwmaVol>],
-    pub windows: &'a [Option<WindowInfo>],
-    pub ledger: &'a PositionLedger,
-    pub exec: &'a ExecEngine,
-    pub desired: &'a mut DesiredBook,
-    pub actions: &'a mut Actions,
-    pub event_ts: TsUs,
-    pub spin_seq: u64,
-    pub declared_link_topics: usize,
-}
-
-impl<'a> StrategyCtx<'a> {
-    pub(crate) fn new(parts: CtxParts<'a>) -> Self {
-        Self {
-            books: parts.books,
-            trackers: parts.trackers,
-            ewma: parts.ewma,
-            windows: parts.windows,
-            ledger: parts.ledger,
-            exec: parts.exec,
-            desired: parts.desired,
-            actions: parts.actions,
-            event_ts: parts.event_ts,
-            spin_seq: parts.spin_seq,
-            declared_link_topics: parts.declared_link_topics,
-        }
-    }
-
+impl StrategyCtx<'_> {
     /// Declare resting quote this side SHOULD have; `None` withdraws. Declare every spin: absent = expire.
     /// Engine tees declaration to DOM → ladder shows engine state, not strategy paint.
     /// Strategy cannot transmit; engine gates all decisions (price, size, existence).

@@ -1,21 +1,23 @@
-//! Venue event -> slot transition, money movement, settlement release, audit rows. Split from
-//! `engine.rs` for readability.
+//! Folding a venue event: the slot transition, the money it moves, the reservation it releases and
+//! the audit rows it earns, for this run's orders and for those an earlier run left resting.
 
 use crate::error;
 use crate::hot::ledger::{LedgerFill, PositionLedger};
 use crate::hot::strategy::Actions;
-use crate::ids::{AssetId, Side};
+use crate::ids::{AssetId, ClientOrderId, InstrumentId, Side};
 use crate::msg::exec::{ExecEvent, ExecKind, RejectClass};
 use crate::msg::persist::OrderLifecycle;
 
 use super::account::ReleaseOutcome;
 use super::audit::bank_event_rows;
-use super::engine::ExecEngine;
-use super::gates::{HaltReason, RejectSeverity};
-use super::order::{FillDelta, MAX_ORDER_SLOTS, OrderSlot, OrderState};
-use super::prior_run::PRIOR_RUN_SLOTS;
+use super::desired::MAX_QUOTE_LEVELS;
+use super::engine::{ExecEngine, view_of};
+use super::gates::HaltReason;
+use super::order::{
+    FillDelta, MAX_ORDER_INSTRUMENTS, MAX_ORDER_SLOTS, OrderSlot, OrderState, free_or_oldest_closed,
+};
 use super::transition::apply_exec_event;
-use super::view::{ExecCallback, Fill, OrderReject, OrderUpdate, RejectOrigin};
+use super::view::{ExecCallback, Fill, OrderReject, RejectOrigin};
 
 impl ExecEngine {
     /// Retry releases that beat account update. Fixed-slot scan, no alloc.
@@ -25,9 +27,7 @@ impl ExecEngine {
             if slot.reserved_amount == 0 || slot.state == OrderState::PendingNew {
                 continue;
             }
-            let assets = &self.instruments[usize::from(slot.instrument.0)];
-            let (base_asset, quote_asset) = (assets.base_asset, assets.quote_asset);
-            self.release_reservation(index, base_asset, quote_asset);
+            self.release_reservation(index);
         }
     }
 
@@ -41,18 +41,15 @@ impl ExecEngine {
         let previous_state = OrderLifecycle::from(self.orders.slot(index).state);
         let applied = apply_exec_event(self.orders.slot_mut(index), event);
         if applied.is_resurrection {
-            self.counters.resurrections += 1;
             self.resurrection_error(event);
         }
         let slot = *self.orders.slot(index);
-        let assets = &self.instruments[usize::from(slot.instrument.0)];
-        let (base_asset, quote_asset) = (assets.base_asset, assets.quote_asset);
 
         self.book_fill(&slot, event, applied.fill, ledger);
         if event.kind == ExecKind::PlaceNotSent {
-            self.release_unsent_reservation(index, base_asset, quote_asset);
+            self.release_unsent_reservation(index);
         } else {
-            self.release_reservation(index, base_asset, quote_asset);
+            self.release_reservation(index);
         }
         self.record_outcome(event, applied.state);
         bank_event_rows(bank, &slot, event, previous_state, applied.fill);
@@ -87,17 +84,7 @@ impl ExecEngine {
                 event_ts_us: event.received_ts_us,
             });
         }
-        ExecCallback::Update(OrderUpdate {
-            instrument: slot.instrument,
-            client_id: slot.client_id,
-            side: slot.side,
-            level: slot.level,
-            state: applied.state,
-            price: slot.price,
-            qty: slot.qty,
-            filled: slot.filled_base,
-            event_ts_us: event.received_ts_us,
-        })
+        ExecCallback::Update(view_of(&slot).updated_at(event.received_ts_us))
     }
 
     /// Prior-run order event: no reservation release, no reject count, no callback (position already in ledger).
@@ -109,7 +96,6 @@ impl ExecEngine {
         bank: &mut Actions,
     ) {
         let Some(index) = self.prior_orders.find_or_seat(event) else {
-            self.counters.prior_run_overflows += 1;
             self.prior_run_overflow_error(event);
             return;
         };
@@ -131,7 +117,6 @@ impl ExecEngine {
         if fill.is_empty() {
             return;
         }
-        self.counters.fills_applied += 1;
         // Only commission in own quote_asset counts (foreign asset = wrong PnL forever).
         let quote_asset = self.instruments[usize::from(slot.instrument.0)].quote_asset;
         let commission_quote =
@@ -173,15 +158,12 @@ impl ExecEngine {
     /// the reservation stands until the slot terminates — a zero-fill terminal moved no money and
     /// releases UNGATED; a filled terminal keeps the gate, because its post-fill restatement is what
     /// drops `free` and releasing before it lands would double-spend.
-    fn release_reservation(&mut self, index: usize, base_asset: AssetId, quote_asset: AssetId) {
+    fn release_reservation(&mut self, index: usize) {
         let slot = self.orders.slot(index);
         if slot.reserved_amount == 0 {
             return;
         }
-        let asset = match slot.side {
-            Side::Buy => quote_asset,
-            Side::Sell => base_asset,
-        };
+        let asset = self.instruments[usize::from(slot.instrument.0)].spend_asset(slot.side);
         if self.settings.holds_reservations_until_settled {
             if slot.state != OrderState::PendingNew {
                 self.gated_release(index, asset);
@@ -192,8 +174,7 @@ impl ExecEngine {
             return;
         }
         if slot.filled_base.0 == 0 {
-            self.account.release_unsent(asset, slot.reserved_amount);
-            self.orders.slot_mut(index).reserved_amount = 0;
+            self.release_unsent_reservation(index);
             return;
         }
         self.gated_release(index, asset);
@@ -211,65 +192,54 @@ impl ExecEngine {
         }
     }
 
-    pub(super) fn release_unsent_reservation(
-        &mut self,
-        index: usize,
-        base_asset: AssetId,
-        quote_asset: AssetId,
-    ) {
+    pub(super) fn release_unsent_reservation(&mut self, index: usize) {
         let slot = self.orders.slot(index);
         if slot.reserved_amount == 0 {
             return;
         }
-        let asset = match slot.side {
-            Side::Buy => quote_asset,
-            Side::Sell => base_asset,
-        };
+        let asset = self.instruments[usize::from(slot.instrument.0)].spend_asset(slot.side);
         self.account.release_unsent(asset, slot.reserved_amount);
         self.orders.slot_mut(index).reserved_amount = 0;
     }
 
-    /// A venue answer either ends the reject streak or extends it. `Gone` is the routine one: a
-    /// post-only quote the book moved through is the venue doing exactly what post-only asks, and
-    /// counting it toward the kill switch parks the engine precisely when the market is moving.
-    /// This relies on the edge mapping `INSUFFICIENT_BALANCES` to `Fatal` and not to `Gone` — the
-    /// two share venue code `-2010` and only the reject REASON separates them. Verified against
-    /// `adapters/binance/exec/codec/reject.rs` and `codec/stream.rs`: both split on the message, and
-    /// an unrecognised `-2010` classifies `Fatal`, which is the direction that parks loudly rather
-    /// than placing orders it cannot fund.
+    /// A venue answer ends the reject streak, extends it, or leaves it alone. `Refused` leaves it
+    /// alone: a post-only quote the book moved through is the venue doing exactly what post-only
+    /// asks, and counting it toward the kill switch parks the engine precisely when the market is
+    /// moving.
+    ///
+    /// This relies on the Binance edge mapping `INSUFFICIENT_BALANCES` to `Fatal` and not to
+    /// `Refused`: the two share venue code `-2010` and only the reject REASON separates them. Both
+    /// Binance decoders split on the message, and an unrecognised `-2010` classifies `Fatal`, which
+    /// parks the engine loudly rather than letting it place orders it cannot fund.
     fn record_outcome(&mut self, event: &ExecEvent, state: OrderState) {
         let Some(class) = event.reject else {
-            // Only the venue can end a streak. The kinds the EDGE synthesises for a request that
-            // never left resolve a slot with nobody at the venue having accepted anything — and an
-            // amend refused for want of a socket leaves its order reading `Live`, which would read
-            // here as acceptance and reset the count exactly when the venue is least reachable.
+            // One order the venue accepts shows the requests are not wrong in kind, so it ends the
+            // streak, and only the venue can do that. The kinds the EDGE synthesises for a request
+            // that never left resolve a slot without the venue accepting anything, and an amend
+            // refused for want of a socket leaves its order reading `Live`. Read here as acceptance,
+            // that would reset the count exactly when the venue is least reachable.
             let is_venue_answer =
                 !matches!(event.kind, ExecKind::PlaceNotSent | ExecKind::AmendNotSent);
             if is_venue_answer && matches!(state, OrderState::Live) {
-                self.rejects.record_accepted();
+                self.reject_streak = 0;
             }
             return;
         };
         match class {
             RejectClass::Fatal => {
-                self.counters.venue_rejects += 1;
                 self.fatal_reject_error(event);
                 self.halt(HaltReason::FatalReject, event.received_ts_us);
             }
-            // The ordinary cost of quoting post-only, on its own loose counter. It must never touch
-            // the consecutive-hard streak: a maker earns these all day, and counting them as hard
-            // failures parks the engine exactly when the market is interesting.
-            RejectClass::Refused => {
-                self.counters.venue_rejects += 1;
-                self.counters.routine_rejects += 1;
-                self.rejects.record(RejectSeverity::Routine);
-            }
-            // Gone = reconciliation answer (order never existed), not venue reject. Prevents false kill-switch on reconcile.
+            // The ordinary cost of quoting post-only. It must never touch the hard-reject streak: a
+            // maker earns these all day, and counting them parks the engine exactly when the market
+            // is interesting.
+            RejectClass::Refused => {}
+            // A reconciliation answering that the order never existed is not the venue refusing a
+            // request, so it must not count toward the kill switch.
             RejectClass::Gone => {}
             RejectClass::StillLive | RejectClass::Ambiguous => {
-                self.counters.venue_rejects += 1;
-                self.rejects.record(RejectSeverity::Hard);
-                if self.rejects.consecutive_hard() >= self.settings.max_consecutive_rejects {
+                self.reject_streak += 1;
+                if self.reject_streak >= self.settings.max_consecutive_rejects {
                     self.halt(HaltReason::RejectStreak, event.received_ts_us);
                 }
             }
@@ -283,5 +253,74 @@ impl ExecEngine {
             "venue refused order {:x} fatally with code {} — halting rather than retrying",
             event.client_id.0, event.reject_code
         );
+    }
+}
+
+const PRIOR_RUN_SLOTS: usize = MAX_QUOTE_LEVELS * 2 * MAX_ORDER_INSTRUMENTS;
+
+/// Orders an EARLIER run of this trading engine left resting on the venue. They are cancelled on
+/// sight, but the cancel takes hundreds of milliseconds and whatever rests fills in the meantime.
+/// Those are real executions on this account, so they move the ledger and earn audit rows exactly
+/// like any other.
+///
+/// They must never join THIS run's quoting, which is why they sit in a table of their own rather
+/// than in [`OrderTable`](super::order::OrderTable). A prior-run client id decodes to a slot index
+/// in that table, so seating one there would either evict an order this run is about to place or
+/// lose the fill to the orphan path, decided by nothing but arrival order. Keeping them apart also
+/// keeps a cancel answered "unknown order", this path's ordinary outcome, out of the reject streak.
+pub(super) struct PriorRunOrders {
+    slots: Box<[OrderSlot; PRIOR_RUN_SLOTS]>,
+}
+
+impl PriorRunOrders {
+    pub(super) fn new() -> Self {
+        Self {
+            slots: Box::new([OrderSlot::EMPTY; PRIOR_RUN_SLOTS]),
+        }
+    }
+
+    #[inline]
+    pub(super) fn slot(&self, index: usize) -> &OrderSlot {
+        &self.slots[index]
+    }
+
+    #[inline]
+    pub(super) fn slot_mut(&mut self, index: usize) -> &mut OrderSlot {
+        &mut self.slots[index]
+    }
+
+    pub(super) fn working(
+        &self,
+        instrument: InstrumentId,
+        side: Side,
+    ) -> impl Iterator<Item = &OrderSlot> {
+        self.slots.iter().filter(move |slot| {
+            slot.instrument == instrument && slot.side == side && slot.state.is_working()
+        })
+    }
+
+    pub(super) fn find_or_seat(&mut self, event: &ExecEvent) -> Option<usize> {
+        if let Some(index) = self.find(event.client_id) {
+            return Some(index);
+        }
+        let index = free_or_oldest_closed(&self.slots[..])?;
+        self.slots[index] = OrderSlot {
+            client_id: event.client_id,
+            venue_order_id: event.venue_order_id,
+            state: OrderState::Unknown,
+            side: event.side,
+            instrument: event.instrument,
+            price: event.price,
+            qty: event.qty,
+            last_event_ts_us: event.received_ts_us,
+            ..OrderSlot::EMPTY
+        };
+        Some(index)
+    }
+
+    fn find(&self, id: ClientOrderId) -> Option<usize> {
+        self.slots
+            .iter()
+            .position(|slot| slot.client_id == id && slot.state != OrderState::Free)
     }
 }

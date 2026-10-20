@@ -12,10 +12,13 @@ fn approx(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() <= tol
 }
 
+const ORDER_SIZE: f64 = 1.0;
+const SIGMA: f64 = 2.0;
+
 // Δ=1, q=3, A=5, k̃=0.5, σ̃=2, γ̃=0.0736 -> c1=2, c2=0.2, h=2.2, j=0.4.
 fn worked_example() -> QuoteCoefficients {
-    GueantParams::new(0.0736, 1.0, Objective::InventoryPenalty)
-        .coefficients(5.0, 0.5, 2.0)
+    GueantParams::new(0.0736, ORDER_SIZE, Objective::InventoryPenalty)
+        .coefficients(5.0, 0.5, SIGMA)
         .expect("valid estimates")
 }
 
@@ -33,8 +36,11 @@ fn inputs(fair_ticks: f64, inventory: f64, best_bid_tick: i64, best_ask_tick: i6
 fn model_b_matches_a_known_worked_example() {
     // -> δᵇ=3.4, δᵃ=1.0 at q=3.
     let c = worked_example();
-    assert!(approx(c.c1(), 2.0, 1e-9), "c1 {}", c.c1());
-    assert!(approx(c.c2(), 0.2, 2e-3), "c2 {}", c.c2());
+    // c1 and c2 are not exposed, so they are read back from h = c1 + ½·Δ·σ̃·c2 and j = σ̃·c2.
+    let c1 = c.half_spread() - 0.5 * ORDER_SIZE * c.skew_per_inventory();
+    let c2 = c.skew_per_inventory() / SIGMA;
+    assert!(approx(c1, 2.0, 1e-9), "c1 {c1}");
+    assert!(approx(c2, 0.2, 2e-3), "c2 {c2}");
     assert!(approx(c.half_spread(), 2.2, 2e-3), "h {}", c.half_spread());
     assert!(
         approx(c.skew_per_inventory(), 0.4, 4e-3),

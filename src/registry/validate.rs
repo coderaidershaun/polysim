@@ -81,7 +81,6 @@ fn validate_tracker(tracker: &TrackerSpec) -> Result<(), ConfigError> {
             "source.tracker.microprice.windows",
             windows_of(&tracker.microprice),
         ),
-        ("source.tracker.spread.windows", windows_of(&tracker.spread)),
     ];
     for (field, windows) in window_specs {
         check_windows(field, windows)?;

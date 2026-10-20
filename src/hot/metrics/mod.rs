@@ -210,7 +210,7 @@ impl BucketRing {
             }
         }
         if stat.count == 0 {
-            return StageStat::NONE_OBSERVED;
+            return StageStat::default();
         }
         stat.p50_us = percentile(&hist, stat.count, 0.50).clamp(stat.min_us, stat.max_us);
         stat.p99_us = percentile(&hist, stat.count, 0.99).clamp(stat.min_us, stat.max_us);
@@ -218,7 +218,7 @@ impl BucketRing {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StageStat {
     pub count: u64,
     pub sum_us: i64,
@@ -234,15 +234,6 @@ impl StageStat {
         sum_us: 0,
         min_us: i64::MAX,
         max_us: i64::MIN,
-        p50_us: 0,
-        p99_us: 0,
-    };
-
-    const NONE_OBSERVED: StageStat = StageStat {
-        count: 0,
-        sum_us: 0,
-        min_us: 0,
-        max_us: 0,
         p50_us: 0,
         p99_us: 0,
     };
@@ -315,13 +306,13 @@ impl GaugeRing {
             stat.max = stat.max.max(slot.max);
         }
         if stat.count == 0 {
-            return QueueDepthStat::NONE_OBSERVED;
+            return QueueDepthStat::default();
         }
         stat
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QueueDepthStat {
     pub count: u64,
     pub sum: u64,
@@ -334,13 +325,6 @@ impl QueueDepthStat {
         count: 0,
         sum: 0,
         min: u64::MAX,
-        max: 0,
-    };
-
-    const NONE_OBSERVED: QueueDepthStat = QueueDepthStat {
-        count: 0,
-        sum: 0,
-        min: 0,
         max: 0,
     };
 

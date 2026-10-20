@@ -118,13 +118,9 @@ impl IntensityCounts {
             self.without_book += 1;
             return;
         };
-        let depth = tick_depth(event.side, anchor, event.price, self.tick);
-        let bucket = if depth < 0 {
-            self.inside_spread += 1;
-            0
-        } else {
-            (depth as usize).min(self.max_depth() - 1)
-        };
+        let bucket = self
+            .bucket_for(event.side, anchor, event.price)
+            .unwrap_or(0);
         for level in self.reach_mut(event.side)[..=bucket].iter_mut() {
             *level += 1.0;
         }
@@ -137,12 +133,9 @@ impl IntensityCounts {
     }
 
     fn extend_group(&mut self, group: Group, price: Price) {
-        let depth = tick_depth(group.side, group.anchor, price, self.tick);
-        if depth < 0 {
-            self.inside_spread += 1;
+        let Some(bucket) = self.bucket_for(group.side, group.anchor, price) else {
             return;
-        }
-        let bucket = (depth as usize).min(self.max_depth() - 1);
+        };
         if bucket <= group.deepest_bucket {
             return;
         }
@@ -155,6 +148,16 @@ impl IntensityCounts {
         });
     }
 
+    /// Depth bucket of a print against its anchor; a print inside the spread is counted and has none.
+    fn bucket_for(&mut self, side: Side, anchor: Price, price: Price) -> Option<usize> {
+        let depth = tick_depth(side, anchor, price, self.tick);
+        if depth < 0 {
+            self.inside_spread += 1;
+            return None;
+        }
+        Some((depth as usize).min(self.max_depth() - 1))
+    }
+
     /// Decays histograms by `e^(-lambda*dt)` and advances the exposure integral to `now`; a trade at
     /// or before `last_decay_ts` doesn't advance.
     fn decay_to(&mut self, now: TsUs) {
@@ -162,15 +165,16 @@ impl IntensityCounts {
             self.last_decay_ts = Some(now);
             return;
         };
-        let dt = now.diff(last).to_secs();
-        if dt <= 0.0 {
+        // `decay_to_now` clamps a backwards step to zero; returning here instead keeps
+        // `last_decay_ts` from moving back to an older trade.
+        if now.diff(last).to_secs() <= 0.0 {
             return;
         }
-        let factor = (-self.decay_per_sec * dt).exp();
+        let (factor, exposure) = self.decay_to_now(now);
         for value in self.bid_reach.iter_mut().chain(&mut self.ask_reach) {
             *value *= factor;
         }
-        self.exposure_secs = self.exposure_secs * factor + (1.0 - factor) / self.decay_per_sec;
+        self.exposure_secs = exposure;
         self.last_decay_ts = Some(now);
     }
 

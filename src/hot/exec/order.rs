@@ -12,7 +12,7 @@ use crate::msg::persist::OrderLifecycle;
 use crate::time::{DurationUs, TsUs};
 
 use super::account::AccountWatermark;
-use super::level::{MAX_QUOTE_LEVELS, QuoteLevel};
+use super::desired::{MAX_QUOTE_LEVELS, QuoteLevel};
 
 const SLOTS_PER_LEVEL: usize = 4;
 const SLOTS_PER_SIDE: usize = MAX_QUOTE_LEVELS * SLOTS_PER_LEVEL;
@@ -170,7 +170,6 @@ pub struct OrderSlot {
     pub qty: Qty,
     pub filled_base: Qty,
     pub filled_quote: i64,
-    pub commission: i64,
     pub amends_used: u8,
     pub generation: u16,
     pub reserved_amount: i64,
@@ -194,7 +193,6 @@ impl OrderSlot {
         qty: Qty(0),
         filled_base: Qty(0),
         filled_quote: 0,
-        commission: 0,
         amends_used: 0,
         generation: 0,
         reserved_amount: 0,
@@ -204,11 +202,6 @@ impl OrderSlot {
         last_event_ts_us: TsUs::from_micros(0),
         closed_ts_us: TsUs::from_micros(0),
     };
-
-    #[inline]
-    pub fn remaining(&self) -> Qty {
-        Qty((self.qty.0 - self.filled_base.0).max(0))
-    }
 
     /// Whether the venue is holding this order PASSIVELY — the shape a cancel can actually reach.
     ///
@@ -229,7 +222,6 @@ impl OrderSlot {
         }
         self.filled_base = event.cumulative_qty;
         self.filled_quote = event.cumulative_quote;
-        self.commission += event.commission;
         FillDelta {
             base: Qty(delta_base),
             quote: delta_quote,
@@ -269,11 +261,6 @@ impl OrderTable {
             slots: Box::new([OrderSlot::EMPTY; MAX_ORDER_SLOTS]),
             layout: ClientIdLayout { run_nonce },
         }
-    }
-
-    #[inline]
-    pub fn layout(&self) -> ClientIdLayout {
-        self.layout
     }
 
     #[inline]
@@ -344,7 +331,7 @@ impl OrderTable {
 
     pub fn claim(&mut self, claim: OrderClaim) -> Option<(usize, ClientOrderId)> {
         let base = level_base(claim.instrument, claim.side, claim.level);
-        let index = self.free_or_oldest_closed(base)?;
+        let index = base + free_or_oldest_closed(&self.slots[base..base + SLOTS_PER_LEVEL])?;
         let slot = &mut self.slots[index];
         let generation = slot.generation.wrapping_add(1);
         let client_id = self.layout.encode(index, generation);
@@ -432,19 +419,6 @@ impl OrderTable {
         &mut self.slots[index]
     }
 
-    fn free_or_oldest_closed(&self, slice_start: usize) -> Option<usize> {
-        let level = &self.slots[slice_start..slice_start + SLOTS_PER_LEVEL];
-        if let Some(offset) = level.iter().position(|slot| slot.state == OrderState::Free) {
-            return Some(slice_start + offset);
-        }
-        level
-            .iter()
-            .enumerate()
-            .filter(|(_, slot)| matches!(slot.state, OrderState::Closed(_)))
-            .min_by_key(|(_, slot)| slot.closed_ts_us)
-            .map(|(offset, _)| slice_start + offset)
-    }
-
     pub fn reap(&mut self, now: TsUs, window: DurationUs) {
         for slot in self.slots.iter_mut() {
             let is_reapable = matches!(slot.state, OrderState::Closed(_))
@@ -457,4 +431,16 @@ impl OrderTable {
             }
         }
     }
+}
+
+pub(super) fn free_or_oldest_closed(slots: &[OrderSlot]) -> Option<usize> {
+    if let Some(index) = slots.iter().position(|slot| slot.state == OrderState::Free) {
+        return Some(index);
+    }
+    slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| matches!(slot.state, OrderState::Closed(_)))
+        .min_by_key(|(_, slot)| slot.closed_ts_us)
+        .map(|(index, _)| index)
 }

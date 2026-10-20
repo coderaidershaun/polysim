@@ -66,8 +66,8 @@ fn assert_bps(realised: Option<f64>, expected: f64) {
 #[test]
 fn unqueued_quote_fills_at_or_through_once_per_placement() {
     let mut markouts = tracker(secs(1));
-    markouts.arm_bid(price(100.0), Qty(0));
-    markouts.arm_ask(price(101.0), Qty(0));
+    markouts.arm(MarkoutSide::Bid, price(100.0), Qty(0));
+    markouts.arm(MarkoutSide::Ask, price(101.0), Qty(0));
 
     // Buying aggressor never reaches bid, however far it prints.
     markouts.on_trade(&print(Side::Buy, 99.0, 0));
@@ -84,7 +84,7 @@ fn unqueued_quote_fills_at_or_through_once_per_placement() {
     assert_eq!(markouts.bid().fill_count(), 1);
 
     // Fresh placement to make fillable again; through counts as at.
-    markouts.arm_bid(price(100.0), Qty(0));
+    markouts.arm(MarkoutSide::Bid, price(100.0), Qty(0));
     markouts.on_trade(&print(Side::Sell, 99.0, secs(2)));
     assert_eq!(markouts.bid().fill_count(), 2);
 
@@ -96,15 +96,15 @@ fn unqueued_quote_fills_at_or_through_once_per_placement() {
     assert_eq!(markouts.ask().armed_quote(), None);
 
     // Through ask from above must fill (equality prints alone can't pin >=).
-    markouts.arm_ask(price(101.0), Qty(0));
+    markouts.arm(MarkoutSide::Ask, price(101.0), Qty(0));
     markouts.on_trade(&print(Side::Buy, 102.0, secs(4)));
     assert_eq!(markouts.ask().fill_count(), 2);
 
     // Disarm != placement: unquoted side takes level away, prints find nothing to fill.
-    markouts.arm_bid(price(100.0), Qty(0));
-    markouts.arm_ask(price(101.0), Qty(0));
-    markouts.disarm_bid();
-    markouts.disarm_ask();
+    markouts.arm(MarkoutSide::Bid, price(100.0), Qty(0));
+    markouts.arm(MarkoutSide::Ask, price(101.0), Qty(0));
+    markouts.disarm(MarkoutSide::Bid);
+    markouts.disarm(MarkoutSide::Ask);
     markouts.on_trade(&print(Side::Sell, 99.0, secs(5)));
     markouts.on_trade(&print(Side::Buy, 102.0, secs(5)));
     assert_eq!(markouts.bid().fill_count(), 2);
@@ -121,8 +121,8 @@ fn forward_markouts_are_side_signed_and_ripen_per_horizon() {
     // a horizon reading the wrong lane ripens at the wrong second.
     let mut markouts = tracker(secs(1));
     markouts.on_mid(at(0), 100.0);
-    markouts.arm_bid(price(100.0), Qty(0));
-    markouts.arm_ask(price(100.0), Qty(0));
+    markouts.arm(MarkoutSide::Bid, price(100.0), Qty(0));
+    markouts.arm(MarkoutSide::Ask, price(100.0), Qty(0));
     markouts.on_trade(&print(Side::Sell, 100.0, 0));
     markouts.on_trade(&print(Side::Buy, 100.0, 0));
 
@@ -142,7 +142,7 @@ fn forward_markouts_are_side_signed_and_ripen_per_horizon() {
     assert_eq!(markouts.bid().forward(ForwardHorizon::Secs5).len(), 0);
 
     // Print sweep fills at OUR armed 100.00 (not 99.90 on tape) -> markout = +1 bps (not +110).
-    markouts.arm_bid(price(100.0), Qty(0));
+    markouts.arm(MarkoutSide::Bid, price(100.0), Qty(0));
     markouts.on_trade(&print(Side::Sell, 99.9, secs(10)));
     markouts.on_mid(at(secs(11)), 100.01);
     assert_bps(markouts.bid().forward(ForwardHorizon::Secs1).last(), 1.0);
@@ -151,8 +151,8 @@ fn forward_markouts_are_side_signed_and_ripen_per_horizon() {
 #[test]
 fn on_trade_reports_the_fill_it_records() {
     let mut markouts = tracker(secs(1));
-    markouts.arm_bid(price(100.0), Qty(0));
-    markouts.arm_ask(price(101.0), Qty(0));
+    markouts.arm(MarkoutSide::Bid, price(100.0), Qty(0));
+    markouts.arm(MarkoutSide::Ask, price(101.0), Qty(0));
 
     // Print reaching no armed level -> reports nothing.
     assert_eq!(markouts.on_trade(&print(Side::Buy, 99.0, 0)), None);
@@ -183,7 +183,7 @@ fn on_trade_reports_the_fill_it_records() {
 #[test]
 fn queued_last_fills_after_ninety_percent_of_level_eaten() {
     let mut markouts = tracker(secs(1));
-    markouts.arm_bid(price(100.0), qty(10.0));
+    markouts.arm(MarkoutSide::Bid, price(100.0), qty(10.0));
 
     // Prints at level eat queue. 2 of 10 in -> 8 ahead, nothing ours traded.
     markouts.on_trade(&sized_print(Side::Sell, 100.0, 0, qty(2.0)));
@@ -204,12 +204,12 @@ fn queued_last_fills_after_ninety_percent_of_level_eaten() {
     assert_eq!(markouts.bid().armed_quote(), None);
 
     // Print > whole queue -> clears threshold alone.
-    markouts.arm_ask(price(101.0), qty(10.0));
+    markouts.arm(MarkoutSide::Ask, price(101.0), qty(10.0));
     markouts.on_trade(&sized_print(Side::Buy, 101.0, secs(3), qty(50.0)));
     assert_eq!(markouts.ask().fill_count(), 1);
 
     // Print THROUGH level swept everything -> queue moot, smallest print fills.
-    markouts.arm_ask(price(101.0), qty(1000.0));
+    markouts.arm(MarkoutSide::Ask, price(101.0), qty(1000.0));
     markouts.on_trade(&sized_print(Side::Buy, 101.5, secs(4), qty(0.001)));
     assert_eq!(markouts.ask().fill_count(), 2);
 }
@@ -217,22 +217,22 @@ fn queued_last_fills_after_ninety_percent_of_level_eaten() {
 #[test]
 fn rearm_keeps_queue_only_while_armed_at_same_price() {
     let mut markouts = tracker(secs(1));
-    markouts.arm_bid(price(100.0), qty(10.0));
+    markouts.arm(MarkoutSide::Bid, price(100.0), qty(10.0));
     markouts.on_trade(&sized_print(Side::Sell, 100.0, 0, qty(8.0)));
     assert_eq!(markouts.bid().fill_count(), 0);
 
     // Re-arm same level (now 500); unbroken streak keeps earned place (8 eaten + 1 = 9/10 of 10).
-    markouts.arm_bid(price(100.0), qty(500.0));
+    markouts.arm(MarkoutSide::Bid, price(100.0), qty(500.0));
     markouts.on_trade(&sized_print(Side::Sell, 100.0, secs(1), qty(1.0)));
     assert_eq!(markouts.bid().fill_count(), 1);
 
     // Fill disarmed -> re-arm same price joins back of new queue (9 of 500 nowhere near).
-    markouts.arm_bid(price(100.0), qty(500.0));
+    markouts.arm(MarkoutSide::Bid, price(100.0), qty(500.0));
     markouts.on_trade(&sized_print(Side::Sell, 100.0, secs(2), qty(9.0)));
     assert_eq!(markouts.bid().fill_count(), 1);
 
     // Moving level = fresh join (nothing eaten at 100 buys anything at 99).
-    markouts.arm_bid(price(99.0), qty(10.0));
+    markouts.arm(MarkoutSide::Bid, price(99.0), qty(10.0));
     markouts.on_trade(&sized_print(Side::Sell, 99.0, secs(3), qty(1.0)));
     assert_eq!(markouts.bid().fill_count(), 1);
     markouts.on_trade(&sized_print(Side::Sell, 99.0, secs(4), qty(8.0)));

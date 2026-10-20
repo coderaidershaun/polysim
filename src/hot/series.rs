@@ -9,9 +9,9 @@ pub(crate) mod sealed {
 /// Default no-ops (POD); numeric elements override for O(1) rolling sums. Sealed.
 pub trait Element: Copy + sealed::Sealed {
     #[doc(hidden)]
-    fn accumulate(self, _sum_exact: &mut i128, _sum_running: &mut f64, _sum_sq: &mut f64) {}
+    fn accumulate(self, _sum_exact: &mut i128, _sum_running: &mut f64) {}
     #[doc(hidden)]
-    fn deaccumulate(self, _sum_exact: &mut i128, _sum_running: &mut f64, _sum_sq: &mut f64) {}
+    fn deaccumulate(self, _sum_exact: &mut i128, _sum_running: &mut f64) {}
 }
 
 /// Numeric [`Element`] w/ O(1) rolling stats; i64/f64 only.
@@ -25,18 +25,14 @@ pub trait SeriesElem: Element {
 // i128 never wraps for any i64-window; narrowing to i64 at sum() is loud.
 impl Element for i64 {
     #[inline]
-    fn accumulate(self, sum_exact: &mut i128, sum_running: &mut f64, sum_sq: &mut f64) {
+    fn accumulate(self, sum_exact: &mut i128, sum_running: &mut f64) {
         *sum_exact += i128::from(self);
-        let value = self as f64;
-        *sum_running += value;
-        *sum_sq += value * value;
+        *sum_running += self as f64;
     }
     #[inline]
-    fn deaccumulate(self, sum_exact: &mut i128, sum_running: &mut f64, sum_sq: &mut f64) {
+    fn deaccumulate(self, sum_exact: &mut i128, sum_running: &mut f64) {
         *sum_exact -= i128::from(self);
-        let value = self as f64;
-        *sum_running -= value;
-        *sum_sq -= value * value;
+        *sum_running -= self as f64;
     }
 }
 
@@ -54,14 +50,12 @@ impl SeriesElem for i64 {
 
 impl Element for f64 {
     #[inline]
-    fn accumulate(self, _sum_exact: &mut i128, sum_running: &mut f64, sum_sq: &mut f64) {
+    fn accumulate(self, _sum_exact: &mut i128, sum_running: &mut f64) {
         *sum_running += self;
-        *sum_sq += self * self;
     }
     #[inline]
-    fn deaccumulate(self, _sum_exact: &mut i128, sum_running: &mut f64, sum_sq: &mut f64) {
+    fn deaccumulate(self, _sum_exact: &mut i128, sum_running: &mut f64) {
         *sum_running -= self;
-        *sum_sq -= self * self;
     }
 }
 
@@ -103,7 +97,6 @@ pub struct FastQueue<T: Copy> {
     head: usize,
     sum_exact: i128,
     sum_running: f64,
-    sum_sq: f64,
 }
 
 impl<T: Copy> FastQueue<T> {
@@ -125,7 +118,6 @@ impl<T: Copy> FastQueue<T> {
             head: 0,
             sum_exact: 0,
             sum_running: 0.0,
-            sum_sq: 0.0,
         }
     }
 
@@ -177,7 +169,6 @@ impl<T: Copy> FastQueue<T> {
         self.head = 0;
         self.sum_exact = 0;
         self.sum_running = 0.0;
-        self.sum_sq = 0.0;
     }
 
     #[inline]
@@ -199,10 +190,10 @@ impl<T: Element> FastQueue<T> {
             self.copy_back();
         }
         self.write_head(item);
-        item.accumulate(&mut self.sum_exact, &mut self.sum_running, &mut self.sum_sq);
+        item.accumulate(&mut self.sum_exact, &mut self.sum_running);
         if self.len() == self.window {
             let evicted = self.buf[self.start];
-            evicted.deaccumulate(&mut self.sum_exact, &mut self.sum_running, &mut self.sum_sq);
+            evicted.deaccumulate(&mut self.sum_exact, &mut self.sum_running);
         }
         self.head += 1;
         if self.head > self.window {
@@ -226,13 +217,11 @@ impl<T: Element> FastQueue<T> {
     fn recompute_sums(&mut self) {
         let mut sum_exact = 0i128;
         let mut sum_running = 0.0f64;
-        let mut sum_sq = 0.0f64;
         for &item in &self.buf[self.start..self.head] {
-            item.accumulate(&mut sum_exact, &mut sum_running, &mut sum_sq);
+            item.accumulate(&mut sum_exact, &mut sum_running);
         }
         self.sum_exact = sum_exact;
         self.sum_running = sum_running;
-        self.sum_sq = sum_sq;
     }
 }
 
@@ -252,35 +241,6 @@ impl<T: SeriesElem> FastQueue<T> {
             return None;
         }
         Some(self.sum_running / n as f64)
-    }
-
-    /// Population variance (÷n), clamped ≥0 vs float rounding.
-    #[inline]
-    pub fn variance(&self) -> Option<f64> {
-        let n = self.len();
-        if n == 0 {
-            return None;
-        }
-        let count = n as f64;
-        let mean = self.sum_running / count;
-        Some((self.sum_sq / count - mean * mean).max(0.0))
-    }
-
-    #[inline]
-    pub fn std(&self) -> Option<f64> {
-        self.variance().map(f64::sqrt)
-    }
-
-    /// Z-score of newest item. `None` if empty or zero-spread.
-    #[inline]
-    pub fn zscore_last(&self) -> Option<f64> {
-        let std = self.std()?;
-        if std <= 0.0 {
-            return None;
-        }
-        let last = self.last()?;
-        let mean = self.mean()?;
-        Some((last.to_f64() - mean) / std)
     }
 
     /// EMA over window, λ = 2^(−1/halflife): same RiskMetrics recursion (series can't depend on quant).

@@ -8,17 +8,15 @@
 use crate::hot::book::{Book, BookState};
 use crate::hot::ledger::PositionLedger;
 use crate::hot::strategy::{Actions, WindowInfo};
-use crate::ids::{AssetId, ClientOrderId, InstrumentId, Price, Side};
+use crate::ids::{InstrumentId, Price, Side};
 use crate::msg::exec::ExecCommand;
 use crate::msg::inbound::SpinTick;
-use crate::msg::persist::{OrderLifecycle, OrderTransition};
+use crate::msg::persist::OrderTransition;
 use crate::time::TsUs;
 
-use super::audit::{OrderAudit, bank_order};
-use super::desired::{DesiredBook, DesiredQuote};
+use super::desired::{DesiredBook, DesiredQuote, MAX_QUOTE_LEVELS, QuoteLevel};
 use super::engine::{ExecEngine, resting_of};
 use super::gates::{ExposureCheck, HaltReason, QuotePermission, assess_exposure};
-use super::level::{MAX_QUOTE_LEVELS, QuoteLevel};
 use super::order::{MAX_ORDER_SLOTS, OrderState};
 use super::reconcile::{
     BookTop, FundsView, ReconcileInput, ReconcileOutcome, RejectReason, reconcile_side,
@@ -47,29 +45,35 @@ impl ExecEngine {
         if let Some(sink) = self.sink.as_mut() {
             self.pending.drain_into(sink, now);
         }
-        self.counters.command_overflows = self.pending.overflowed();
     }
 
     fn sweep_timeouts(&mut self, now: TsUs, bank: &mut Actions) {
         for index in 0..MAX_ORDER_SLOTS {
-            if !self
+            if self
                 .orders
                 .is_timed_out(index, now, self.settings.inflight_timeout)
             {
-                continue;
+                self.chase_timed_out(index, now, bank);
             }
-            self.counters.timeouts += 1;
-            let slot = self.orders.slot_mut(index);
-            let previous = OrderLifecycle::from(slot.state);
-            slot.state = OrderState::Unknown;
-            slot.last_event_ts_us = now;
-            let (instrument, client_id) = (slot.instrument, slot.client_id);
-            bank_order(
-                bank,
-                OrderAudit::engine_driven(slot, OrderTransition::Timeout, previous, now),
-            );
-            self.request_order_reconcile(instrument, client_id, now);
         }
+    }
+
+    /// The venue never answered this order's request, so its state is unknown until the venue is
+    /// asked about the order directly.
+    #[cold]
+    fn chase_timed_out(&mut self, index: usize, now: TsUs, bank: &mut Actions) {
+        let slot = self.orders.slot_mut(index);
+        slot.last_event_ts_us = now;
+        let (instrument, client_id) = (slot.instrument, slot.client_id);
+        let next = OrderState::Unknown;
+        self.move_slot(index, next, OrderTransition::Timeout, now, bank);
+        self.recon_seq += 1;
+        let command = ExecCommand::ReconcileOrder {
+            instrument,
+            client_id,
+            recon_seq: self.recon_seq,
+        };
+        self.bank_or_halt(command, now);
     }
 
     fn detect_silence(&mut self, now: TsUs) {
@@ -77,40 +81,21 @@ impl ExecEngine {
         let is_silent = self.spins_since_exec_event >= self.settings.exec_silence_spins;
         let has_working =
             (0..MAX_ORDER_SLOTS).any(|index| self.orders.slot(index).state.is_working());
-        if !is_silent || !has_working {
-            return;
+        if is_silent && has_working {
+            self.request_open_orders(now);
         }
+    }
+
+    #[cold]
+    fn request_open_orders(&mut self, now: TsUs) {
         self.spins_since_exec_event = 0;
         for index in 0..self.instruments.len() {
-            self.request_open_orders(InstrumentId(index as u16), now);
-        }
-    }
-
-    #[cold]
-    fn request_order_reconcile(
-        &mut self,
-        instrument: InstrumentId,
-        client_id: ClientOrderId,
-        now: TsUs,
-    ) {
-        self.recon_seq += 1;
-        if !self.bank(ExecCommand::ReconcileOrder {
-            instrument,
-            client_id,
-            recon_seq: self.recon_seq,
-        }) {
-            self.halt(HaltReason::CommandBankOverflow, now);
-        }
-    }
-
-    #[cold]
-    fn request_open_orders(&mut self, instrument: InstrumentId, now: TsUs) {
-        self.recon_seq += 1;
-        if !self.bank(ExecCommand::ReconcileOpenOrders {
-            instrument,
-            recon_seq: self.recon_seq,
-        }) {
-            self.halt(HaltReason::CommandBankOverflow, now);
+            self.recon_seq += 1;
+            let command = ExecCommand::ReconcileOpenOrders {
+                instrument: InstrumentId(index as u16),
+                recon_seq: self.recon_seq,
+            };
+            self.bank_or_halt(command, now);
         }
     }
 
@@ -178,7 +163,7 @@ impl ExecEngine {
         // Nothing to decide while the venue owes this side an answer: a second command beside an
         // unanswered one is how a side ends up with two orders where it asked for one.
         if self.orders.is_awaiting_answer(instrument, side) {
-            return ladder.refusal.reason();
+            return ladder.refusal;
         }
         let Some((level, outcome)) = self.choose_action(instrument, side, &mut ladder, input)
         else {
@@ -187,9 +172,8 @@ impl ExecEngine {
         if matches!(outcome, ReconcileOutcome::Place(_))
             && let Some(reason) = self.place_refusal(instrument, side)
         {
-            self.counters.local_rejects += 1;
-            ladder.refusal.observe(reason);
-            return ladder.refusal.reason();
+            ladder.refusal.get_or_insert(reason);
+            return ladder.refusal;
         }
         self.act_on(instrument, side, level, outcome, input);
         ladder.resolve()
@@ -231,7 +215,7 @@ impl ExecEngine {
                 Ok(quote) => {
                     let snapped = side.snap_passive(quote.price, tick);
                     if snapped_prices[..level.index()].contains(&Some(snapped)) {
-                        ladder.refusal.observe(RejectReason::DuplicatePrice);
+                        ladder.refusal.get_or_insert(RejectReason::DuplicatePrice);
                         None
                     } else {
                         snapped_prices[level.index()] = Some(snapped);
@@ -244,7 +228,7 @@ impl ExecEngine {
                     if reason != RejectReason::NoQuoteDeclared
                         || self.orders.resting(instrument, side, level).is_some()
                     {
-                        ladder.refusal.observe(reason);
+                        ladder.refusal.get_or_insert(reason);
                     }
                     None
                 }
@@ -264,11 +248,8 @@ impl ExecEngine {
         ladder: &mut DesiredLadder,
         input: &SpinInput<'_>,
     ) -> Option<(QuoteLevel, ReconcileOutcome)> {
-        let (grid, base_asset, quote_asset) = {
-            let assets = &self.instruments[usize::from(instrument.0)];
-            (assets.grid, assets.base_asset, assets.quote_asset)
-        };
-        let funds = self.funds_view(side, base_asset, quote_asset);
+        let grid = self.instruments[usize::from(instrument.0)].grid;
+        let funds = self.funds_view(instrument, side);
         let top = self.book_top(instrument, input);
         let mut cancel = None;
         let mut amend = None;
@@ -292,8 +273,7 @@ impl ExecEngine {
                 ReconcileOutcome::AmendQty(_) if amend.is_none() => amend = Some((level, outcome)),
                 ReconcileOutcome::Place(_) if place.is_none() => place = Some((level, outcome)),
                 ReconcileOutcome::Reject(reason) => {
-                    self.counters.local_rejects += 1;
-                    ladder.refusal.observe(reason);
+                    ladder.refusal.get_or_insert(reason);
                 }
                 _ => {}
             }
@@ -301,15 +281,11 @@ impl ExecEngine {
         cancel.or(amend).or(place)
     }
 
-    pub(super) fn funds_view(
-        &self,
-        side: Side,
-        base_asset: AssetId,
-        quote_asset: AssetId,
-    ) -> FundsView {
-        let (asset, floor) = match side {
-            Side::Buy => (quote_asset, self.settings.min_quote_balance),
-            Side::Sell => (base_asset, self.settings.min_base_balance),
+    pub(super) fn funds_view(&self, instrument: InstrumentId, side: Side) -> FundsView {
+        let asset = self.instruments[usize::from(instrument.0)].spend_asset(side);
+        let floor = match side {
+            Side::Buy => self.settings.min_quote_balance,
+            Side::Sell => self.settings.min_base_balance,
         };
         FundsView {
             spendable: self.account.balance(asset).spendable(),
@@ -335,27 +311,13 @@ impl ExecEngine {
     }
 }
 
-/// The first reason a side had for not quoting. A later reason never displaces an earlier one: what
-/// an operator wants is the reason the ladder stopped, not whatever else was also true by then.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct FirstRefusal(Option<RejectReason>);
-
-impl FirstRefusal {
-    #[inline]
-    fn observe(&mut self, reason: RejectReason) {
-        self.0.get_or_insert(reason);
-    }
-
-    #[inline]
-    fn reason(self) -> Option<RejectReason> {
-        self.0
-    }
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct DesiredLadder {
     quotes: [Option<DesiredQuote>; MAX_QUOTE_LEVELS],
-    refusal: FirstRefusal,
+    /// The first reason the side had for not quoting, set with `get_or_insert` so a later reason
+    /// never displaces it: an operator wants the reason the ladder stopped, not whatever else was
+    /// also true by then.
+    refusal: Option<RejectReason>,
     has_admitted_quote: bool,
 }
 
@@ -365,13 +327,9 @@ impl DesiredLadder {
     /// every gate stayed silent.
     fn resolve(self) -> Option<RejectReason> {
         if !self.has_admitted_quote {
-            return self
-                .refusal
-                .reason()
-                .or(Some(RejectReason::NoQuoteDeclared));
+            return self.refusal.or(Some(RejectReason::NoQuoteDeclared));
         }
         self.refusal
-            .reason()
             .filter(|reason| *reason != RejectReason::NoQuoteDeclared)
     }
 }

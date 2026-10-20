@@ -21,11 +21,6 @@ impl HotEngine {
         self.metrics_sink.dropped()
     }
 
-    /// UI ring full = drop (never fatal).
-    pub fn dropped_ui_books(&self) -> u64 {
-        self.ui.dropped_books()
-    }
-
     /// Event ring full = drop (never fatal).
     pub fn dropped_ui_events(&self) -> u64 {
         self.ui.dropped_events()
@@ -124,7 +119,7 @@ impl HotEngine {
                 .intensity_counts_sum(IntensityCounts::inside_spread_count),
             intensity_without_book: self.intensity_counts_sum(IntensityCounts::without_book_count),
             snapshots_dropped: self.metrics_sink.dropped(),
-            orders_submitted: self.state.exec.counters().commands_banked,
+            orders_submitted: self.state.exec.commands_banked(),
             bank_drops: self.state.actions.dropped(),
             ui_books_dropped: self.ui.dropped_books(),
             ui_events_dropped: self.ui.dropped_events(),

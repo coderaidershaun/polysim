@@ -266,7 +266,6 @@ pub fn tracker_spec_all(halflife_events: u32) -> TrackerSpec {
         trades_buy: Some(WindowsSpec { windows: vec![8] }),
         trades_sell: Some(WindowsSpec { windows: vec![8] }),
         microprice: Some(WindowsSpec { windows: vec![8] }),
-        spread: Some(WindowsSpec { windows: vec![8] }),
         imbalance: Some(ImbalanceSpec {
             top_n: 3,
             windows: vec![8],

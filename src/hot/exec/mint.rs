@@ -9,12 +9,12 @@ use crate::msg::exec::ExecCommand;
 use crate::msg::persist::{OrderLifecycle, OrderTransition};
 use crate::time::TsUs;
 
-use super::audit::{OrderAudit, bank_order};
+use super::audit::bank_engine_driven;
+use super::desired::QuoteLevel;
 use super::engine::ExecEngine;
 use super::gates::HaltReason;
-use super::level::QuoteLevel;
 use super::order::{CloseReason, OrderClaim, OrderState};
-use super::reconcile::{PlaceIntent, ReconcileOutcome};
+use super::reconcile::{PlaceIntent, ReconcileOutcome, spend_of};
 use super::spin::SpinInput;
 
 impl ExecEngine {
@@ -28,23 +28,13 @@ impl ExecEngine {
     ) {
         let at = input.tick.received_ts_us;
         match outcome {
-            ReconcileOutcome::Nothing => {}
-            ReconcileOutcome::Reject(_) => {}
+            ReconcileOutcome::Nothing | ReconcileOutcome::Reject(_) => {}
             ReconcileOutcome::Place(intent) => {
                 self.place(instrument, side, level, intent, at, input.bank)
             }
             ReconcileOutcome::Cancel => {
-                let Some(index) = self.resting_index(instrument, side, level) else {
-                    return;
-                };
-                let client_id = self.orders.slot(index).client_id;
-                if self.bank(ExecCommand::Cancel {
-                    instrument,
-                    client_id,
-                }) {
-                    self.transition_sent(index, OrderState::CancelInFlight, at, input.bank);
-                } else {
-                    self.halt(HaltReason::CommandBankOverflow, at);
+                if let Some(index) = self.resting_index(instrument, side, level) {
+                    self.cancel_slot(index, at, input.bank);
                 }
             }
             ReconcileOutcome::AmendQty(qty) => {
@@ -52,14 +42,14 @@ impl ExecEngine {
                     return;
                 };
                 let client_id = self.orders.slot(index).client_id;
-                if self.bank(ExecCommand::AmendQty {
+                let command = ExecCommand::AmendQty {
                     instrument,
                     client_id,
                     qty,
-                }) {
-                    self.transition_sent(index, OrderState::AmendInFlight, at, input.bank);
-                } else {
-                    self.halt(HaltReason::CommandBankOverflow, at);
+                };
+                if self.bank_or_halt(command, at) {
+                    let next = OrderState::AmendInFlight;
+                    self.move_slot(index, next, OrderTransition::AmendSent, at, input.bank);
                 }
             }
         }
@@ -76,20 +66,34 @@ impl ExecEngine {
         self.orders.find(client_id)
     }
 
-    pub(super) fn transition_sent(
+    /// The slot moves to cancel-in-flight only once the cancel is banked: a slot waiting on an answer
+    /// is one the engine stops asking about, so a cancel that never left must leave it as it was.
+    pub(super) fn cancel_slot(&mut self, index: usize, at: TsUs, bank: &mut Actions) -> bool {
+        let slot = self.orders.slot(index);
+        let command = ExecCommand::Cancel {
+            instrument: slot.instrument,
+            client_id: slot.client_id,
+        };
+        let is_sent = self.bank_or_halt(command, at);
+        if is_sent {
+            let next = OrderState::CancelInFlight;
+            self.move_slot(index, next, OrderTransition::CancelSent, at, bank);
+        }
+        is_sent
+    }
+
+    pub(super) fn move_slot(
         &mut self,
         index: usize,
         next: OrderState,
+        transition: OrderTransition,
         at: TsUs,
         bank: &mut Actions,
     ) {
         let slot = self.orders.slot_mut(index);
         let previous = OrderLifecycle::from(slot.state);
         slot.state = next;
-        bank_order(
-            bank,
-            OrderAudit::engine_driven(slot, transition_for(next), previous, at),
-        );
+        bank_engine_driven(bank, slot, transition, previous, at);
     }
 
     /// Every placement the engine mints passes through here, so every one of them spends the venue
@@ -107,7 +111,7 @@ impl ExecEngine {
         let Some((index, client_id)) = self.claim(instrument, side, level, intent, at) else {
             return;
         };
-        let banked = self.bank(ExecCommand::Place {
+        let is_banked = self.pending.bank(ExecCommand::Place {
             instrument,
             client_id,
             side,
@@ -115,19 +119,17 @@ impl ExecEngine {
             qty: intent.qty,
             style: intent.style,
         });
-        if !banked {
+        if !is_banked {
             self.unwind(index, at, bank);
             return;
         }
         self.budget.record_place();
-        bank_order(
+        bank_engine_driven(
             bank,
-            OrderAudit::engine_driven(
-                self.orders.slot(index),
-                OrderTransition::Placed,
-                OrderLifecycle::Free,
-                at,
-            ),
+            self.orders.slot(index),
+            OrderTransition::Placed,
+            OrderLifecycle::Free,
+            at,
         );
     }
 
@@ -152,11 +154,8 @@ impl ExecEngine {
             self.halt(HaltReason::SlotLeak, at);
             return None;
         };
-        let assets = &self.instruments[usize::from(instrument.0)];
-        let (asset, amount) = match side {
-            Side::Buy => (assets.quote_asset, intent.price.notional(intent.qty)),
-            Side::Sell => (assets.base_asset, intent.qty.0),
-        };
+        let asset = self.instruments[usize::from(instrument.0)].spend_asset(side);
+        let amount = spend_of(side, intent.price, intent.qty);
         let reserved_at = self.account.reserve(asset, amount);
         let slot = self.orders.slot_mut(index);
         slot.reserved_amount = amount;
@@ -166,42 +165,24 @@ impl ExecEngine {
 
     #[cold]
     fn unwind(&mut self, index: usize, at: TsUs, bank: &mut Actions) {
-        let slot = self.orders.slot(index);
-        let assets = &self.instruments[usize::from(slot.instrument.0)];
-        let (base_asset, quote_asset) = (assets.base_asset, assets.quote_asset);
-        self.release_unsent_reservation(index, base_asset, quote_asset);
-        let slot = self.orders.slot_mut(index);
-        let previous = OrderLifecycle::from(slot.state);
-        slot.state = OrderState::Closed(CloseReason::Rejected);
-        slot.closed_ts_us = at;
-        bank_order(
-            bank,
-            OrderAudit::engine_driven(slot, OrderTransition::SendAbandoned, previous, at),
-        );
+        self.release_unsent_reservation(index);
+        self.orders.slot_mut(index).closed_ts_us = at;
+        let next = OrderState::Closed(CloseReason::Rejected);
+        self.move_slot(index, next, OrderTransition::SendAbandoned, at, bank);
         self.halt(HaltReason::CommandBankOverflow, at);
     }
 
     /// `false` means the bank refused the command and nothing was sent. The bank holds a whole
     /// spin's worth of work, so a refusal means the edge has stopped draining and the engine can no
-    /// longer act at all: every caller unwinds whatever it had already committed and halts. The one
-    /// exception is the sweep the halt itself issues, which has nothing left to escalate to and says
-    /// so out loud instead.
+    /// longer act at all, and it halts. Two paths bank directly instead: a placement, which must
+    /// unwind its claim before the halt, and the sweep the halt itself issues, which has nothing left
+    /// to escalate to and says so out loud.
     #[inline]
-    #[must_use]
-    pub(super) fn bank(&mut self, command: ExecCommand) -> bool {
-        let banked = self.pending.bank(command);
-        if banked {
-            self.counters.commands_banked += 1;
+    pub(super) fn bank_or_halt(&mut self, command: ExecCommand, at: TsUs) -> bool {
+        let is_banked = self.pending.bank(command);
+        if !is_banked {
+            self.halt(HaltReason::CommandBankOverflow, at);
         }
-        banked
-    }
-}
-
-#[inline]
-fn transition_for(state: OrderState) -> OrderTransition {
-    match state {
-        OrderState::CancelInFlight => OrderTransition::CancelSent,
-        OrderState::AmendInFlight => OrderTransition::AmendSent,
-        other => unreachable!("no command puts an order into {other:?}"),
+        is_banked
     }
 }

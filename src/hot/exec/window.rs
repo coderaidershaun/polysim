@@ -7,13 +7,10 @@
 use crate::hot::ledger::{PositionLedger, narrow};
 use crate::hot::strategy::Actions;
 use crate::ids::{InstrumentId, Qty, Side};
-use crate::msg::exec::ExecCommand;
 use crate::time::TsUs;
 use crate::warn;
 
 use super::engine::ExecEngine;
-use super::gates::HaltReason;
-use super::order::OrderState;
 use super::spin::SpinInput;
 
 impl ExecEngine {
@@ -88,15 +85,9 @@ impl ExecEngine {
                 if !self.orders.slot(index).is_resting_quote() {
                     continue;
                 }
-                let client_id = self.orders.slot(index).client_id;
-                if !self.bank(ExecCommand::Cancel {
-                    instrument,
-                    client_id,
-                }) {
-                    self.halt(HaltReason::CommandBankOverflow, at);
+                if !self.cancel_slot(index, at, bank) {
                     return pulled;
                 }
-                self.transition_sent(index, OrderState::CancelInFlight, at, bank);
                 pulled += 1;
             }
         }

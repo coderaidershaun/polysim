@@ -17,7 +17,8 @@
 use polysim::config::RecordedTables;
 use polysim::hot::dispatch::HotEngine;
 use polysim::hot::exec::{
-    DesiredQuote, ExecSettings, OrderSlot, OrderState, QuoteLevel, RejectReason,
+    DesiredQuote, ExecHalt, ExecSettings, HaltReason, MAX_ORDER_SLOTS, OrderSlot, OrderState,
+    QuoteLevel, RejectReason,
 };
 use polysim::hot::strategy::{Strategy, StrategyCtx, WindowInfo};
 use polysim::ids::{Price, Side};
@@ -250,6 +251,107 @@ fn a_sweep_pulls_resting_quotes_and_never_a_marketable_order() {
         }
         .is_resting_quote()
     );
+}
+
+/// One reconciliation request a spin, against a bank sized to the order table plus a few commands
+/// per instrument, behind a lane that takes two items a spin until it is full: twice the order table
+/// outlasts both.
+const JAM_SPINS: i64 = 2 * MAX_ORDER_SLOTS as i64;
+
+/// FITNESS: a full command bank halts the engine, and a cancel it refuses leaves the order `Live`.
+///
+/// The bank fills only when the edge has stopped draining, and the halt that follows is exactly when
+/// the reconciler and the closing window both try to pull every resting quote, so those cancels are
+/// refused too. A slot marked cancel-in-flight is one the engine waits on rather than retries, so a
+/// cancel that never left would leave the quote resting on the venue with nothing asking again.
+#[test]
+fn a_full_command_bank_halts_and_leaves_the_order_it_could_not_cancel_live() {
+    let built = built_quoting_engine(QuotingSetup {
+        row: row_with_ceiling(CEILING),
+        strategy: Box::new(TwoSidedQuoter),
+        restored: &[],
+        settings: ExecSettings {
+            quote_stop_margin: MARGIN,
+            // A reconciliation request every spin, into a lane this test never drains.
+            exec_silence_spins: 1,
+            ..exec_settings()
+        },
+        tables: RecordedTables::new(&ALL_TABLES),
+        run_nonce: 0,
+    });
+    let (mut engine, mut commands, mut ui_events) = (built.engine, built.commands, built.ui_events);
+    make_ready(&mut engine, OPEN);
+    engine.dispatch(
+        pop(0, 0),
+        &InboundMessage::MarketRotation(rotation(0, OPEN, CLOSE, OPEN)),
+    );
+    for message in reseat_book(BID, ASK, OPEN) {
+        engine.dispatch(pop(0, 0), &message);
+    }
+    spin_at(&mut engine, 1, OPEN + 1_000_000);
+    let placed = drain_commands(&mut commands);
+    assert_eq!(
+        places(&placed),
+        2,
+        "both sides must be resting before the lane jams: {placed:?}"
+    );
+    ack_placed(&mut engine, &placed, OPEN + 1_100_000);
+
+    let jammed_from = OPEN + 2_000_000;
+    let mut screen = (None, Vec::new());
+    for step in 0..JAM_SPINS {
+        spin_at(&mut engine, 2 + step as u64, jammed_from + step * 10_000);
+        screen = read_screen(&mut ui_events);
+        if screen.0.is_some_and(ExecHalt::is_halted) {
+            break;
+        }
+    }
+    let (halt, working) = screen;
+    assert!(
+        matches!(
+            halt,
+            Some(ExecHalt::Halted {
+                reason: HaltReason::CommandBankOverflow,
+                ..
+            })
+        ),
+        "{JAM_SPINS} spins into an undrained lane must halt on the full bank: {halt:?}"
+    );
+    assert_eq!(
+        working,
+        [OrderState::Live; 2],
+        "the halted reconciler tried to pull both quotes and the bank refused, so neither may read \
+         as cancel-in-flight"
+    );
+
+    spin_at(&mut engine, 2 + JAM_SPINS as u64, CLOSE - MARGIN.micros());
+    let (_, working) = read_screen(&mut ui_events);
+    assert_eq!(
+        working,
+        [OrderState::Live; 2],
+        "the closing window's cancels were refused too, so both quotes still read as resting"
+    );
+}
+
+/// What the workstation was told since the last read: the newest kill-switch frame, and the state of
+/// every working order the order snapshots listed.
+fn read_screen(ui_events: &mut Consumer<UiEvent>) -> (Option<ExecHalt>, Vec<OrderState>) {
+    let mut halt = None;
+    let mut working = Vec::new();
+    while let Ok(event) = ui_events.pop() {
+        match event {
+            UiEvent::Execution { halt: latest, .. } => halt = Some(latest),
+            UiEvent::OrderSnapshot {
+                detail_len, orders, ..
+            } => working.extend(
+                orders[..usize::from(detail_len)]
+                    .iter()
+                    .map(|order| order.state),
+            ),
+            _ => {}
+        }
+    }
+    (halt, working)
 }
 
 fn ack_placed(engine: &mut HotEngine, commands: &[ExecCommand], when: i64) {

@@ -2,7 +2,6 @@
 
 mod exposure;
 mod gate;
-mod link;
 mod market;
 mod setup;
 mod telemetry;
@@ -13,14 +12,12 @@ use gate::Warmup;
 use crate::config::RecordedTables;
 use crate::exposure::{ExposureSnapshot, MAX_EXPOSURE_INSTRUMENTS};
 use crate::hot::book::Book;
-use crate::hot::exec::{DesiredBook, ExecCallback, ExecEngine, OrderUpdate, QuoteLevel, SpinInput};
+use crate::hot::exec::{DesiredBook, ExecCallback, ExecEngine, QuoteLevel, SpinInput};
 use crate::hot::ingress::QueueSample;
 use crate::hot::ledger::PositionLedger;
 use crate::hot::metrics::{HotMetrics, message_meta};
 use crate::hot::quant::volatility::EwmaVol;
-use crate::hot::strategy::{
-    Actions, ActionsSetup, CtxParts, DrainSinks, Strategy, StrategyCtx, WindowInfo,
-};
+use crate::hot::strategy::{Actions, ActionsSetup, DrainSinks, Strategy, StrategyCtx, WindowInfo};
 use crate::hot::tracker::MicroTracker;
 use crate::hot::ui_emit::UiEmitter;
 use crate::ids::{InstrumentId, Price, Qty, Side};
@@ -73,9 +70,7 @@ impl HotState {
     }
 
     fn ctx(&mut self, event_ts: TsUs) -> StrategyCtx<'_> {
-        let spin_seq = self.spin_seq;
-        let declared_link_topics = self.declared_link_topics;
-        StrategyCtx::new(CtxParts {
+        StrategyCtx {
             books: &self.books,
             trackers: &self.trackers,
             ewma: &self.ewma,
@@ -85,9 +80,9 @@ impl HotState {
             desired: &mut self.desired,
             actions: &mut self.actions,
             event_ts,
-            spin_seq,
-            declared_link_topics,
-        })
+            spin_seq: self.spin_seq,
+            declared_link_topics: self.declared_link_topics,
+        }
     }
 }
 
@@ -258,17 +253,8 @@ impl HotEngine {
             ExecCallback::Fill(fill) => {
                 // Fill = two UI facts: tape delta + absolute state. State first (terminal>tape).
                 if let Some(order) = exec.order(fill.client_id) {
-                    self.ui.emit_order_update(&OrderUpdate {
-                        instrument: order.instrument,
-                        client_id: order.client_id,
-                        side: order.side,
-                        level: order.level,
-                        state: order.state,
-                        price: order.price,
-                        qty: order.qty,
-                        filled: order.filled,
-                        event_ts_us: fill.event_ts_us,
-                    });
+                    self.ui
+                        .emit_order_update(&order.updated_at(fill.event_ts_us));
                 }
                 self.ui.emit_fill(&fill);
             }
@@ -357,41 +343,26 @@ impl HotEngine {
                 }
             }
             let quote = DomQuote {
-                bids: std::array::from_fn(|level| {
-                    self.desired_level(
-                        instrument,
-                        Side::Buy,
-                        QuoteLevel::new(level as u8)
-                            .expect("UI quote capacity equals the execution ladder"),
-                        tick.seq,
-                    )
-                }),
-                asks: std::array::from_fn(|level| {
-                    self.desired_level(
-                        instrument,
-                        Side::Sell,
-                        QuoteLevel::new(level as u8)
-                            .expect("UI quote capacity equals the execution ladder"),
-                        tick.seq,
-                    )
-                }),
+                bids: self.desired_ladder(instrument, Side::Buy, tick.seq),
+                asks: self.desired_ladder(instrument, Side::Sell, tick.seq),
             };
             self.ui.emit_desired(instrument, quote, at);
         }
     }
 
     #[inline]
-    fn desired_level(
+    fn desired_ladder(
         &self,
         instrument: InstrumentId,
         side: Side,
-        level: QuoteLevel,
         spin_seq: u64,
-    ) -> Option<(Price, Qty)> {
-        self.state
-            .desired
-            .quote(instrument, side, level, spin_seq)
-            .map(|desired| (desired.price, desired.qty))
+    ) -> [Option<(Price, Qty)>; UI_QUOTE_LEVELS] {
+        QuoteLevel::ALL.map(|level| {
+            self.state
+                .desired
+                .quote(instrument, side, level, spin_seq)
+                .map(|desired| (desired.price, desired.qty))
+        })
     }
 }
 

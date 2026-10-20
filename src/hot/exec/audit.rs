@@ -1,33 +1,35 @@
 //! Slot transitions -> orders/fills rows. Banks all transitions incl. engine-driven (send/timeout/recon). Gate + drop counter via strategy bank.
 
 use crate::hot::strategy::Actions;
-use crate::ids::Qty;
 use crate::msg::exec::{ExecEvent, ExecKind, Provenance, RejectClass};
 use crate::msg::persist::{FillRow, OrderLifecycle, OrderRow, OrderTransition, PersistRecord};
 use crate::time::TsUs;
 
 use super::order::{FillDelta, OrderSlot};
 
-pub(super) struct OrderAudit<'a> {
-    pub(super) slot: &'a OrderSlot,
-    pub(super) transition: OrderTransition,
-    pub(super) previous_state: OrderLifecycle,
-    pub(super) provenance: Provenance,
-    pub(super) reject: Option<RejectClass>,
-    pub(super) reject_code: i32,
+struct OrderAudit<'a> {
+    slot: &'a OrderSlot,
+    transition: OrderTransition,
+    previous_state: OrderLifecycle,
+    provenance: Provenance,
+    reject: Option<RejectClass>,
+    reject_code: i32,
     /// 0 on engine-driven (venue never heard of it).
-    pub(super) exchange_ts_us: TsUs,
-    pub(super) received_ts_us: TsUs,
+    exchange_ts_us: TsUs,
+    received_ts_us: TsUs,
 }
 
-impl OrderAudit<'_> {
-    /// Engine-driven: no venue answer, no reject, no exchange clock.
-    pub(super) fn engine_driven(
-        slot: &OrderSlot,
-        transition: OrderTransition,
-        previous_state: OrderLifecycle,
-        at: TsUs,
-    ) -> OrderAudit<'_> {
+/// A transition the engine made on its own, so there is no venue answer, no reject and no exchange
+/// stamp.
+pub(super) fn bank_engine_driven(
+    bank: &mut Actions,
+    slot: &OrderSlot,
+    transition: OrderTransition,
+    previous_state: OrderLifecycle,
+    at: TsUs,
+) {
+    bank_order(
+        bank,
         OrderAudit {
             slot,
             transition,
@@ -37,12 +39,12 @@ impl OrderAudit<'_> {
             reject_code: 0,
             exchange_ts_us: TsUs::from_micros(0),
             received_ts_us: at,
-        }
-    }
+        },
+    );
 }
 
 /// Chain by client_id, start at Free (dropped HEAD visible; slot recoverable from id bits).
-pub(super) fn bank_order(bank: &mut Actions, audit: OrderAudit<'_>) {
+fn bank_order(bank: &mut Actions, audit: OrderAudit<'_>) {
     let slot = audit.slot;
     bank.push_persist(PersistRecord::Order(OrderRow {
         instrument: slot.instrument,
@@ -144,5 +146,5 @@ fn transition_of(kind: ExecKind) -> Option<OrderTransition> {
 /// State or fill moved (duplicates already absorbed).
 #[inline]
 fn is_worth_recording(previous_state: OrderLifecycle, slot: &OrderSlot, fill: FillDelta) -> bool {
-    OrderLifecycle::from(slot.state) != previous_state || fill.base != Qty(0)
+    OrderLifecycle::from(slot.state) != previous_state || !fill.is_empty()
 }

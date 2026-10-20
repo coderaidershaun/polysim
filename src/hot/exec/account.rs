@@ -2,23 +2,13 @@
 
 use crate::ids::AssetId;
 use crate::msg::exec::{AccountChunk, AccountChunkKind, AssetBalance};
-use crate::time::TsUs;
 
 const MAX_ASSETS: usize = 16;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct AccountRow {
     free: i64,
     locked: i64,
-    updated_ts_us: TsUs,
-}
-
-impl AccountRow {
-    const EMPTY: AccountRow = AccountRow {
-        free: 0,
-        locked: 0,
-        updated_ts_us: TsUs::from_micros(0),
-    };
 }
 
 /// The venue's own account-update clock in whole milliseconds — never a local read, so a replay
@@ -51,6 +41,7 @@ impl Balance {
     }
 }
 
+#[derive(Default)]
 pub struct AccountTable {
     rows: [AccountRow; MAX_ASSETS],
     reserved: [i64; MAX_ASSETS],
@@ -62,13 +53,7 @@ pub struct AccountTable {
 
 impl AccountTable {
     pub fn new() -> Self {
-        Self {
-            rows: [AccountRow::EMPTY; MAX_ASSETS],
-            reserved: [0; MAX_ASSETS],
-            is_known: [false; MAX_ASSETS],
-            watermark: AccountWatermark::default(),
-            has_snapshot: false,
-        }
+        Self::default()
     }
 
     /// Snapshot consumed (readiness gate component).
@@ -92,7 +77,7 @@ impl AccountTable {
     /// Last chunk arms readiness gate (no half-arming).
     pub fn apply(&mut self, chunk: &AccountChunk) {
         for balance in chunk.active_balances() {
-            self.apply_balance(*balance, chunk.received_ts_us);
+            self.apply_balance(*balance);
         }
         self.watermark = self
             .watermark
@@ -102,7 +87,7 @@ impl AccountTable {
         }
     }
 
-    fn apply_balance(&mut self, balance: AssetBalance, at: TsUs) {
+    fn apply_balance(&mut self, balance: AssetBalance) {
         // An asset no configured instrument names — dust, or a fee asset like BNB. Ignored rather
         // than misattributed to an asset we do trade.
         let Some(index) = Self::index_of(balance.asset) else {
@@ -111,7 +96,6 @@ impl AccountTable {
         self.rows[index] = AccountRow {
             free: balance.free,
             locked: balance.locked,
-            updated_ts_us: at,
         };
         self.is_known[index] = true;
     }
@@ -151,29 +135,26 @@ impl AccountTable {
         let Some(index) = Self::index_of(asset) else {
             return ReleaseOutcome::Released;
         };
-        // Double-release: silent absorb would fund unwanted order. Fail loud instead.
-        let remaining = self.reserved[index] - amount;
-        assert!(
-            remaining >= 0,
-            "released {amount} of asset {} against {} reserved — reservation freed twice",
-            asset.0,
-            self.reserved[index]
-        );
-        self.reserved[index] = remaining;
+        self.debit_reservation(index, amount, "released");
         ReleaseOutcome::Released
     }
 
     /// No account update needed (venue never saw this).
     #[inline]
     pub fn release_unsent(&mut self, asset: AssetId, amount: i64) {
-        let Some(index) = Self::index_of(asset) else {
-            return;
-        };
+        if let Some(index) = Self::index_of(asset) {
+            self.debit_reservation(index, amount, "released unsent");
+        }
+    }
+
+    /// A double release absorbed silently would fund an order nobody wanted, so it fails loud. The
+    /// row index is the asset id, so the message names the asset.
+    #[inline]
+    fn debit_reservation(&mut self, index: usize, amount: i64, released: &str) {
         let remaining = self.reserved[index] - amount;
         assert!(
             remaining >= 0,
-            "released unsent {amount} of asset {} against {} reserved",
-            asset.0,
+            "{released} {amount} of asset {index} against {} reserved — reservation freed twice",
             self.reserved[index]
         );
         self.reserved[index] = remaining;
@@ -183,12 +164,6 @@ impl AccountTable {
     #[inline]
     fn index_of(asset: AssetId) -> Option<usize> {
         (usize::from(asset.0) < MAX_ASSETS).then_some(usize::from(asset.0))
-    }
-}
-
-impl Default for AccountTable {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

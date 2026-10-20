@@ -12,16 +12,15 @@ use crate::time::{DurationUs, TsUs};
 use crate::{error, warn};
 
 use super::account::{AccountTable, Balance};
-use super::audit::{OrderAudit, bank_order};
+use super::audit::bank_engine_driven;
 use super::budget::{BudgetMeter, OrderBudget};
 use super::command::{ExecSink, PendingCommands};
+use super::desired::{MAX_QUOTE_LEVELS, QuoteLevel};
+use super::event::PriorRunOrders;
 use super::flatten::FeeModel;
-use super::gates::{ExecHalt, HaltReason, Readiness, RejectCounters};
-use super::level::{MAX_QUOTE_LEVELS, QuoteLevel};
+use super::gates::{ExecHalt, HaltReason, Readiness, RefusalLatch};
 use super::order::{OrderSlot, OrderTable, ReconcilePass};
-use super::prior_run::PriorRunOrders;
 use super::reconcile::{ExecLimits, RejectReason, RestingOrder, TickGrid};
-use super::refusal::RefusalLatch;
 use super::view::{ExecCallback, OrderReject, OrderView, WorkingOrderView};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -97,25 +96,15 @@ pub(super) struct InstrumentExec {
     pub(super) realised_carried_quote: i64,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct ExecCounters {
-    pub commands_banked: u64,
-    pub command_overflows: u64,
-    pub fills_applied: u64,
-    pub local_rejects: u64,
-    pub venue_rejects: u64,
-    pub routine_rejects: u64,
-    pub orphans_mine: u64,
-    // Counts prior-run events folded into the ledger and audit rather than treated as
-    // orphans. A visibility hint that this run restarted with inherited orders.
-    pub prior_run_events: u64,
-    // Counts prior-run execs that found no fold slot, which indicates money lost.
-    // Unreachable in steady state.
-    pub prior_run_overflows: u64,
-    pub orphans_foreign: u64,
-    pub resurrections: u64,
-    pub timeouts: u64,
-    pub swept_gone: u64,
+impl InstrumentExec {
+    /// The spot rule: a buy spends quote, and a sell reserves the base inventory it delivers.
+    #[inline]
+    pub(super) fn spend_asset(&self, side: Side) -> AssetId {
+        match side {
+            Side::Buy => self.quote_asset,
+            Side::Sell => self.base_asset,
+        }
+    }
 }
 
 pub struct ExecEngineSetup<'a> {
@@ -134,13 +123,12 @@ pub struct ExecEngine {
     pub(super) halt: ExecHalt,
     pub(super) readiness: Readiness,
     pub(super) refusals: RefusalLatch,
-    pub(super) rejects: RejectCounters,
+    pub(super) reject_streak: u32,
     pub(super) budget: BudgetMeter,
     pub(super) instruments: Vec<InstrumentExec>,
     pub(super) settings: ExecSettings,
     pub(super) spins_since_exec_event: u32,
     pub(super) recon_seq: u64,
-    pub(super) counters: ExecCounters,
     /// The PnL baseline at the first honest valuation; the session loss gate compares
     /// against this. `None` until that first mark.
     pub(super) pnl_at_baseline: Vec<Option<i64>>,
@@ -186,20 +174,20 @@ impl ExecEngine {
             sink: setup.sink,
             halt: ExecHalt::Armed,
             readiness: Readiness::default(),
-            refusals: RefusalLatch::new(),
-            rejects: RejectCounters::default(),
+            refusals: RefusalLatch::default(),
+            reject_streak: 0,
             budget: BudgetMeter::new(setup.settings.order_budget),
             instruments,
             settings: setup.settings,
             spins_since_exec_event: 0,
             recon_seq: 0,
-            counters: ExecCounters::default(),
             pnl_at_baseline: vec![None; setup.instruments.len()],
         }
     }
 
-    pub fn counters(&self) -> ExecCounters {
-        self.counters
+    #[inline]
+    pub(crate) fn commands_banked(&self) -> u64 {
+        self.pending.banked_total()
     }
 
     pub fn drain_refusals(&mut self, sink: &mut impl FnMut(&OrderReject)) {
@@ -289,10 +277,7 @@ impl ExecEngine {
             _ => {}
         }
         match event.provenance {
-            Provenance::Foreign => {
-                self.counters.orphans_foreign += 1;
-                return ExecCallback::None;
-            }
+            Provenance::Foreign => return ExecCallback::None,
             Provenance::PriorRun => {
                 self.cancel_prior_run(event);
                 self.apply_to_prior_run(event, ledger, bank);
@@ -320,7 +305,8 @@ impl ExecEngine {
     pub(super) fn cancel_all(&mut self, reason: CancelReason) {
         for index in 0..self.instruments.len() {
             let instrument = InstrumentId(index as u16);
-            if !self.bank(ExecCommand::CancelOurs { instrument, reason }) {
+            let command = ExecCommand::CancelOurs { instrument, reason };
+            if !self.pending.bank(command) {
                 unswept_error(instrument);
             }
         }
@@ -349,10 +335,8 @@ impl ExecEngine {
         // the next refusal is news again rather than a repeat the latch would swallow.
         self.refusals.forget();
         self.orders.invalidate_all(&mut |slot, previous| {
-            bank_order(
-                bank,
-                OrderAudit::engine_driven(slot, OrderTransition::StreamReset, previous.into(), at),
-            );
+            let transition = OrderTransition::StreamReset;
+            bank_engine_driven(bank, slot, transition, previous.into(), at);
         });
         ExecCallback::None
     }
@@ -364,21 +348,11 @@ impl ExecEngine {
             recon_seq: event.recon_seq,
             recon_ts_us: event.received_ts_us,
         };
-        let mut swept = 0u32;
         self.orders.sweep_unseen(pass, &mut |slot, previous| {
-            swept += 1;
             swept_warning(slot, pass.recon_seq);
-            bank_order(
-                bank,
-                OrderAudit::engine_driven(
-                    slot,
-                    OrderTransition::SweepClosed,
-                    previous.into(),
-                    pass.recon_ts_us,
-                ),
-            );
+            let transition = OrderTransition::SweepClosed;
+            bank_engine_driven(bank, slot, transition, previous.into(), pass.recon_ts_us);
         });
-        self.counters.swept_gone += u64::from(swept);
         self.readiness.observe_open_orders_snapshot();
         ExecCallback::None
     }
@@ -396,7 +370,6 @@ impl ExecEngine {
         }
         // Ours by tag and nonce, but no slot claims it: the reap window is too short, or the state
         // machine leaked. Either way it is a bug, and a silent one costs a fill.
-        self.counters.orphans_mine += 1;
         self.orphan_error(event);
         None
     }
@@ -415,15 +388,14 @@ impl ExecEngine {
     /// order still resting on the venue.
     #[cold]
     fn cancel_prior_run(&mut self, event: &ExecEvent) {
-        self.counters.prior_run_events += 1;
         let index = usize::from(event.instrument.0);
         if self.instruments[index].is_prior_run_cancel_sent {
             return;
         }
-        if !self.bank(ExecCommand::CancelPriorRun {
+        let command = ExecCommand::CancelPriorRun {
             instrument: event.instrument,
-        }) {
-            self.halt(HaltReason::CommandBankOverflow, event.received_ts_us);
+        };
+        if !self.bank_or_halt(command, event.received_ts_us) {
             return;
         }
         self.instruments[index].is_prior_run_cancel_sent = true;
@@ -446,8 +418,8 @@ fn unswept_error(instrument: InstrumentId) {
 }
 
 /// A reconciliation retiring a working order is the engine LOSING one, not routine housekeeping: the
-/// venue was asked what it holds and did not mention an order this table believed in. Until now the
-/// only trace was a counter, and a duplicate resting on the venue was the first anyone heard of it.
+/// venue was asked what it holds and did not mention an order this table believed in. It is logged
+/// as a warning because otherwise a duplicate resting on the venue is the first anyone hears of it.
 #[cold]
 fn swept_warning(slot: &OrderSlot, recon_seq: u64) {
     warn!(

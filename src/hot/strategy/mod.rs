@@ -39,7 +39,6 @@ pub use crate::registry::InstrumentRow;
 
 pub(crate) use actions::{Actions, ActionsSetup, DrainSinks};
 pub use actions::{ClientOrderId, LaneDrops};
-pub(crate) use ctx::CtxParts;
 
 /// Callbacks default no-ops; override only events of interest. State pre-applied; read via ctx, don't re-derive.
 pub trait Strategy: Send {
@@ -160,20 +159,20 @@ impl WindowInfo {
 /// Post-event state (immutable) + emission surface (mutable) per callback.
 /// Rows/orders/logs banked, drained after callback (nothing leaves hot thread mid-callback).
 pub struct StrategyCtx<'a> {
-    books: &'a [Book],
-    trackers: &'a [MicroTracker],
-    ewma: &'a [Option<EwmaVol>],
-    windows: &'a [Option<WindowInfo>],
-    ledger: &'a PositionLedger,
+    pub(crate) books: &'a [Book],
+    pub(crate) trackers: &'a [MicroTracker],
+    pub(crate) ewma: &'a [Option<EwmaVol>],
+    pub(crate) windows: &'a [Option<WindowInfo>],
+    pub(crate) ledger: &'a PositionLedger,
     /// Read-only: view orders, cannot transmit.
-    exec: &'a ExecEngine,
-    desired: &'a mut DesiredBook,
-    actions: &'a mut Actions,
-    event_ts: TsUs,
+    pub(crate) exec: &'a ExecEngine,
+    pub(crate) desired: &'a mut DesiredBook,
+    pub(crate) actions: &'a mut Actions,
+    pub(crate) event_ts: TsUs,
     /// Declaration's current spin (see quote).
-    spin_seq: u64,
+    pub(crate) spin_seq: u64,
     /// How many topics [`Strategy::link_topics`] declared — the range `link_send` accepts.
-    declared_link_topics: usize,
+    pub(crate) declared_link_topics: usize,
 }
 
 /// Which instruments a config filter selected, keyed by the dense ids the engine dispatches on.

@@ -10,7 +10,7 @@ use polysim::hot::quant::pricing::GueantParams;
 use polysim::hot::quant::toxicity::{
     ForwardHorizon, MarkoutSpec, MarkoutTracker, ReverseHorizon, SideMarkouts,
 };
-use polysim::hot::quant::volatility::{Egarch, EgarchEstimate, Returns, VolSeries};
+use polysim::hot::quant::volatility::{Egarch, EgarchEstimate, Returns};
 use polysim::hot::series::{FastQueue, MedianScratch};
 use polysim::hot::strategy::{InstrumentRow, StrategyCtx};
 use polysim::ids::{FIXED_SCALE, InstrumentId, Price, Qty, Side};
