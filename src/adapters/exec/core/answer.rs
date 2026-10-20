@@ -3,7 +3,7 @@
 //! all) triggers reconciliation, never a guess.
 
 use crate::ids::{ClientOrderId, InstrumentId, Qty};
-use crate::msg::exec::Provenance;
+use crate::msg::exec::{ExecCommand, ExecEvent, Provenance, RejectClass};
 use crate::warn;
 
 use super::super::effect::{ExecEffect, ExecRequest};
@@ -11,6 +11,61 @@ use super::super::mirror::MirroredOrder;
 use super::{ExecCore, ObserveOrderError};
 
 impl ExecCore {
+    /// # Errors
+    /// [`ObserveOrderError`] when the event reveals an order the mirror cannot retain. The rest of
+    /// the event is still applied, and the caller must stop the run.
+    pub fn on_event(
+        &mut self,
+        event: &ExecEvent,
+        emit: &mut dyn FnMut(ExecEffect),
+    ) -> Result<(), ObserveOrderError> {
+        if event.provenance == Provenance::Foreign {
+            return Ok(());
+        }
+        let observed = self.observe_if_unknown(event, emit);
+        // Apply fills before terminal state.
+        match (event.reject, event.status) {
+            // A missing cancel target may already be filled.
+            (Some(RejectClass::Ambiguous), _) => self.on_ambiguous(event.client_id, emit),
+            (Some(RejectClass::Gone | RejectClass::Refused), _) => {
+                self.on_order_gone(event.client_id, event.cumulative_qty, emit);
+            }
+            (_, Some(status)) if status.is_terminal() => {
+                self.on_order_gone(event.client_id, event.cumulative_qty, emit);
+            }
+            // The venue refused the request and the order still rests, so its cancel latch is
+            // cleared for the next attempt.
+            (Some(RejectClass::StillLive), _) => self.re_arm_cancel(event.client_id),
+            _ => {}
+        }
+        observed
+    }
+
+    fn observe_if_unknown(
+        &mut self,
+        event: &ExecEvent,
+        emit: &mut dyn FnMut(ExecEffect),
+    ) -> Result<(), ObserveOrderError> {
+        let is_possibly_live = event.status.is_some_and(|status| !status.is_terminal());
+        if !is_possibly_live || self.is_mirrored(event.client_id) {
+            return Ok(());
+        }
+        let mut order = MirroredOrder::observed(event);
+        if !self.has_opened_quoting {
+            order.provenance = Provenance::PriorRun;
+        }
+        self.observe_venue_order(order)?;
+        if order.provenance == Provenance::PriorRun {
+            self.on_command(
+                ExecCommand::CancelPriorRun {
+                    instrument: order.instrument,
+                },
+                emit,
+            );
+        }
+        Ok(())
+    }
+
     /// Cancels carry fills. Caller must answer "filled?" or ledger wrong -> sweep completion.
     pub fn on_order_gone(
         &mut self,

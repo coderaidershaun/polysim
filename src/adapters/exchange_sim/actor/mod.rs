@@ -13,6 +13,7 @@ use crate::adapters::exec::{EdgeHandle, EngineIdentity, ExecStop};
 use crate::hot::spawn::QueueProducer;
 use crate::link::RunState;
 use crate::msg::exec::{CancelReason, ExecLaneItem, StampedExecCommand};
+use crate::msg::inbound::InboundMessage;
 use crate::registry::AssetDictionary;
 use crate::shutdown::{FatalSignal, RunStateCell};
 use crate::time::{EngineClock, TsUs};
@@ -21,7 +22,7 @@ use crate::{info, warn};
 use super::bringup::SimActorSetup;
 use super::core::latency::{LatencyBudget, rewound, shifted};
 use super::core::market::ResetReason;
-use super::driver::{SimDriverContext, SimExecDriver};
+use super::driver::SimExecDriver;
 use super::lanes::{LaneBuffer, SimHorizon, SimLane};
 use super::readiness::{ReadinessProof, SimReadiness};
 use super::tap::MarketTapLane;
@@ -111,21 +112,13 @@ impl SimActor {
         }
     }
 
-    pub(super) fn venue_now(&self) -> Option<TsUs> {
-        self.applied_through_ts_us
-    }
-
-    pub(super) fn reopen(&mut self) {
-        self.has_opened = false;
-    }
-
     fn open_venue(&mut self) {
         if self.has_opened || self.is_parked || !self.horizon.has_all_watermarks() {
             return;
         }
         let effective_ts_us = self.horizon.safe_venue_horizon();
         self.has_opened = true;
-        self.driver.open(effective_ts_us, &self.fatal);
+        self.driver.open(effective_ts_us);
     }
 
     fn advance(&mut self) {
@@ -137,7 +130,7 @@ impl SimActor {
             if let Some(at_ts_us) = self.commands_due.peek_ts_us().filter(|at| *at <= horizon) {
                 self.advance_venue(rewound(at_ts_us, crate::time::DurationUs::RESOLUTION));
                 if let Some(command) = self.commands_due.next_due(horizon) {
-                    self.driver.on_command(command, at_ts_us, &self.fatal);
+                    self.driver.on_command(command, at_ts_us);
                 }
                 continue;
             }
@@ -155,30 +148,36 @@ impl SimActor {
         }
         self.applied_through_ts_us = Some(to_ts_us);
         let effect_ts_us = shifted(to_ts_us, [self.latency.ack, self.latency.order_entry]);
+        self.publish(to_ts_us, |driver, context| {
+            driver.advance_to(to_ts_us, effect_ts_us, context)
+        });
+        self.sync_market_recovery();
+    }
+
+    fn publish(
+        &mut self,
+        received_ts_us: TsUs,
+        step: impl FnOnce(&mut SimExecDriver, DecodeContext<'_>) -> Vec<InboundMessage>,
+    ) {
         let Self {
             driver,
             symbols,
             assets,
             identity,
-            fatal,
             producer,
             engine_clock,
             ..
         } = self;
-        let context = SimDriverContext {
-            decode: DecodeContext {
-                symbols,
-                assets,
-                identity: *identity,
-                received_ts_us: to_ts_us,
-            },
-            fatal,
+        let context = DecodeContext {
+            symbols,
+            assets,
+            identity: *identity,
+            received_ts_us,
         };
-        for mut message in driver.advance_to(to_ts_us, effect_ts_us, context) {
+        for mut message in step(driver, context) {
             message.set_queued_ts_us(engine_clock.now());
             producer.push(message);
         }
-        self.sync_market_recovery();
     }
 
     fn sync_market_recovery(&mut self) {
@@ -214,29 +213,9 @@ impl SimActor {
             self.driver.venue_mut().restore_matching(at_ts_us);
         }
         info!("simulated venue ready — depth bridged, snapshot complete, three lanes advancing");
-        let Self {
-            driver,
-            symbols,
-            assets,
-            identity,
-            fatal,
-            producer,
-            engine_clock,
-            ..
-        } = self;
-        let context = SimDriverContext {
-            decode: DecodeContext {
-                symbols,
-                assets,
-                identity: *identity,
-                received_ts_us: at_ts_us,
-            },
-            fatal,
-        };
-        for mut message in driver.announce_readiness(at_ts_us, context) {
-            message.set_queued_ts_us(engine_clock.now());
-            producer.push(message);
-        }
+        self.publish(at_ts_us, |driver, context| {
+            driver.announce_readiness(at_ts_us, context)
+        });
     }
 
     fn follow_run_state(&mut self) {
@@ -298,7 +277,7 @@ impl SimActor {
                 .commands_due
                 .next_due(TsUs::from_micros(i64::MAX))
                 .expect("the command just peeked remains in the lane");
-            self.driver.on_command(command, at_ts_us, &self.fatal);
+            self.driver.on_command(command, at_ts_us);
             drained += 1;
             final_ts_us = Some(at_ts_us);
         }
@@ -313,7 +292,7 @@ impl SimActor {
             let Some(at_ts_us) = self.applied_through_ts_us else {
                 return;
             };
-            self.driver.begin_sweep(reason, at_ts_us, &self.fatal);
+            self.driver.begin_sweep(reason, at_ts_us);
             let released = shifted(at_ts_us, [self.latency.order_entry, self.latency.ack]);
             self.advance_venue(released);
             if self.driver.is_swept() && self.driver.owes_nothing() {

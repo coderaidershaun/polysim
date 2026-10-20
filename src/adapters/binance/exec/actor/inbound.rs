@@ -6,34 +6,19 @@ use tokio_tungstenite::tungstenite::{Error as ProtocolError, Message};
 
 use crate::adapters::binance::ws;
 use crate::adapters::exec::{
-    ExecRequest, InFlightRequest, RequestId, SessionOutcome, TimeoutFallout,
+    EventSink, ExecRequest, InFlightRequest, RequestId, SessionOutcome, TimeoutFallout,
 };
 use crate::msg::exec::ExecEvent;
 use crate::{error, warn};
 
 use super::super::{
-    DecodeContext, DecodedResponse, IgnoredReason, ResponseContext, StreamEvent, decode_response,
+    DecodedResponse, IgnoredReason, ResponseContext, StreamEvent, decode_response,
     decode_stream_event,
 };
 use super::frame::InboundFrame;
 use super::{Actor, Writer, frame};
 
 const MAX_SUBSCRIBE_FAILURES: u32 = 3;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DecodeFailureAction {
-    ReconnectWithOrdersAmbiguous,
-    ReconnectStream,
-    AbandonRead,
-}
-
-fn decode_failure_action(request: ExecRequest) -> DecodeFailureAction {
-    match request.timeout_fallout() {
-        TimeoutFallout::OrderInDoubt { .. } => DecodeFailureAction::ReconnectWithOrdersAmbiguous,
-        TimeoutFallout::StreamUnusable => DecodeFailureAction::ReconnectStream,
-        TimeoutFallout::ReadAbandoned => DecodeFailureAction::AbandonRead,
-    }
-}
 
 impl Actor {
     pub(super) async fn on_frame(
@@ -84,29 +69,21 @@ impl Actor {
         text: &str,
         writer: &mut Writer,
     ) -> Option<SessionOutcome> {
-        let Some(entry) = self.inflight.take(request_id) else {
+        let Some(entry) = self.session.inflight.take(request_id) else {
             self.counts.unmatched_responses += 1;
             return None;
         };
         let now = self.control.clock.now();
-        let decoded = {
-            let context = ResponseContext {
-                decode: DecodeContext {
-                    symbols: &self.symbols,
-                    assets: &self.assets,
-                    identity: self.identity,
-                    received_ts_us: now,
-                },
-                request: entry.request,
-                recon_seq: entry.recon_seq,
-            };
-            decode_response(text, &context)
+        let context = ResponseContext {
+            decode: self.decode_context(now),
+            request: entry.request,
+            recon_seq: entry.recon_seq,
         };
-        match decoded {
+        match decode_response(text, &context) {
             Ok(decoded) => self.on_decoded(decoded, entry, writer).await,
             Err(error) if error.is_fatal() => {
                 error!("binance execution fatal decode: {error}");
-                self.mark_transport_ambiguous(entry.request);
+                self.session.mark_in_doubt(entry.request, now);
                 self.control
                     .fatal
                     .trip(format!("binance execution: {error}"));
@@ -117,13 +94,13 @@ impl Actor {
                 warn!(
                     "binance execution could not decode an answer: {error} — the request is ambiguous until reconnect reconciliation"
                 );
-                match decode_failure_action(entry.request) {
-                    DecodeFailureAction::ReconnectWithOrdersAmbiguous => {
-                        self.mark_transport_ambiguous(entry.request);
+                match entry.request.timeout_fallout() {
+                    TimeoutFallout::OrderInDoubt { .. } => {
+                        self.session.mark_in_doubt(entry.request, now);
                         Some(SessionOutcome::Reconnect)
                     }
-                    DecodeFailureAction::ReconnectStream => Some(SessionOutcome::Reconnect),
-                    DecodeFailureAction::AbandonRead => None,
+                    TimeoutFallout::StreamUnusable => Some(SessionOutcome::Reconnect),
+                    TimeoutFallout::ReadAbandoned => None,
                 }
             }
         }
@@ -145,20 +122,20 @@ impl Actor {
                 ..*event
             };
             self.note_event(&event);
-            self.fold_mirror(&event, entry.recon_seq, &mut outgoing);
+            self.session.fold(&event, entry.recon_seq, &mut outgoing);
             // An order-status probe, not a full snapshot, is what settles an ambiguous cancel here.
             if matches!(
                 entry.request,
                 ExecRequest::OrderStatus { client_id, .. } if client_id == event.client_id
             ) && event.status.is_some_and(|status| !status.is_terminal())
             {
-                self.core.re_arm_cancel(event.client_id);
+                self.session.core.re_arm_cancel(event.client_id);
             }
-            self.events.send_exec(event);
+            self.session.events.send_exec(event);
         }
-        let session = self.dispatch(outgoing, Some(writer)).await;
-        self.finish_readiness_if_clean();
-        session
+        let ended = self.dispatch(outgoing, Some(writer)).await;
+        self.session.arm_readiness(self.control.clock.now());
+        ended
     }
 
     fn on_subscribe_answer(&mut self, decoded: &DecodedResponse) -> Option<SessionOutcome> {
@@ -179,7 +156,7 @@ impl Actor {
         }
         self.subscribe_failures = 0;
         for event in &decoded.events {
-            self.events.send_exec(*event);
+            self.session.events.send_exec(*event);
         }
         self.start_resync();
         None
@@ -187,27 +164,18 @@ impl Actor {
 
     async fn on_stream_frame(&mut self, text: &str, writer: &mut Writer) -> Option<SessionOutcome> {
         let now = self.control.clock.now();
-        let decoded = {
-            let context = DecodeContext {
-                symbols: &self.symbols,
-                assets: &self.assets,
-                identity: self.identity,
-                received_ts_us: now,
-            };
-            decode_stream_event(text, &context)
-        };
-        match decoded {
+        match decode_stream_event(text, &self.decode_context(now)) {
             Ok(StreamEvent::Exec(event)) => {
                 let mut outgoing = Vec::new();
                 self.note_event(&event);
-                self.fold_mirror(&event, 0, &mut outgoing);
-                self.events.send_exec(event);
-                let session = self.dispatch(outgoing, Some(writer)).await;
-                self.finish_readiness_if_clean();
-                session
+                self.session.fold(&event, 0, &mut outgoing);
+                self.session.events.send_exec(event);
+                let ended = self.dispatch(outgoing, Some(writer)).await;
+                self.session.arm_readiness(self.control.clock.now());
+                ended
             }
             Ok(StreamEvent::Account(chunks)) => {
-                self.events.send_account(chunks);
+                self.session.events.send_account(chunks);
                 None
             }
             // A lost delta is resynced by taking a fresh snapshot.

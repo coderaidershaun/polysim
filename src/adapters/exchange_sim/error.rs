@@ -2,14 +2,6 @@
 
 use super::core::latency::LatencyBudgetError;
 use super::core::wallet::WalletError;
-use super::lanes::SimLane;
-
-#[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
-#[error("{lane} lane buffer reached capacity {capacity}")]
-pub struct LaneBufferFull {
-    pub lane: SimLane,
-    pub capacity: usize,
-}
 
 /// Why a run cannot stand a simulated venue up at all.
 #[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]

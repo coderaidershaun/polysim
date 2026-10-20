@@ -1,65 +1,48 @@
-//! Time-driven arms: the command ring, the exit latches, request expiry, the correlation buffer's
-//! TTL, the delayed-cancel release, the heartbeat, and the rotation bindings arriving from the
-//! market-data actor.
+//! Time-driven arms: the exit latches, request expiry, the correlation buffer's TTL, the
+//! delayed-cancel release, the heartbeat, and the rotation bindings arriving from the market-data
+//! actor.
 
-use crate::adapters::exec::{Outgoing, SessionOutcome, TimeoutFallout, request_timed_out};
+use std::sync::Arc;
+
+use crate::adapters::edge::EdgeDriver;
+use crate::adapters::exec::SessionOutcome;
 use crate::adapters::polymarket::rotation::WindowAssignment;
-use crate::ids::Side;
 use crate::msg::exec::CancelReason;
 use crate::time::TsUs;
 use crate::{info, warn};
 
 use super::super::binding::{BindingStep, EnrichmentRead, TokenOfInstrument};
-use super::super::codec::{cancel_market_orders, clob_market_request, heartbeat, neg_risk_request};
-use super::rest::{Auth, Lane, RestJob, RestPurpose};
+use super::super::codec::{
+    cancel_market_orders, clob_market_request, heartbeat, neg_risk_request, trades_page,
+};
+use super::rest::{Lane, RestJob, RestPurpose};
 use super::{Actor, CLOSE_MARGIN, Writer};
 
 impl Actor {
-    pub(super) async fn on_command_tick(&mut self, writer: &mut Writer) -> Option<SessionOutcome> {
-        let outgoing = self.core.drain_commands(&mut self.commands);
-        if outgoing.is_empty() {
-            return None;
-        }
-        self.dispatch(outgoing, Some(writer)).await
-    }
-
     pub(super) async fn on_housekeeping(&mut self, writer: &mut Writer) -> Option<SessionOutcome> {
-        if self.control.exit.is_none()
-            && let Some(reason) = self.control.wanted_exit()
-        {
+        if let Some(reason) = self.control.wanted_new_exit() {
             self.plan_exit(reason, Some(writer)).await;
         }
         let now = self.control.clock.now();
         self.clear_park(now);
         self.abandon_expired_frames();
-        if let Some(session) = self.release_withheld_cancels(Some(writer)).await {
-            return Some(session);
+        if let Some(ended) = self.release_withheld_cancels(Some(writer)).await {
+            return Some(ended);
         }
-        if let Some(session) = self.expire_requests(now, writer).await {
-            return Some(session);
+        if let Some(ended) = self.expire_requests(now, writer).await {
+            return Some(ended);
         }
-        if let Some(session) = self.poll_resync(now) {
-            return Some(session);
+        if let Some(ended) = self.poll_resync(now) {
+            return Some(ended);
         }
         self.send_heartbeat(now);
         self.retry_binding_reads(now);
-        if let Some(session) = self.sweep_expiring_windows(writer).await {
-            return Some(session);
+        if let Some(ended) = self.sweep_expiring_windows(writer).await {
+            return Some(ended);
         }
         self.retry_sweep(Some(writer)).await;
-        let exit = self.control.exit.as_ref()?;
-        if self.control.is_swept {
-            return Some(SessionOutcome::Swept);
-        }
-        if now > exit.deadline {
-            warn!(
-                "polymarket execution gave up waiting for its {:?} sweep — {} orders are still mirrored as resting",
-                exit.reason,
-                self.core.mirror().len()
-            );
-            return Some(SessionOutcome::Swept);
-        }
-        None
+        self.control
+            .finished_exit(now, self.venue(), self.session.core.mirror().len())
     }
 
     fn clear_park(&mut self, now: TsUs) {
@@ -78,62 +61,27 @@ impl Actor {
 
     /// Unanswered requests past deadline are reconciled, never retried (venue may have accepted).
     async fn expire_requests(&mut self, now: TsUs, writer: &mut Writer) -> Option<SessionOutcome> {
-        let expired = self.inflight.take_expired(now);
-        if expired.is_empty() {
-            return None;
-        }
-        let mut outgoing = Vec::new();
-        for entry in expired {
-            let TimeoutFallout::OrderInDoubt {
-                instrument,
-                client_id,
-            } = entry.request.timeout_fallout()
-            else {
-                warn!(
-                    "polymarket execution read went unanswered — waiting for the next pass rather than dropping the stream"
-                );
-                continue;
-            };
+        let expired = self.session.expire(now);
+        for _read in &expired.unanswered_reads {
             warn!(
-                "polymarket execution request for order {client_id:016x} went unanswered — reconciling, never retrying",
-                client_id = client_id.0
+                "polymarket execution read went unanswered — waiting for the next pass rather than dropping the stream"
             );
-            let side = self
-                .mirrored(client_id)
-                .map_or(Side::Buy, |order| order.side);
-            self.forward_exec(request_timed_out(instrument, client_id, side, now));
-            self.core
-                .on_request_timeout(instrument, client_id, &mut |effect| {
-                    outgoing.push(Outgoing {
-                        effect,
-                        recon_seq: entry.recon_seq,
-                    });
-                });
-            // Unanswered placement may rest under an id we never learned; resync adoption recovers it.
-            if matches!(
-                entry.request,
-                crate::adapters::exec::ExecRequest::Place { .. }
-            ) {
-                self.nudge_resync();
-            }
         }
-        self.dispatch(outgoing, Some(writer)).await
+        // An unanswered placement may rest under an id this run never learned; the resync adopts it.
+        if expired.has_lost_placement {
+            self.nudge_resync();
+        }
+        self.dispatch(expired.outgoing, Some(writer)).await
     }
 
     /// Reads fills to watch for settlement, paced within the venue's read budget.
     pub(super) fn on_reconcile_tick(&mut self) -> Option<SessionOutcome> {
+        let purpose = RestPurpose::Trades {
+            resync_seq: None,
+            page: 0,
+        };
         // A dropped poll costs one settlement look; the next tick is five seconds away.
-        let _dropped = self.submit(
-            Lane::Control,
-            RestJob {
-                purpose: RestPurpose::Trades {
-                    resync_seq: None,
-                    page: 0,
-                },
-                request: super::super::codec::trades_page(None),
-                auth: Auth::Signed,
-            },
-        );
+        let _dropped = self.submit(Lane::Control, RestJob::signed(purpose, trades_page(None)));
         None
     }
 
@@ -141,7 +89,7 @@ impl Actor {
     /// of silence.
     fn send_heartbeat(&mut self, now: TsUs) {
         if !self.heartbeat.is_started {
-            if !self.core.phase().admits_new_orders() {
+            if !self.session.core.phase().admits_new_orders() {
                 return;
             }
             self.heartbeat.is_started = true;
@@ -162,11 +110,7 @@ impl Actor {
         if self
             .submit(
                 Lane::Heartbeat,
-                RestJob {
-                    purpose: RestPurpose::Heartbeat,
-                    request,
-                    auth: Auth::Signed,
-                },
+                RestJob::signed(RestPurpose::Heartbeat, request),
             )
             .is_queued()
         {
@@ -182,7 +126,7 @@ impl Actor {
         if expiring.is_empty() {
             return None;
         }
-        let mut session = None;
+        let mut ended = None;
         for TokenOfInstrument {
             instrument,
             token_id,
@@ -191,6 +135,7 @@ impl Actor {
             // In the normal case, the hot engine has already withdrawn on its own margin;
             // this check avoids sweeping an instrument that has nothing left resting.
             let is_resting = self
+                .session
                 .core
                 .mirror()
                 .iter()
@@ -203,24 +148,18 @@ impl Actor {
                     "polymarket execution sweeping instrument {} — its window closes within {}ms and {} order(s) are still mirrored",
                     instrument.0,
                     CLOSE_MARGIN.micros() / 1_000,
-                    self.core.mirror().len()
+                    self.session.core.mirror().len()
                 );
                 // The per-order sweep below reaches the same orders, so a dropped bulk cancel costs
                 // the shortcut, not the sweep.
-                let _dropped = self.submit(
-                    Lane::Control,
-                    RestJob {
-                        purpose: RestPurpose::MarketCancel { instrument },
-                        request,
-                        auth: Auth::Signed,
-                    },
-                );
+                let purpose = RestPurpose::MarketCancel { instrument };
+                let _dropped = self.submit(Lane::Control, RestJob::signed(purpose, request));
             }
             // The mirror must also learn the orders are gone, so both sides are swept.
-            let outgoing = self.sweep_effects(CancelReason::Halt, Some(instrument));
-            session = session.or(self.dispatch(outgoing, Some(writer)).await);
+            let outgoing = self.session.sweep(CancelReason::Halt, Some(instrument));
+            ended = ended.or(self.dispatch(outgoing, Some(writer)).await);
         }
-        session
+        ended
     }
 
     /// A window assignment from the market-data actor; the binding completes only once its
@@ -243,34 +182,19 @@ impl Actor {
         else {
             return None;
         };
-        // A dropped enrichment read is re-issued by `retry_binding_reads` until the binding
-        // completes or gives up, so the drop costs one retry interval.
-        let _dropped = self.submit(
-            Lane::Control,
-            RestJob {
-                purpose: RestPurpose::Market {
-                    condition_id: std::sync::Arc::clone(&condition_id),
-                },
-                request: clob_market_request(&condition_id),
-                auth: Auth::Public,
-            },
-        );
+        self.submit_enrichment(EnrichmentRead::Market {
+            condition_id: Arc::clone(&condition_id),
+        });
         for TokenOfInstrument {
             instrument,
             token_id,
-        } in &tokens
+        } in tokens
         {
-            let _dropped = self.submit(
-                Lane::Control,
-                RestJob {
-                    purpose: RestPurpose::NegRisk {
-                        condition_id: std::sync::Arc::clone(&condition_id),
-                        instrument: *instrument,
-                    },
-                    request: neg_risk_request(token_id),
-                    auth: Auth::Public,
-                },
-            );
+            self.submit_enrichment(EnrichmentRead::NegRisk {
+                condition_id: Arc::clone(&condition_id),
+                instrument,
+                token_id,
+            });
         }
         None
     }
@@ -278,29 +202,30 @@ impl Actor {
     /// Retries the enrichment reads for bindings still waiting, recovering from transient failures.
     fn retry_binding_reads(&mut self, now: TsUs) {
         for read in self.bindings.due_enrichment_reads(now) {
-            let job = match read {
-                EnrichmentRead::Market { condition_id } => RestJob {
-                    purpose: RestPurpose::Market {
-                        condition_id: std::sync::Arc::clone(&condition_id),
-                    },
-                    request: clob_market_request(&condition_id),
-                    auth: Auth::Public,
-                },
-                EnrichmentRead::NegRisk {
+            self.submit_enrichment(read);
+        }
+    }
+
+    /// A dropped read is re-issued by the retry until the binding completes or gives up, so a drop
+    /// costs one retry interval.
+    fn submit_enrichment(&mut self, read: EnrichmentRead) {
+        let job = match read {
+            EnrichmentRead::Market { condition_id } => {
+                let request = clob_market_request(&condition_id);
+                RestJob::public(RestPurpose::Market { condition_id }, request)
+            }
+            EnrichmentRead::NegRisk {
+                condition_id,
+                instrument,
+                token_id,
+            } => {
+                let purpose = RestPurpose::NegRisk {
                     condition_id,
                     instrument,
-                    token_id,
-                } => RestJob {
-                    purpose: RestPurpose::NegRisk {
-                        condition_id,
-                        instrument,
-                    },
-                    request: neg_risk_request(&token_id),
-                    auth: Auth::Public,
-                },
-            };
-            // The same retry that issued this one issues it again next interval.
-            let _dropped = self.submit(Lane::Control, job);
-        }
+                };
+                RestJob::public(purpose, neg_risk_request(&token_id))
+            }
+        };
+        let _dropped = self.submit(Lane::Control, job);
     }
 }

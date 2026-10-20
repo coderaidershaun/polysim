@@ -7,14 +7,15 @@
 
 use tokio_tungstenite::tungstenite::{Error as ProtocolError, Message};
 
+use crate::adapters::edge::RECENT_TRADES;
 use crate::adapters::exec::{Outgoing, SessionOutcome};
 use crate::msg::exec::{ExecEvent, Liquidity};
 use crate::{error, warn};
 
 use super::super::codec::{
-    DecodeContext, IgnoredReason, StreamEvent, TradeLineage, TradeSettlement, decode_stream_frame,
+    IgnoredReason, StreamEvent, TradeLineage, TradeSettlement, decode_stream_frame,
 };
-use super::{Actor, RECENT_TRADES, Writer};
+use super::{Actor, Writer};
 
 impl Actor {
     pub(super) async fn on_frame(
@@ -45,9 +46,9 @@ impl Actor {
             self.pending.hold(text.to_owned(), self.control.clock.now());
             self.report_holding();
         }
-        let session = self.dispatch(outgoing, Some(writer)).await;
+        let ended = self.dispatch(outgoing, Some(writer)).await;
         self.finish_readiness_if_clean();
-        session
+        ended
     }
 
     /// Returns `true` if the frame names an unmapped order and should be held for later retry.
@@ -56,17 +57,7 @@ impl Actor {
         text: &str,
         outgoing: &mut Vec<Outgoing>,
     ) -> bool {
-        let now = self.control.clock.now();
-        let decoded = {
-            let context = DecodeContext {
-                tokens: &self.tokens,
-                orders: &self.orders,
-                api_key: self.signer.api_key(),
-                received_ts_us: now,
-            };
-            decode_stream_frame(text, &context)
-        };
-        match decoded {
+        match decode_stream_frame(text, &self.decode_context()) {
             Ok(StreamEvent::Order(event)) => {
                 self.on_stream_order(event, outgoing);
                 false
@@ -102,7 +93,7 @@ impl Actor {
             self.orders.forget(event.client_id);
             self.delayed.forget(event.client_id);
         }
-        self.fold_mirror(&event, 0, outgoing);
+        self.session.fold(&event, 0, outgoing);
         self.forward_exec(event);
     }
 
@@ -144,7 +135,7 @@ impl Actor {
             && lineage
                 .maker_fills
                 .iter()
-                .any(|fill| self.mirrored(fill.client_id).is_none());
+                .any(|fill| !self.session.core.is_mirrored(fill.client_id));
         if is_unmirrored_maker {
             warn!(
                 "polymarket execution saw a maker fill on an order it is not mirroring — re-reading orders and balances"
@@ -183,7 +174,7 @@ impl Actor {
             "polymarket execution trade {} on instrument {} settled FAILED after being folded — the ledger holds a fill that does not exist, halting the run ({} so far)",
             lineage.venue_trade_id, lineage.instrument.0, self.counts.settlement_failures
         );
-        self.core.stop_quoting();
+        self.session.core.stop_quoting();
         self.control.fatal.trip(format!(
             "polymarket execution settlement failed on trade {} — a folded fill did not settle on chain",
             lineage.venue_trade_id
@@ -196,8 +187,7 @@ impl Actor {
             return;
         }
         for frame in self.pending.drain() {
-            let text = frame.text.clone();
-            if self.consume_stream_frame(&text, outgoing) {
+            if self.consume_stream_frame(&frame.text, outgoing) {
                 self.pending.re_hold(frame);
             }
         }

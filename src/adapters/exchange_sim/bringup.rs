@@ -144,6 +144,7 @@ impl SimActorSetup {
                 }),
                 wire: VenueWire::new(identity),
                 instrument: instrument.instrument_id,
+                fatal: fatal.clone(),
             }),
             commands,
             trades: MarketTapLane::new(trades, SimLane::Trade),

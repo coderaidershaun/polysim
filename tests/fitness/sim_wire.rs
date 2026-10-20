@@ -20,13 +20,14 @@ const TRADE_ID: TradeId = TradeId(778_291);
 fn a_settlement_agreeing_with_the_order_mints_a_partial_fill_report() {
     let order = half_filled_order();
     let settlement = settlement_of(&order);
-    let report = wire().at(REPORTED_AT).trade_report(
+    let report = wire().trade_report(
         &order,
         SimFill {
             trade_id: TRADE_ID,
             settlement: &settlement,
             fee_asset: "",
         },
+        REPORTED_AT,
     );
 
     assert!(report.contains("PARTIALLY_FILLED"), "{report}");
@@ -43,13 +44,14 @@ fn a_settlement_disagreeing_with_the_order_stops_the_trade_report() {
     let mut settlement = settlement_of(&order);
     settlement.cumulative_qty = Qty(settlement.cumulative_qty.0 + 1);
 
-    wire().at(REPORTED_AT).trade_report(
+    wire().trade_report(
         &order,
         SimFill {
             trade_id: TRADE_ID,
             settlement: &settlement,
             fee_asset: "",
         },
+        REPORTED_AT,
     );
 }
 
@@ -170,13 +172,14 @@ fn a_rebate_is_paid_in_quote_and_a_charge_in_the_asset_received() {
             filled: settlement.cumulative_qty,
             filled_quote: settlement.cumulative_quote,
         };
-        let report = wire().at(REPORTED_AT).trade_report(
+        let report = wire().trade_report(
             &order,
             SimFill {
                 trade_id: TRADE_ID,
                 settlement: &settlement,
                 fee_asset,
             },
+            REPORTED_AT,
         );
         assert!(
             report.contains(&format!("\"n\":\"{}\"", row.wire_fee)),

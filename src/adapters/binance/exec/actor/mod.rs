@@ -19,36 +19,30 @@ use tokio::task::JoinHandle;
 
 use crate::adapters::binance::rest::BinanceEnv;
 use crate::adapters::binance::ws;
-use crate::adapters::edge::{EdgeControl, EdgeDriver, EventFunnel, OfflineStep, Reader, Writer};
+use crate::adapters::edge::{
+    COMMAND_POLL, EdgeControl, EdgeDriver, EdgeSettings, EventFunnel, HOUSEKEEPING, OfflineStep,
+    RECENT_TRADES, RECONCILE_INTERVAL, Reader, Writer,
+};
 use crate::adapters::exec::{
-    EngineIdentity, ExecCore, ExecStop, InFlightTable, Outgoing, REQUEST_TIMEOUT, ResyncPass,
-    SessionOutcome, stream_reset,
+    EngineIdentity, ExecCore, ExecSession, ExecStop, SessionOutcome, SessionSetup,
 };
 use crate::ids::{ClientOrderId, InstrumentId, TradeId, VenueOrderId};
 use crate::msg::exec::{CancelReason, ExecLaneItem};
 use crate::registry::AssetDictionary;
-use crate::time::DurationUs;
+use crate::time::{DurationUs, TsUs};
 use crate::{info, warn};
 
-use super::{RecvWindow, RequestSigner, SymbolTable};
+use super::{DecodeContext, RecvWindow, RequestSigner, SymbolTable};
 
 use handle::BinanceExecAdapterSetup;
 use rest::{RestChannels, RestJob, RestOutcome};
 
 // Reconnects before the venue's 24-hour connection limit is reached.
 const CONNECTION_LIFETIME: Duration = Duration::from_secs(23 * 60 * 60);
-// 1ms trades a little latency against waking on every rtrb push.
-const COMMAND_POLL: Duration = Duration::from_millis(1);
-// The cadence at which the drain deadline is checked.
-const HOUSEKEEPING: Duration = Duration::from_millis(20);
-// Five seconds is enough to catch recent fills without tripping the rate limits.
-const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 // Thirty minutes, expressed as a count of reconcile ticks so the resync check rides the
 // existing tick stream rather than reading a clock of its own.
 const CLOCK_RESYNC_TICKS: u32 = 360;
 const RECENT_ORDERS: usize = 128;
-// Sized to hold the fill history for the five-second reconcile window.
-const RECENT_TRADES: usize = 256;
 
 #[derive(Default)]
 struct DriverCounts {
@@ -78,40 +72,31 @@ struct TradeCursor {
 }
 
 struct Actor {
-    core: ExecCore,
+    session: ExecSession<EventFunnel>,
     symbols: SymbolTable,
     assets: AssetDictionary,
-    instruments: Vec<InstrumentId>,
     identity: EngineIdentity,
     env: BinanceEnv,
     control: EdgeControl,
     recv_window: RecvWindow,
     // Clock skew beyond the receive window makes the venue refuse every signed request.
     loud_clock_skew: DurationUs,
-    events: EventFunnel,
     commands: rtrb::Consumer<ExecLaneItem>,
     signer: RequestSigner,
     // Travels as a WebSocket parameter, so it must never be logged or included in debug output.
     api_key: String,
     clock_offset: super::ClockOffset,
-    inflight: InFlightTable,
     rest_jobs: mpsc::Sender<RestJob>,
     rest_outcomes: mpsc::Receiver<RestOutcome>,
     rest_join: JoinHandle<()>,
     cursors: Vec<TradeCursor>,
     recent_orders: Vec<RecentOrder>,
     recent_trades: Vec<TradeId>,
-    // Tracks resync progress; while it has not completed, every order is refused.
-    resync: ResyncPass,
     subscribe_failures: u32,
     is_rest_gone: bool,
     is_balance_snapshot_due: bool,
     reconcile_ticks: u32,
     counts: DriverCounts,
-    // True once resync has landed and any inherited orders may still be awaiting cancel.
-    is_readiness_pending: bool,
-    // Before first opening, all venue-held orders are inherited.
-    has_opened_quoting: bool,
 }
 
 impl Actor {
@@ -149,32 +134,34 @@ impl Actor {
                 total.checked_add(limit)
             })
             .unwrap_or(0);
+        let settings = EdgeSettings {
+            clock: context.clock,
+            fatal: context.fatal,
+            run_state: context.run_state,
+            backoff: context.backoff,
+            sweep_deadline: context.sweep_deadline,
+            disconnect_sweep_after: context.disconnect_sweep_after,
+            max_orders_per_side: context.max_orders_per_side,
+        };
         Self {
-            core: ExecCore::with_limits(context.max_orders_per_side, mirror_capacity),
+            session: ExecSession::new(SessionSetup {
+                venue: "binance",
+                core: ExecCore::with_limits(settings.max_orders_per_side, mirror_capacity),
+                instruments: instruments.iter().map(|row| row.instrument_id).collect(),
+                events: EventFunnel::new(producer, settings.clock.clone()),
+                fatal: settings.fatal.clone(),
+            }),
             symbols,
             assets,
-            instruments: instruments.iter().map(|row| row.instrument_id).collect(),
             identity: context.identity,
             env: context.env,
-            control: EdgeControl {
-                clock: context.clock.clone(),
-                fatal: context.fatal,
-                run_state: context.run_state,
-                stop,
-                backoff: context.backoff,
-                sweep_deadline: context.sweep_deadline,
-                disconnect_sweep_after: context.disconnect_sweep_after,
-                exit: None,
-                is_swept: false,
-            },
+            control: EdgeControl::new(&settings, stop),
             recv_window: context.recv_window,
             loud_clock_skew: context.loud_clock_skew,
-            events: EventFunnel::new(producer, context.clock),
             commands,
             signer,
             api_key,
             clock_offset,
-            inflight: InFlightTable::new(REQUEST_TIMEOUT),
             rest_jobs,
             rest_outcomes,
             rest_join,
@@ -188,39 +175,21 @@ impl Actor {
                 .collect(),
             recent_orders: Vec::with_capacity(RECENT_ORDERS),
             recent_trades: Vec::with_capacity(RECENT_TRADES),
-            resync: ResyncPass::default(),
             subscribe_failures: 0,
             is_rest_gone: false,
             is_balance_snapshot_due: false,
             reconcile_ticks: 0,
             counts: DriverCounts::default(),
-            is_readiness_pending: false,
-            has_opened_quoting: false,
         }
     }
 
-    fn on_connection_expiry(&mut self) -> Option<SessionOutcome> {
-        info!(
-            "binance execution reconnecting at {}h — the venue drops this connection at 24",
-            CONNECTION_LIFETIME.as_secs() / 3600
-        );
-        Some(SessionOutcome::Reconnect)
-    }
-
-    fn on_disconnected(&mut self) {
-        let outstanding = self.inflight.take_all();
-        if !outstanding.is_empty() {
-            warn!(
-                "binance execution lost the connection with {} requests unanswered — their orders are unresolved until the resync",
-                outstanding.len()
-            );
+    fn decode_context(&self, received_ts_us: TsUs) -> DecodeContext<'_> {
+        DecodeContext {
+            symbols: &self.symbols,
+            assets: &self.assets,
+            identity: self.identity,
+            received_ts_us,
         }
-        for entry in outstanding {
-            self.mark_transport_ambiguous(entry.request);
-        }
-        self.core.on_disconnected();
-        let now = self.control.clock.now();
-        self.events.send_exec(stream_reset(now));
     }
 
     #[must_use]
@@ -275,32 +244,35 @@ impl EdgeDriver for Actor {
         // The deadline is absolute so it cannot drift.
         let expiry = tokio::time::Instant::now() + CONNECTION_LIFETIME;
 
-        let mut outgoing = Vec::new();
-        self.core.on_connected(&mut |effect| {
-            outgoing.push(Outgoing {
-                effect,
-                recon_seq: 0,
-            });
-        });
-        if let Some(session) = self.dispatch(outgoing, Some(&mut writer)).await {
-            self.on_disconnected();
-            return session;
+        let outgoing = self.session.connect();
+        if let Some(ended) = self.dispatch(outgoing, Some(&mut writer)).await {
+            self.session.lose_connection(self.control.clock.now());
+            return ended;
         }
 
         loop {
-            let session = tokio::select! {
+            let ended = tokio::select! {
                 frame = reader.next() => self.on_frame(frame, &mut writer).await,
-                _ = command_ticker.tick() => self.on_command_tick(&mut writer).await,
+                _ = command_ticker.tick() => {
+                    let outgoing = self.session.core.drain_commands(&mut self.commands);
+                    self.dispatch(outgoing, Some(&mut writer)).await
+                }
                 _ = housekeeping.tick() => self.on_housekeeping(&mut writer).await,
                 _ = reconcile.tick() => self.on_reconcile_tick(),
                 outcome = self.rest_outcomes.recv(), if !self.is_rest_gone => {
                     self.on_rest_answer(outcome, &mut writer).await
                 }
-                _ = tokio::time::sleep_until(expiry) => self.on_connection_expiry(),
+                _ = tokio::time::sleep_until(expiry) => {
+                    info!(
+                        "binance execution reconnecting at {}h — the venue drops this connection at 24",
+                        CONNECTION_LIFETIME.as_secs() / 3600
+                    );
+                    Some(SessionOutcome::Reconnect)
+                }
             };
-            if let Some(session) = session {
-                self.on_disconnected();
-                return session;
+            if let Some(ended) = ended {
+                self.session.lose_connection(self.control.clock.now());
+                return ended;
             }
         }
     }
@@ -323,12 +295,23 @@ impl EdgeDriver for Actor {
         }
     }
 
-    async fn sweep_step(&mut self) {
-        self.retry_sweep(None).await;
+    // Retries are paced to avoid tripping the venue's IP ban, and the latch filters out
+    // cancels that already have a sweep request in flight.
+    async fn retry_sweep(&mut self, writer: Option<&mut Writer>) {
+        let Some(reason) = self.control.claim_sweep_retry() else {
+            return;
+        };
+        let outgoing = self.session.sweep(reason, None);
+        self.dispatch(outgoing, writer).await;
     }
 
-    async fn begin_exit(&mut self, reason: CancelReason) {
-        self.plan_exit(reason, None).await;
+    async fn plan_exit(&mut self, reason: CancelReason, writer: Option<&mut Writer>) {
+        if !self.control.open_exit(reason) {
+            return;
+        }
+        warn!("binance execution pulling every order this run owns: {reason:?}");
+        let outgoing = self.session.sweep(reason, None);
+        self.dispatch(outgoing, writer).await;
     }
 
     fn report_stop(&self) {
@@ -336,8 +319,8 @@ impl EdgeDriver for Actor {
             info!(
                 "binance execution stopping after a {:?} sweep — {} orders still mirrored, {} requests timed out",
                 exit.reason,
-                self.core.mirror().len(),
-                self.inflight.timed_out()
+                self.session.core.mirror().len(),
+                self.session.inflight.timed_out()
             );
         }
         // Every count the driver keeps is reported here. A drop policy nobody can read the outcome

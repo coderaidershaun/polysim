@@ -39,6 +39,7 @@ mod exec_order;
 mod exec_prior_run;
 mod exec_reconcile;
 mod exec_resync;
+mod exec_session;
 mod exec_sweep;
 mod exec_window;
 mod execution_lease;

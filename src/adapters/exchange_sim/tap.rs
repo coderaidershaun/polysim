@@ -26,14 +26,7 @@ impl MarketTapLane {
     /// The batch never escapes: leaving it with the caller is how the reusable buffer gets lost and
     /// every later drain allocates a fresh one.
     pub(super) fn drain(&mut self, visit: impl FnOnce(&[TappedMessage])) {
-        let mut batch = std::mem::take(&mut self.drained);
-        self.drain_into(&mut batch);
-        visit(&batch);
-        self.drained = batch;
-    }
-
-    fn drain_into(&mut self, drained: &mut Vec<TappedMessage>) {
-        drained.clear();
+        self.drained.clear();
         while let Ok(item) = self.consumer.pop() {
             let proof = match item {
                 MarketTapItem::Watermark { received_ts_us } => received_ts_us,
@@ -48,7 +41,7 @@ impl MarketTapLane {
                          its continuity evidence was lost",
                         self.lane
                     );
-                    drained.push(tapped);
+                    self.drained.push(tapped);
                     message.received_ts_us()
                 }
             };
@@ -61,6 +54,7 @@ impl MarketTapLane {
             );
             self.watermark_ts_us = proof;
         }
+        visit(&self.drained);
     }
 
     pub fn proven_watermark_ts_us(&self) -> Option<TsUs> {

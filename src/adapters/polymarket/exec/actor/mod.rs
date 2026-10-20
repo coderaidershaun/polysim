@@ -22,12 +22,10 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::adapters::edge::{
-    EdgeControl, EdgeDriver, EventFunnel, OfflineStep, Reader, Writer, run_edge,
+    COMMAND_POLL, EdgeControl, EdgeDriver, EdgeSettings, EventFunnel, HOUSEKEEPING, OfflineStep,
+    RECENT_TRADES, RECONCILE_INTERVAL, Reader, Writer, run_edge,
 };
-use crate::adapters::exec::{
-    ExecCore, ExecStop, InFlightTable, Outgoing, REQUEST_TIMEOUT, ResyncPass, SessionOutcome,
-    stream_reset,
-};
+use crate::adapters::exec::{ExecCore, ExecSession, ExecStop, SessionOutcome, SessionSetup};
 use crate::adapters::polymarket::rotation::WindowAssignment;
 use crate::ids::{AssetId, InstrumentId};
 use crate::msg::exec::{AssetBalance, CancelReason, ExecLaneItem};
@@ -49,25 +47,13 @@ pub(super) const USER_STREAM_URL: &str = "wss://ws-subscriptions-clob.polymarket
 
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 
-// 1ms trades a little latency against waking on every rtrb push, matching the Binance adapter.
-const COMMAND_POLL: Duration = Duration::from_millis(1);
-
-const HOUSEKEEPING: Duration = Duration::from_millis(20);
-
 // The venue cancels the book after 10s of silence, so a heartbeat goes out every 5s — this
 // is the published cadence, not slack.
 const HEARTBEAT_PERIOD: DurationUs = DurationUs::from_micros(5_000_000);
 
-// Reads trades to watch for settlement, paced well within the venue's 500-requests-per-10s budget.
-const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
-
 // A backstop that cancels any remaining orders as the assignment window closes. The hot
 // engine already withdraws quotes on its own margin before that.
 const CLOSE_MARGIN: DurationUs = DurationUs::from_micros(3_000_000);
-
-// Sized as a deduplication window, since each trade arrives once per settlement step; this
-// keeps a MINED settlement from being read twice.
-const RECENT_TRADES: usize = 256;
 
 // Sized to hold hot-engine orders plus any prior-run or adopted orders discovered during resync.
 const ORDER_INDEX_CAPACITY: usize = 256;
@@ -119,7 +105,7 @@ impl Heartbeat {
 }
 
 struct Actor {
-    core: ExecCore,
+    session: ExecSession<EventFunnel>,
     tokens: TokenTable,
     orders: OrderIndex,
     bindings: Bindings,
@@ -129,9 +115,7 @@ struct Actor {
     // The user stream uses this credential; no other channel does.
     credentials: ApiCredentials,
     control: EdgeControl,
-    events: EventFunnel,
     commands: rtrb::Consumer<ExecLaneItem>,
-    inflight: InFlightTable,
     lanes: RestLanes,
     outcomes: mpsc::Receiver<RestOutcome>,
     assignments: mpsc::Receiver<WindowAssignment>,
@@ -139,7 +123,6 @@ struct Actor {
     delayed: DelayedOrders,
     heartbeat: Heartbeat,
     parked: Option<Parked>,
-    resync: ResyncPass,
     /// Balances arrive one asset per call; the sweep is assembled here so only the last chunk arms
     /// the readiness gate.
     balances: Vec<AssetBalance>,
@@ -156,8 +139,6 @@ struct Actor {
     /// so settlement is the only evidence the money behind a reservation has actually moved.
     settled_through: SettlementWatermark,
     counts: DriverCounts,
-    is_readiness_pending: bool,
-    has_opened_quoting: bool,
     is_subscribed: bool,
 }
 
@@ -200,8 +181,23 @@ impl Actor {
             .iter()
             .filter_map(|row| usize::try_from(row.max_num_orders?).ok())
             .sum();
+        let settings = EdgeSettings {
+            clock: context.clock,
+            fatal: context.fatal,
+            run_state: context.run_state,
+            backoff: context.backoff,
+            sweep_deadline: context.sweep_deadline,
+            disconnect_sweep_after: context.disconnect_sweep_after,
+            max_orders_per_side: context.max_orders_per_side,
+        };
         Self {
-            core: ExecCore::with_limits(context.max_orders_per_side, mirror_capacity),
+            session: ExecSession::new(SessionSetup {
+                venue: "polymarket",
+                core: ExecCore::with_limits(settings.max_orders_per_side, mirror_capacity),
+                instruments: instruments.iter().map(|row| row.instrument_id).collect(),
+                events: EventFunnel::new(producer, settings.clock.clone()),
+                fatal: settings.fatal.clone(),
+            }),
             tokens: TokenTable::with_retired_capacity(RETIRED_BINDINGS),
             orders: OrderIndex::with_capacity(ORDER_INDEX_CAPACITY),
             bindings: Bindings::default(),
@@ -209,20 +205,8 @@ impl Actor {
             signature_type: wallet.signature_type,
             signer,
             credentials,
-            control: EdgeControl {
-                clock: context.clock.clone(),
-                fatal: context.fatal,
-                run_state: context.run_state,
-                stop,
-                backoff: context.backoff,
-                sweep_deadline: context.sweep_deadline,
-                disconnect_sweep_after: context.disconnect_sweep_after,
-                exit: None,
-                is_swept: false,
-            },
-            events: EventFunnel::new(producer, context.clock),
+            control: EdgeControl::new(&settings, stop),
             commands,
-            inflight: InFlightTable::new(REQUEST_TIMEOUT),
             lanes,
             outcomes,
             assignments,
@@ -230,7 +214,6 @@ impl Actor {
             delayed: DelayedOrders::default(),
             heartbeat: Heartbeat::new(),
             parked: None,
-            resync: ResyncPass::default(),
             balances: Vec::new(),
             balances_outstanding: 0,
             is_balance_sweep_readable: true,
@@ -239,17 +222,8 @@ impl Actor {
             seen_trades: Vec::with_capacity(RECENT_TRADES),
             settled_through: SettlementWatermark::NONE,
             counts: DriverCounts::default(),
-            is_readiness_pending: false,
-            has_opened_quoting: false,
             is_subscribed: false,
         }
-    }
-
-    fn instrument_ids(&self) -> Vec<InstrumentId> {
-        self.instruments
-            .iter()
-            .map(|row| row.instrument_id)
-            .collect()
     }
 
     fn base_asset(&self, instrument: InstrumentId) -> AssetId {
@@ -283,16 +257,6 @@ impl Actor {
     }
 
     fn on_disconnected(&mut self) {
-        let outstanding = self.inflight.take_all();
-        if !outstanding.is_empty() {
-            warn!(
-                "polymarket execution lost the stream with {} requests unanswered — their orders are unresolved until the resync",
-                outstanding.len()
-            );
-        }
-        for entry in outstanding {
-            self.mark_transport_ambiguous(entry.request);
-        }
         self.is_subscribed = false;
         // Held frames would be explained against a stale index; resync rebuilds it.
         let held = self.pending.drain().len();
@@ -301,9 +265,7 @@ impl Actor {
                 "polymarket execution dropped {held} stream frames held for correlation — the resync is the record now"
             );
         }
-        self.core.on_disconnected();
-        let now = self.control.clock.now();
-        self.forward_exec(stream_reset(now));
+        self.session.lose_connection(self.control.clock.now());
     }
 }
 
@@ -327,31 +289,28 @@ impl EdgeDriver for Actor {
         let mut ping = tokio::time::interval(PING_INTERVAL);
 
         self.is_subscribed = false;
-        let mut outgoing = Vec::new();
-        self.core.on_connected(&mut |effect| {
-            outgoing.push(Outgoing {
-                effect,
-                recon_seq: 0,
-            });
-        });
-        if let Some(session) = self.dispatch(outgoing, Some(&mut writer)).await {
+        let outgoing = self.session.connect();
+        if let Some(ended) = self.dispatch(outgoing, Some(&mut writer)).await {
             self.on_disconnected();
-            return session;
+            return ended;
         }
 
         loop {
-            let session = tokio::select! {
+            let ended = tokio::select! {
                 frame = reader.next() => self.on_frame(frame, &mut writer).await,
-                _ = command_ticker.tick() => self.on_command_tick(&mut writer).await,
+                _ = command_ticker.tick() => {
+                    let outgoing = self.session.core.drain_commands(&mut self.commands);
+                    self.dispatch(outgoing, Some(&mut writer)).await
+                }
                 _ = housekeeping.tick() => self.on_housekeeping(&mut writer).await,
                 _ = reconcile.tick() => self.on_reconcile_tick(),
                 _ = ping.tick() => self.send_ping(&mut writer).await,
                 assignment = self.assignments.recv() => self.on_assignment(assignment),
                 outcome = self.outcomes.recv() => self.on_rest_answer(outcome, &mut writer).await,
             };
-            if let Some(session) = session {
+            if let Some(ended) = ended {
                 self.on_disconnected();
-                return session;
+                return ended;
             }
         }
     }
@@ -367,12 +326,23 @@ impl EdgeDriver for Actor {
         }
     }
 
-    async fn sweep_step(&mut self) {
-        self.retry_sweep(None).await;
+    // Retries are paced to conserve the cancel budget, and the core tracks one outstanding
+    // retry per order.
+    async fn retry_sweep(&mut self, writer: Option<&mut Writer>) {
+        let Some(reason) = self.control.claim_sweep_retry() else {
+            return;
+        };
+        let outgoing = self.session.sweep(reason, None);
+        self.dispatch(outgoing, writer).await;
     }
 
-    async fn begin_exit(&mut self, reason: CancelReason) {
-        self.plan_exit(reason, None).await;
+    async fn plan_exit(&mut self, reason: CancelReason, writer: Option<&mut Writer>) {
+        if !self.control.open_exit(reason) {
+            return;
+        }
+        warn!("polymarket execution pulling every order this run owns: {reason:?}");
+        let outgoing = self.session.sweep(reason, None);
+        self.dispatch(outgoing, writer).await;
     }
 
     fn report_stop(&self) {
@@ -380,8 +350,8 @@ impl EdgeDriver for Actor {
             info!(
                 "polymarket execution stopping after a {:?} sweep — {} orders still mirrored, {} requests timed out, {} frames abandoned unmapped",
                 exit.reason,
-                self.core.mirror().len(),
-                self.inflight.timed_out(),
+                self.session.core.mirror().len(),
+                self.session.inflight.timed_out(),
                 self.pending.abandoned()
             );
         }
@@ -425,7 +395,7 @@ impl PolymarketExecActor {
         stop: ExecStop,
         runtime: &Handle,
     ) -> tokio::task::JoinHandle<()> {
-        let actor = Actor::new(setup, stop.clone(), runtime);
+        let actor = Actor::new(setup, stop, runtime);
         runtime.spawn(crate::log::tag_task("polymarket-exec", run_edge(actor)))
     }
 }

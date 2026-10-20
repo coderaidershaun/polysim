@@ -47,6 +47,23 @@ pub(crate) struct EdgeHandle {
 }
 
 impl EdgeHandle {
+    /// For a live venue only: the cost it reports for a missed sweep is orders left resting there.
+    pub(crate) fn spawn(
+        venue: &'static str,
+        sweep_deadline: Duration,
+        start: impl FnOnce(ExecStop) -> JoinHandle<()>,
+    ) -> Self {
+        let stop = ExecStop::new();
+        let join = start(stop.clone());
+        Self {
+            join,
+            stop,
+            sweep_deadline,
+            venue,
+            missed_sweep_cost: "orders may still rest on the venue",
+        }
+    }
+
     pub(crate) async fn shutdown(self) {
         self.stop.requested.store(true, Ordering::Release);
         let settled = self.stop.settled.notified();
@@ -68,9 +85,6 @@ impl EdgeHandle {
 pub(crate) struct ExitPlan {
     pub(crate) reason: CancelReason,
     pub(crate) deadline: TsUs,
-    // Terminal exits (Shutdown or Fatal) set this true; a temporary Park that may still
-    // reconnect leaves it false.
-    pub(crate) is_final: bool,
     retry_at: TsUs,
 }
 
@@ -79,9 +93,12 @@ impl ExitPlan {
         Self {
             reason,
             deadline: now + DurationUs::from_micros(sweep_deadline.as_micros() as i64),
-            is_final: reason.is_terminal(),
             retry_at: now + SWEEP_RETRY,
         }
+    }
+
+    pub(crate) fn is_final(&self) -> bool {
+        self.reason.is_terminal()
     }
 
     /// Returns the reason to sweep once the retry interval allows. Pacing prevents wasting the venue's cancel budget.

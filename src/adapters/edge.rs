@@ -18,7 +18,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::adapters::IDLE_POLL;
 use crate::adapters::backoff::BackoffCaps;
-use crate::adapters::exec::{ExecStop, ExitPlan, SessionOutcome};
+use crate::adapters::exec::{EventSink, ExecStop, ExitPlan, SessionOutcome};
 use crate::adapters::socket::{Socket, connect};
 use crate::hot::spawn::QueueProducer;
 use crate::link::RunState;
@@ -30,6 +30,26 @@ use crate::{info, warn};
 
 pub(crate) type Writer = SplitSink<Socket, Message>;
 pub(crate) type Reader = SplitStream<Socket>;
+
+// Polling the command ring every millisecond costs a little latency but avoids waking on every push.
+pub(crate) const COMMAND_POLL: Duration = Duration::from_millis(1);
+// Checks the exit latches and deadlines often enough that a stop is acted on within milliseconds.
+pub(crate) const HOUSEKEEPING: Duration = Duration::from_millis(20);
+// Often enough to catch a missed fill quickly, slow enough to stay well inside venue rate limits.
+pub(crate) const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+// Enough trade ids to cover one reconcile interval, so a fill read twice is recognised as seen.
+pub(crate) const RECENT_TRADES: usize = 256;
+
+/// The settings every live venue's edge is built from.
+pub(crate) struct EdgeSettings {
+    pub(crate) clock: EngineClock,
+    pub(crate) fatal: FatalSignal,
+    pub(crate) run_state: RunStateCell,
+    pub(crate) backoff: BackoffCaps,
+    pub(crate) sweep_deadline: Duration,
+    pub(crate) disconnect_sweep_after: DurationUs,
+    pub(crate) max_orders_per_side: usize,
+}
 
 /// What every venue edge runs under: the latches that can end the run, the clock its deadlines are
 /// measured against, the pacing an operator configured, and the exit currently under way.
@@ -46,10 +66,24 @@ pub(crate) struct EdgeControl {
 }
 
 impl EdgeControl {
+    pub(crate) fn new(settings: &EdgeSettings, stop: ExecStop) -> Self {
+        Self {
+            clock: settings.clock.clone(),
+            fatal: settings.fatal.clone(),
+            run_state: settings.run_state.clone(),
+            stop,
+            backoff: settings.backoff,
+            sweep_deadline: settings.sweep_deadline,
+            disconnect_sweep_after: settings.disconnect_sweep_after,
+            exit: None,
+            is_swept: false,
+        }
+    }
+
     /// A terminal exit was planned and its sweep finished, so there is nothing left to reconnect
     /// for.
     pub(crate) fn is_finished(&self) -> bool {
-        self.exit.as_ref().is_some_and(|exit| exit.is_final) && self.is_swept
+        self.exit.as_ref().is_some_and(ExitPlan::is_final) && self.is_swept
     }
 
     /// The highest-precedence exit reason: Shutdown > Fatal > Park. Each level terminates more than
@@ -62,6 +96,36 @@ impl EdgeControl {
             return Some(CancelReason::Fatal);
         }
         (self.run_state.state() == RunState::Idle).then_some(CancelReason::Park)
+    }
+
+    /// The exit a latch asks for, while none is under way yet.
+    pub(crate) fn wanted_new_exit(&self) -> Option<CancelReason> {
+        if self.exit.is_some() {
+            return None;
+        }
+        self.wanted_exit()
+    }
+
+    /// Ends the session once the exit's sweep has finished, or once its deadline has passed with
+    /// orders still mirrored as resting.
+    pub(crate) fn finished_exit(
+        &self,
+        now: TsUs,
+        venue: &str,
+        mirrored: usize,
+    ) -> Option<SessionOutcome> {
+        let exit = self.exit.as_ref()?;
+        if self.is_swept {
+            return Some(SessionOutcome::Swept);
+        }
+        if now > exit.deadline {
+            warn!(
+                "{venue} execution gave up waiting for its {:?} sweep — {mirrored} orders are still mirrored as resting",
+                exit.reason
+            );
+            return Some(SessionOutcome::Swept);
+        }
+        None
     }
 
     /// Opens the exit unless one is already under way, answering whether this call is the one that
@@ -103,10 +167,6 @@ impl EventFunnel {
         Self { producer, clock }
     }
 
-    pub(crate) fn send_exec(&mut self, event: ExecEvent) {
-        self.send(InboundMessage::Exec(event));
-    }
-
     pub(crate) fn send_account(&mut self, chunks: Vec<AccountChunk>) {
         for chunk in chunks {
             self.send(InboundMessage::Account(chunk));
@@ -116,6 +176,12 @@ impl EventFunnel {
     pub(crate) fn send(&mut self, mut message: InboundMessage) {
         message.set_queued_ts_us(self.clock.now());
         self.producer.push(message);
+    }
+}
+
+impl EventSink for EventFunnel {
+    fn send_exec(&mut self, event: ExecEvent) {
+        self.send(InboundMessage::Exec(event));
     }
 }
 
@@ -147,15 +213,17 @@ pub(crate) trait EdgeDriver {
     async fn serve(&mut self, writer: Writer, reader: Reader) -> SessionOutcome;
 
     /// One servicing step with the socket down: wait for an answer until `deadline` and fold it in.
-    /// Folding only — the sweep that answer may unblock is [`EdgeDriver::sweep_step`]'s, and doing
+    /// Folding only — the sweep that answer may unblock is [`EdgeDriver::retry_sweep`]'s, and doing
     /// it here as well would spend two cancel attempts where the pacing allows one.
     async fn while_offline(&mut self, deadline: tokio::time::Instant) -> OfflineStep;
 
-    /// One paced cancel attempt with no socket to send it over.
-    async fn sweep_step(&mut self);
+    /// One paced cancel attempt. The chassis passes no writer, because it calls this with the
+    /// socket down.
+    async fn retry_sweep(&mut self, writer: Option<&mut Writer>);
 
-    /// Open the exit and send its first sweep, with no socket to send it over.
-    async fn begin_exit(&mut self, reason: CancelReason);
+    /// Open the exit and send its first sweep, unless an exit is already under way. The chassis
+    /// passes no writer, because it calls this with the socket down.
+    async fn plan_exit(&mut self, reason: CancelReason, writer: Option<&mut Writer>);
 
     /// What this edge leaves in the log once its loop ends.
     fn report_stop(&self);
@@ -197,7 +265,7 @@ pub(crate) async fn run_edge<D: EdgeDriver>(mut driver: D) {
                 let is_blind_too_long =
                     now.diff(since) > control.disconnect_sweep_after && control.exit.is_none();
                 if is_blind_too_long {
-                    driver.begin_exit(CancelReason::Disconnect).await;
+                    driver.plan_exit(CancelReason::Disconnect, None).await;
                 }
                 let wait = driver.control().backoff.delay(attempt);
                 settle_offline(&mut driver, wait).await;
@@ -217,10 +285,8 @@ pub(crate) async fn run_edge<D: EdgeDriver>(mut driver: D) {
 
 // Read the latches between connections; the sweep they trigger rides REST.
 async fn check_latches<D: EdgeDriver>(driver: &mut D) {
-    if driver.control().exit.is_none()
-        && let Some(reason) = driver.control().wanted_exit()
-    {
-        driver.begin_exit(reason).await;
+    if let Some(reason) = driver.control().wanted_new_exit() {
+        driver.plan_exit(reason, None).await;
     }
     // Also reached with a dead socket, so the cancels go over REST and their answers land here.
     if driver.control().exit.is_some() {
@@ -235,7 +301,7 @@ async fn settle_offline<D: EdgeDriver>(driver: &mut D, wait: Duration) {
     let deadline = tokio::time::Instant::now() + wait;
     while !(driver.control().is_swept && driver.control().exit.is_some()) {
         match driver.while_offline(deadline).await {
-            OfflineStep::Serviced => driver.sweep_step().await,
+            OfflineStep::Serviced => driver.retry_sweep(None).await,
             OfflineStep::Ended => return,
         }
     }
@@ -248,7 +314,7 @@ async fn complete_exit<D: EdgeDriver>(driver: &mut D) {
     let Some(exit) = control.exit.take() else {
         return;
     };
-    if exit.is_final {
+    if exit.is_final() {
         // On a final exit the drain watchdog takes over from here.
         control.is_swept = true;
         control.exit = Some(exit);

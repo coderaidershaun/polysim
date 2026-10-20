@@ -7,7 +7,7 @@ use tokio::runtime::Handle;
 use crate::adapters::backoff::BackoffCaps;
 use crate::adapters::binance::rest::{BinanceEnv, SignedRestClient};
 use crate::adapters::edge::run_edge;
-use crate::adapters::exec::{EdgeHandle, EngineIdentity, ExecStop};
+use crate::adapters::exec::{EdgeHandle, EngineIdentity};
 use crate::hot::spawn::QueueProducer;
 use crate::msg::exec::ExecLaneItem;
 use crate::registry::{AssetDictionary, InstrumentRow};
@@ -56,15 +56,10 @@ pub struct BinanceExecAdapter;
 
 impl BinanceExecAdapter {
     pub(crate) fn spawn(setup: BinanceExecAdapterSetup, rt: &Handle) -> EdgeHandle {
-        let stop = ExecStop::new();
         let sweep_deadline = setup.context.sweep_deadline;
-        let actor = Actor::new(setup, stop.clone(), rt);
-        EdgeHandle {
-            join: rt.spawn(crate::log::tag_task("binance-exec", run_edge(actor))),
-            stop,
-            sweep_deadline,
-            venue: "binance execution adapter",
-            missed_sweep_cost: "orders may still rest on the venue",
-        }
+        EdgeHandle::spawn("binance execution adapter", sweep_deadline, |stop| {
+            let actor = Actor::new(setup, stop, rt);
+            rt.spawn(crate::log::tag_task("binance-exec", run_edge(actor)))
+        })
     }
 }

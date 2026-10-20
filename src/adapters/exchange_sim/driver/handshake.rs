@@ -6,25 +6,22 @@ use crate::adapters::binance::exec::{DecodeContext, account_snapshot_chunks};
 use crate::adapters::binance::rest::Balance;
 use crate::adapters::exec::{Phase, open_orders_snapshot_end, stream_ready};
 use crate::msg::inbound::InboundMessage;
-use crate::shutdown::FatalSignal;
 use crate::time::TsUs;
 
-use super::SimDriverContext;
-
 impl SimExecDriver {
-    pub fn open(&mut self, effective_ts_us: TsUs, fatal: &FatalSignal) {
+    pub fn open(&mut self, effective_ts_us: TsUs) {
         self.has_swept = false;
-        let mut effects = Vec::new();
-        self.core.on_connected(&mut |effect| effects.push(effect));
-        self.apply(&effects, EffectStamp::at(effective_ts_us), fatal);
+        let outgoing = self.session.connect();
+        self.apply(&outgoing, EffectStamp::at(effective_ts_us));
     }
 
     pub fn close(&mut self) {
-        self.core.on_disconnected();
+        self.session.core.on_disconnected();
     }
 
     pub fn can_arm(&self) -> bool {
-        !self.core.has_prior_run() && self.core.phase() == Phase::Resyncing
+        let core = &self.session.core;
+        !core.has_prior_run() && core.phase() == Phase::Resyncing
     }
 
     /// # Panics
@@ -32,15 +29,15 @@ impl SimExecDriver {
     pub fn announce_readiness(
         &mut self,
         at_ts_us: TsUs,
-        context: SimDriverContext<'_>,
+        context: DecodeContext<'_>,
     ) -> Vec<InboundMessage> {
         assert!(
-            self.core.on_stream_ready(),
+            self.session.core.on_stream_ready(),
             "the simulated venue armed a core that could not verify its stream"
         );
         let decode = DecodeContext {
             received_ts_us: at_ts_us,
-            ..context.decode
+            ..context
         };
         let settlement = self.venue.wallet_mut().settle(venue_millis(at_ts_us));
         let mut messages = vec![InboundMessage::Exec(stream_ready(at_ts_us))];
@@ -61,7 +58,7 @@ impl SimExecDriver {
             at_ts_us,
         )));
 
-        self.fold(&messages, EffectStamp::at(at_ts_us), context.fatal);
+        self.fold(&messages, EffectStamp::at(at_ts_us));
         messages
     }
 

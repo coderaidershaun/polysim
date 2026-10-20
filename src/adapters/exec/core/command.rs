@@ -24,9 +24,7 @@ impl ExecCore {
             };
             let command = stamped.command;
             let recon_seq = command.recon_seq();
-            self.on_command(command, &mut |effect| {
-                outgoing.push(Outgoing { effect, recon_seq });
-            });
+            self.on_command(command, &mut Outgoing::sink(&mut outgoing, recon_seq));
         }
         outgoing
     }

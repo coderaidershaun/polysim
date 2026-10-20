@@ -121,7 +121,7 @@ pub(super) enum Lane {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Auth {
+enum Auth {
     Public,
     Signed,
 }
@@ -146,7 +146,25 @@ impl Submitted {
 pub(super) struct RestJob {
     pub purpose: RestPurpose,
     pub request: EncodedRequest,
-    pub auth: Auth,
+    auth: Auth,
+}
+
+impl RestJob {
+    pub(super) fn signed(purpose: RestPurpose, request: EncodedRequest) -> Self {
+        Self {
+            purpose,
+            request,
+            auth: Auth::Signed,
+        }
+    }
+
+    pub(super) fn public(purpose: RestPurpose, request: EncodedRequest) -> Self {
+        Self {
+            purpose,
+            request,
+            auth: Auth::Public,
+        }
+    }
 }
 
 #[derive(Debug)]

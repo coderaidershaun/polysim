@@ -1,6 +1,6 @@
-//! Venue-neutral execution machinery: the core/driver split every exec adapter shares — phase
-//! machine, order mirror, effects, exit lifecycle, resync policy. Proven generic by the simulator,
-//! which drives it with no venue socket behind it.
+//! Venue-neutral execution machinery that every venue edge and the simulator compose: the phase
+//! machine and its order mirror, the session that applies their decisions, the in-flight table,
+//! resync policy and exit lifecycle. Written once so no venue spells a money rule its own way.
 
 mod capabilities;
 mod core;
@@ -9,29 +9,27 @@ mod event;
 mod exit;
 mod identity;
 mod inflight;
-mod lifecycle;
 mod mirror;
 mod reject;
 mod resync;
+mod session;
 
 pub(crate) use capabilities::VenueCapabilities;
 pub use core::{ExecCore, ObserveOrderError, Phase, REQUEST_TIMEOUT};
-pub(crate) use effect::Outgoing;
 pub use effect::{
-    ExecEffect, ExecRequest, PlaceNotSentReason, RequestId, SkipReason, TimeoutFallout,
+    ExecEffect, ExecRequest, Outgoing, PlaceNotSentReason, RequestId, SkipReason, TimeoutFallout,
 };
 pub use event::open_orders_snapshot_end;
 #[allow(unused_imports)]
 // adopted by the next lean-overhaul stream; remove with the first caller
-pub(crate) use event::{ChunkStamps, account_chunks, blank};
+pub(crate) use event::{ChunkStamps, account_chunks};
 pub(crate) use event::{
-    amend_not_sent, place_not_sent, request_timed_out, stream_ready, stream_reset,
+    amend_not_sent, blank, place_not_sent, request_timed_out, stream_ready, stream_reset,
 };
 pub(crate) use exit::{EdgeHandle, ExecStop, ExitPlan, SessionOutcome};
 pub use identity::{EngineIdentity, LeaseNamespace, OrderOwnership, TeTag};
-pub(crate) use inflight::{InFlightRequest, InFlightTable};
-pub use lifecycle::LifecycleFold;
-pub(crate) use lifecycle::mirrored_order;
+pub use inflight::{InFlightRequest, InFlightTable};
 pub use mirror::MirroredOrder;
 pub use reject::{RejectVerdict, VenueAvailability};
 pub use resync::{MAX_RESYNC_ATTEMPTS, ResyncPass, ResyncStep};
+pub use session::{EventSink, ExecSession, Expired, ResyncPoll, SessionSetup};

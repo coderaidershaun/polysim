@@ -205,7 +205,7 @@ impl FakeVenue {
             ExecRequest::AmendQty { client_id, qty, .. } => self.amend(client_id, qty, at),
             ExecRequest::OrderStatus { client_id, .. } => (self.status(client_id, at), Vec::new()),
             ExecRequest::OpenOrders { .. } => (
-                vec![self.wire.at(at).open_orders(self.orders.resting())],
+                vec![self.wire.open_orders(self.orders.resting(), at)],
                 Vec::new(),
             ),
             ExecRequest::SubscribeUserStream => (Vec::new(), Vec::new()),
@@ -227,13 +227,14 @@ impl FakeVenue {
             self.orders.remove(client_id);
         }
         let settlement = settlement_of(&order, taken, quote_before);
-        let report = self.wire.at(at).trade_report(
+        let report = self.wire.trade_report(
             &order,
             SimFill {
                 trade_id,
                 settlement: &settlement,
                 fee_asset: "",
             },
+            at,
         );
         self.stream_messages(&[report], at)
     }
@@ -258,7 +259,7 @@ impl FakeVenue {
             };
             return (
                 vec![self.wire.would_match_error()],
-                vec![self.wire.at(at).rejected_report(&rejected)],
+                vec![self.wire.rejected_report(&rejected, at)],
             );
         }
         let order = SimOrder {
@@ -272,8 +273,8 @@ impl FakeVenue {
         };
         self.orders.insert(order);
         (
-            vec![self.wire.at(at).place_ack(&order)],
-            vec![self.wire.at(at).new_report(&order)],
+            vec![self.wire.place_ack(&order, at)],
+            vec![self.wire.new_report(&order, at)],
         )
     }
 
@@ -282,8 +283,8 @@ impl FakeVenue {
             return (vec![self.wire.unknown_order_error()], Vec::new());
         };
         (
-            vec![self.wire.at(at).cancel_ack(&order)],
-            vec![self.wire.at(at).cancel_report(&order)],
+            vec![self.wire.cancel_ack(&order, at)],
+            vec![self.wire.cancel_report(&order, at)],
         )
     }
 
@@ -298,18 +299,18 @@ impl FakeVenue {
         };
         order.qty = qty;
         let order = *order;
-        (vec![self.wire.at(at).amend_ack(&order)], Vec::new())
+        (vec![self.wire.amend_ack(&order, at)], Vec::new())
     }
 
     fn status(&self, client_id: ClientOrderId, at: TsUs) -> Vec<String> {
-        let wire = self.wire.at(at);
+        let wire = &self.wire;
         match self.orders.get(client_id) {
             Some(order) => {
                 let status = match order.filled.0 > 0 {
                     true => VenueOrderStatus::PartiallyFilled,
                     false => VenueOrderStatus::New,
                 };
-                vec![wire.order_status_as(order, status)]
+                vec![wire.order_status_as(order, status, at)]
             }
             // Not resting: the model's answer to "what happened" is that it filled, which is the
             // reading a -2011 has to be reconciled against rather than assumed away.
@@ -324,6 +325,7 @@ impl FakeVenue {
                     filled_quote: self.best_bid.notional(Qty(10_000)),
                 },
                 VenueOrderStatus::Filled,
+                at,
             )],
         }
     }

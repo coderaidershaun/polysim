@@ -4,16 +4,14 @@ use super::super::core::market::ResetReason;
 use super::super::lanes::SimLane;
 use super::SimActor;
 use crate::msg::exec::ExecLaneItem;
-use crate::time::TsUs;
 
 impl SimActor {
     pub(super) fn poll_lanes(&mut self) {
         self.intake_commands();
-        self.intake_trades();
-        self.intake_depth();
+        self.intake_market();
     }
 
-    pub(super) fn intake_commands(&mut self) {
+    fn intake_commands(&mut self) {
         while let Ok(item) = self.commands.pop() {
             match item {
                 ExecLaneItem::Command(stamped) => {
@@ -35,36 +33,25 @@ impl SimActor {
         self.readiness.observe_lane(SimLane::Command, watermark);
     }
 
-    pub(super) fn intake_trades(&mut self) {
+    fn intake_market(&mut self) {
         let Self {
             trades,
-            driver,
-            latency,
-            ..
-        } = self;
-        let latency = *latency;
-        trades.drain(|batch| driver.venue_mut().on_market_batch(batch, latency));
-        self.observe_lane(SimLane::Trade, self.trades.proven_watermark_ts_us());
-    }
-
-    pub(super) fn intake_depth(&mut self) {
-        let Self {
             depth,
             driver,
             latency,
+            horizon,
+            readiness,
             ..
         } = self;
         let latency = *latency;
-        depth.drain(|batch| driver.venue_mut().on_market_batch(batch, latency));
-        self.observe_lane(SimLane::Depth, self.depth.proven_watermark_ts_us());
-    }
-
-    fn observe_lane(&mut self, lane: SimLane, watermark: Option<TsUs>) {
-        let Some(watermark) = watermark else {
-            return;
-        };
-        self.horizon.observe(lane, watermark);
-        self.readiness.observe_lane(lane, watermark);
+        for (lane, tap) in [(SimLane::Trade, trades), (SimLane::Depth, depth)] {
+            tap.drain(|batch| driver.venue_mut().on_market_batch(batch, latency));
+            let Some(watermark) = tap.proven_watermark_ts_us() else {
+                continue;
+            };
+            horizon.observe(lane, watermark);
+            readiness.observe_lane(lane, watermark);
+        }
     }
 
     #[cold]
@@ -72,12 +59,12 @@ impl SimActor {
         if !self.driver.venue().market().is_matching_live() {
             return;
         }
-        if let Some(at_ts_us) = self.venue_now() {
+        if let Some(at_ts_us) = self.applied_through_ts_us {
             self.driver.venue_mut().suspend_matching(reason, at_ts_us);
             self.market_recovery_generation = self.driver.venue().market().recovery().generation;
         }
         self.driver.close();
-        self.reopen();
+        self.has_opened = false;
         self.readiness.withdraw();
     }
 }

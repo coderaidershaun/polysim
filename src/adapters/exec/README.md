@@ -43,14 +43,20 @@ engine branches solely on the normalised enums.
 
 2. **Shared machinery, embedded by composition.** An adapter may not re-implement:
    `ExecCore` (the phase machine: Down → Resyncing → Quoting → Cancelling → Settled, with
-   fail-closed placement admission), `LifecycleFold` (event folding into core + mirror),
-   `InFlightTable` (request tracking; an expired request is reconciled, never re-sent),
+   fail-closed placement admission, and the fold of every venue event into its mirror),
    `OrderMirror` (the cancellability mirror — not a second OMS: no fills, no lifecycle),
-   `ResyncPass` (numbered passes, bounded retries, give-up drops the connection),
-   `ExecStop`/`EdgeHandle` (the stop latch and the one shutdown body), the synthesised-event
-   constructors (every refused or timed-out command still answers the hot slot), and
-   `VenueCapabilities`/`LeaseNamespace` (declared beside each other in every venue module).
-   Driving commands through `ExecCore::on_command` and answers through `LifecycleFold` is
+   `ExecSession` (the apply layer every venue and the simulator compose: one core, one
+   in-flight table, one resync pass, one event sink, and the rules for refusals, in-doubt
+   marking, disconnect, expiry, resync polling and readiness arming), `EventSink` (where the
+   session's synthesised events go: the venue's input queue, or a plain list in the simulator
+   and the fitness suite), `InFlightTable` (request tracking; an expired request is
+   reconciled, never re-sent), `ResyncPass` (numbered passes, bounded retries, give-up drops
+   the connection), `ExecStop`/`EdgeHandle` (the stop latch and the one shutdown body), the
+   synthesised-event constructors (every refused or timed-out command still answers the hot
+   slot), and `VenueCapabilities`/`LeaseNamespace` (declared beside each other in every venue
+   module). `ExecSession`, `EventSink` and `InFlightTable` are public on their own merit, as
+   the shared machinery a venue embeds, with the same standing as `ExecCore` and `ResyncPass`.
+   Driving commands through `ExecCore::on_command` and answers through `ExecSession::fold` is
    what makes the money rules inherited instead of re-derived.
 
 3. **The session chassis.** `run_edge` (in `adapters/edge.rs`) owns the lifecycle every
@@ -58,8 +64,14 @@ engine branches solely on the normalised enums.
    settling, exit precedence (Shutdown > Fatal > Park), sweep pacing, and the stop
    protocol. A venue implements the ten-method `EdgeDriver` trait with only its own
    physics: its URL, its `select!` loop, its offline folding, its sweep step, its closing
-   report. The chassis file legitimately owns a clock; everything under `adapters/exec/`
-   is clock-free by scanned law — deadlines there take `now` as a parameter.
+   report. The same file holds what a live venue builds its edge from: `EdgeSettings` (the
+   settings every live edge shares) and `EdgeControl::new`, the shared tick constants
+   (`COMMAND_POLL`, `HOUSEKEEPING`, `RECONCILE_INTERVAL`, `RECENT_TRADES`), and the
+   `EventSink` that feeds the venue's input queue. `EdgeHandle::spawn` gives a live venue
+   its handle; the simulator builds its own, because a sweep it misses invalidates the run
+   rather than leaving orders on a venue. The chassis file legitimately owns a clock;
+   everything under `adapters/exec/` is clock-free by scanned law — deadlines there take
+   `now` as a parameter.
 
 4. **Written obligations** — the rules no signature can carry:
    - Every command is eventually answered. A refusal, a timeout, a disconnect — each
@@ -98,15 +110,14 @@ the latch, and stop.
 ## Identity and ownership
 
 The engine's `ClientOrderId` is a bit-packed u64 — run nonce, slot index, generation — an
-address, not a name. `TeTag` digests the (strategy, te) identity. `OrderOwnership::of`
-turns an id and tag into Mine / PriorRun / Foreign; foreign orders are never mirrored and
-never cancelled.
+address, not a name. `TeTag` digests the (strategy, te) identity. Every order is Mine,
+PriorRun or Foreign; foreign orders are never mirrored and never cancelled.
 
 Two identity patterns exist, chosen by whether the venue echoes a client id:
 
 - **Id on the wire** (Binance shape): the codec encodes (tag, id) into the venue's client
-  order id format and recovers ownership by parsing what the venue echoes. Stateless and
-  restart-safe.
+  order id format and recovers ownership by parsing what the venue echoes, through
+  `OrderOwnership::of`. Stateless and restart-safe.
 - **Venue-minted ids** (Polymarket shape): the venue names the order in its placement
   answer. The adapter keeps a fixed-capacity id index, holds stream frames that name
   unknown orders until the mapping lands, and decides adopt / defer / leave-alone by
@@ -142,14 +153,15 @@ dependency-allowlist amendment if signing needs a new crate.
 
 1. `mod.rs` — credential env-var names, `capabilities()`, `lease_namespace(...)`.
 2. `handle.rs` — Setup/Context structs and `spawn(...) -> EdgeHandle`.
-3. `actor/` — the `EdgeDriver` impl plus the venue's passes: transport routing, resync
-   read-set, housekeeping, whatever the venue's physics demand. Same filename for the same
-   concept as the existing adapters.
+3. `actor/` — the `EdgeDriver` impl. The actor composes `ExecSession` and `EdgeControl` and
+   writes only its transport, its resync read set, its answer handlers and the order of its
+   housekeeping steps. Same filename for the same concept as the existing adapters.
 4. `codec/` — the real work: encode intents, decode answers and stream frames into
-   `ExecEvent`s, classify every documented error into `RejectVerdict`, normalise statuses,
-   parse money exactly. Convention surface: `EncodeContext`/`DecodeContext`,
-   `encode_request`, `decode_response`, `classify_error`, `WireError::is_fatal`, a
-   symbol-or-token table.
+   `ExecEvent`s, classify every documented error into a `RejectClass` (or into a
+   `RejectVerdict` when the venue also reports its own availability, so an outage never
+   reads as an order verdict), normalise statuses, parse money exactly. Convention surface:
+   `EncodeContext`/`DecodeContext`, `encode_request`, `decode_response`, `classify_error`,
+   `WireError::is_fatal`, a symbol-or-token table.
 5. Signing module if the venue needs one. Sign vectors are minted from the vendor's own
    SDK, never from our implementation — crypto has no local failure mode.
 6. `probe` + preflight — a read-only account report proving credentials, permissions,

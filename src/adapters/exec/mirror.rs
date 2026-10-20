@@ -1,7 +1,8 @@
-//! Cancel-on-exit foundation. After hot panic, owned collection (borrowed might be dead).
+//! The orders this run believes are resting, which the exit sweep cancels. The mirror owns its
+//! copies, because after a hot-thread panic anything it borrowed may already be gone.
 
 use crate::ids::{ClientOrderId, InstrumentId, Price, Qty, Side};
-use crate::msg::exec::Provenance;
+use crate::msg::exec::{ExecEvent, Provenance};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MirrorInsertError {
@@ -20,6 +21,21 @@ pub struct MirroredOrder {
     pub provenance: Provenance,
     pub has_sent_cancel: bool,
     pub is_ambiguous: bool,
+}
+
+impl MirroredOrder {
+    pub(crate) fn observed(event: &ExecEvent) -> Self {
+        Self {
+            instrument: event.instrument,
+            client_id: event.client_id,
+            side: event.side,
+            price: event.price,
+            qty: event.qty,
+            provenance: event.provenance,
+            has_sent_cancel: false,
+            is_ambiguous: false,
+        }
+    }
 }
 
 /// Fixed-capacity set of the orders this run believes are live, keyed by client id.

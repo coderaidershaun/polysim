@@ -4,34 +4,18 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use super::core::latency::{LatencyBudget, rewound, shifted};
-use super::error::LaneBufferFull;
+use crate::labelled_enum::labelled_enum;
 use crate::time::TsUs;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SimLane {
-    Command,
-    Trade,
-    Depth,
-}
-
-impl SimLane {
-    pub(super) const COUNT: usize = 3;
-
-    const fn name(self) -> &'static str {
-        match self {
-            SimLane::Command => "command",
-            SimLane::Trade => "trade",
-            SimLane::Depth => "depth",
-        }
+labelled_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum SimLane {
+        Command = "command",
+        Trade = "trade",
+        Depth = "depth",
     }
-
-    pub(super) const fn index(self) -> usize {
-        match self {
-            SimLane::Command => 0,
-            SimLane::Trade => 1,
-            SimLane::Depth => 2,
-        }
-    }
+    fn name;
+    pub(super) const ALL;
 }
 
 impl fmt::Display for SimLane {
@@ -40,30 +24,37 @@ impl fmt::Display for SimLane {
     }
 }
 
+#[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
+#[error("{lane} lane buffer reached capacity {capacity}")]
+pub struct LaneBufferFull {
+    pub lane: SimLane,
+    pub capacity: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SimHorizon {
     latency: LatencyBudget,
-    watermarks: [TsUs; SimLane::COUNT],
-    observed: [bool; SimLane::COUNT],
+    watermarks: [TsUs; SimLane::ALL.len()],
+    observed: [bool; SimLane::ALL.len()],
 }
 
 impl SimHorizon {
     pub fn unseeded(latency: LatencyBudget) -> Self {
         Self {
             latency,
-            watermarks: [TsUs::from_micros(i64::MIN); SimLane::COUNT],
-            observed: [false; SimLane::COUNT],
+            watermarks: [TsUs::from_micros(i64::MIN); SimLane::ALL.len()],
+            observed: [false; SimLane::ALL.len()],
         }
     }
 
     pub fn observe(&mut self, lane: SimLane, watermark: TsUs) {
-        let held = &mut self.watermarks[lane.index()];
+        let held = &mut self.watermarks[lane as usize];
         *held = (*held).max(watermark);
-        self.observed[lane.index()] = true;
+        self.observed[lane as usize] = true;
     }
 
     pub fn watermark(&self, lane: SimLane) -> TsUs {
-        self.watermarks[lane.index()]
+        self.watermarks[lane as usize]
     }
 
     pub fn has_all_watermarks(&self) -> bool {

@@ -2,10 +2,7 @@
 //! ends by retrying or by reconnecting, never by wedging.
 
 use crate::adapters::binance::rest::OrderRecord;
-use crate::adapters::exec::{
-    MAX_RESYNC_ATTEMPTS, Outgoing, ResyncStep, SessionOutcome, mirrored_order,
-    open_orders_snapshot_end,
-};
+use crate::adapters::exec::{MirroredOrder, Outgoing, ResyncPoll, SessionOutcome};
 use crate::msg::exec::{ExecCommand, ExecKind, Provenance};
 use crate::time::TsUs;
 use crate::{error, info, warn};
@@ -17,15 +14,14 @@ impl Actor {
     /// Asks every instrument for its open orders. This actor owns this pass itself, separate
     /// from hot-table reconciliation.
     pub(super) fn start_resync(&mut self) {
-        self.is_readiness_pending = false;
-        let resync_seq = self.resync.begin(self.pass_reads());
+        let resync_seq = self.session.begin_pass(self.pass_reads());
         self.request_pass_reads(resync_seq);
     }
 
     /// Counts the reads a full pass needs: open orders for every instrument, plus balances.
     /// Both gate quoting, and a reconnect needs a fresh snapshot of each.
     pub(super) fn pass_reads(&self) -> usize {
-        self.instruments.len() + 1
+        self.session.instruments().len() + 1
     }
 
     pub(super) async fn on_open_orders(
@@ -48,7 +44,7 @@ impl Actor {
             // An order this build cannot read leaves the mirror incomplete, and quoting against an
             // incomplete mirror is what strands somebody's order.
             let Some(event) = self.decode_order(order, ExecKind::SnapshotOrder, 0) else {
-                self.core.stop_quoting();
+                self.session.core.stop_quoting();
                 self.fail_resync(resync_seq);
                 self.control.fatal.trip(format!(
                     "binance execution cannot decode a possibly-owned open order {}",
@@ -56,8 +52,9 @@ impl Actor {
                 ));
                 return;
             };
-            let mut mirrored = mirrored_order(&event);
-            if !self.has_opened_quoting && mirrored.provenance != Provenance::Foreign {
+            let mut mirrored = MirroredOrder::observed(&event);
+            let is_cold_start = !self.session.core.has_opened_quoting();
+            if is_cold_start && mirrored.provenance != Provenance::Foreign {
                 // On a cold start, quoting has not opened yet, so any order already resting
                 // must predate this process — that timing decides it, not the nonce in its
                 // client id.
@@ -79,7 +76,7 @@ impl Actor {
                         "binance execution mirroring a resting {provenance:?} order {:016x}",
                         mirrored.client_id.0
                     );
-                    if let Err(error) = self.core.observe_venue_order(mirrored) {
+                    if let Err(error) = self.session.core.observe_venue_order(mirrored) {
                         error!(
                             "binance execution cannot retain venue order {:016x} in its possibly-live set ({error:?}) — quoting is disabled",
                             mirrored.client_id.0
@@ -97,6 +94,7 @@ impl Actor {
         // lagged a fill, so each missing order is probed rather than assumed gone.
         if resync_seq != 0 {
             let missing: Vec<_> = self
+                .session
                 .core
                 .mirror()
                 .iter()
@@ -108,8 +106,8 @@ impl Actor {
                 .map(|order| order.client_id)
                 .collect();
             for client_id in missing {
-                self.core.mark_ambiguous(client_id);
-                if !self.submit(super::rest::RestJob::OrderStatus {
+                self.session.core.mark_ambiguous(client_id);
+                if !self.submit(RestJob::OrderStatus {
                     instrument,
                     client_id,
                     recon_seq: resync_seq,
@@ -120,51 +118,38 @@ impl Actor {
         }
         // Every order is now accounted for in the mirror, mirrored or already there, so all
         // that remains is to retire this pass.
-        if !self.resync.on_read(resync_seq) {
+        if !self.session.resync.on_read(resync_seq) {
             return;
         }
         self.finish_resync(writer).await;
     }
 
-    /// Advances the resync pass one tick. A stalled pass always ends by retrying or
-    /// reconnecting, never by wedging.
     pub(super) fn poll_resync(&mut self, now: TsUs) -> Option<SessionOutcome> {
         // On the exit path the admission read is moot, and a reconnect starts a clean pass anyway.
         if self.control.exit.is_some() {
             return None;
         }
-        match self.resync.due(now) {
-            ResyncStep::Wait => None,
-            ResyncStep::Retry => {
-                let resync_seq = self.resync.begin_retry(self.pass_reads());
-                warn!(
-                    "binance execution re-reading its open orders and balances — attempt {} of {}",
-                    self.resync.attempts() + 1,
-                    MAX_RESYNC_ATTEMPTS
-                );
+        match self.session.poll_resync(now, self.pass_reads()) {
+            ResyncPoll::Wait => None,
+            ResyncPoll::Reread { resync_seq } => {
                 self.request_pass_reads(resync_seq);
                 None
             }
-            // Stalled reads force a reconnect. Holding on would only postpone the same death by
-            // 23 hours, so the connection ends now.
-            ResyncStep::GiveUp => {
-                error!(
-                    "binance execution could not read its open orders and balances in {MAX_RESYNC_ATTEMPTS} attempts — dropping the connection rather than quoting against a mirror it never verified"
-                );
-                Some(SessionOutcome::Reconnect)
-            }
+            // Waiting would only delay the same reconnect by up to 23 hours, so the connection ends
+            // now.
+            ResyncPoll::GiveUp => Some(SessionOutcome::Reconnect),
         }
     }
 
     /// A failed read and a refused queue both fail the pass. Backoff paces the retry.
     pub(super) fn fail_resync(&mut self, resync_seq: u64) {
-        let retry_at = self.control.next_attempt_at(self.resync.attempts());
-        self.resync.on_failure(resync_seq, retry_at);
+        let retry_at = self.control.next_attempt_at(self.session.resync.attempts());
+        self.session.resync.on_failure(resync_seq, retry_at);
     }
 
     fn request_pass_reads(&mut self, resync_seq: u64) {
         let mut is_queued = self.submit(RestJob::Account { resync_seq });
-        for instrument in self.instruments.clone() {
+        for &instrument in self.session.instruments() {
             is_queued &= self.submit(RestJob::OpenOrders {
                 instrument,
                 resync_seq,
@@ -177,34 +162,15 @@ impl Actor {
     }
 
     pub(super) async fn finish_resync(&mut self, writer: Option<&mut Writer>) {
-        self.is_readiness_pending = true;
+        self.session.finish_pass();
         let mut outgoing = Vec::new();
-        for instrument in self.instruments.clone() {
-            self.core
-                .on_command(ExecCommand::CancelPriorRun { instrument }, &mut |effect| {
-                    outgoing.push(Outgoing {
-                        effect,
-                        recon_seq: 0,
-                    });
-                });
+        for instrument in self.session.instruments().to_vec() {
+            let command = ExecCommand::CancelPriorRun { instrument };
+            self.session
+                .core
+                .on_command(command, &mut Outgoing::sink(&mut outgoing, 0));
         }
         self.dispatch(outgoing, writer).await;
-        self.finish_readiness_if_clean();
-    }
-
-    pub(super) fn finish_readiness_if_clean(&mut self) {
-        if !self.is_readiness_pending || self.core.has_prior_run() {
-            return;
-        }
-        if !self.core.on_stream_ready() {
-            return;
-        }
-        self.is_readiness_pending = false;
-        self.has_opened_quoting = true;
-        let now = self.control.clock.now();
-        for instrument in self.instruments.clone() {
-            self.events
-                .send_exec(open_orders_snapshot_end(instrument, now));
-        }
+        self.session.arm_readiness(self.control.clock.now());
     }
 }

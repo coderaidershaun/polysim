@@ -202,22 +202,14 @@ impl ClobHttp {
         builder: reqwest::RequestBuilder,
         url: &str,
     ) -> Result<ClobResponse, ClobHttpError> {
-        let response = builder
-            .send()
-            .await
-            .map_err(|source| ClobHttpError::Transport {
-                url: url.to_owned(),
-                source,
-            })?;
+        let transport = |source| ClobHttpError::Transport {
+            url: url.to_owned(),
+            source,
+        };
+        let response = builder.send().await.map_err(transport)?;
         let status = response.status().as_u16();
         let rate_limit = RateLimit::from_response(&response);
-        let body = response
-            .text()
-            .await
-            .map_err(|source| ClobHttpError::Transport {
-                url: url.to_owned(),
-                source,
-            })?;
+        let body = response.text().await.map_err(transport)?;
         Ok(ClobResponse {
             status,
             body,

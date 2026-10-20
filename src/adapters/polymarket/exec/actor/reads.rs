@@ -1,5 +1,6 @@
-//! Answers to the reads the driver asks for rather than causes: balances, fills, the two public
-//! calls a rotation binding needs, the allowance cache, and the dead man's switch.
+//! The balance sweep, and the answers to the reads the driver asks for rather than causes:
+//! balances, fills, the two public calls a rotation binding needs, the allowance cache, and the
+//! dead man's switch.
 //!
 //! None of these answer an order. They are what makes an order possible — which token this leg is
 //! trading, whether its sell side is even reachable, and whether the venue still believes this
@@ -11,16 +12,74 @@ use crate::{info, warn};
 
 use super::super::binding::BindingStep;
 use super::super::codec::{
-    AccountStamps, VenueAnswer, account_snapshot, decode_balance, decode_clob_market,
-    decode_heartbeat, decode_trades_page, trades_page,
+    AccountStamps, account_snapshot, collateral_balance, conditional_balance, decode_balance,
+    decode_clob_market, decode_heartbeat, decode_trades_page, trades_page,
 };
 use super::super::rest::{ClobHttpError, ClobResponse};
 use super::Actor;
 use super::answer::read_body;
-use super::rest::{Auth, Lane, RestJob, RestPurpose, Submitted};
+use super::rest::{Lane, RestJob, RestPurpose, Submitted};
 use super::resync::{MAX_PAGES, PageWalk};
 
+/// A balance sweep that belongs to no resync pass: a post-fill restatement answers the account
+/// table, not the admission gate, so it settles nothing and schedules no retry of its own.
+const RESTATEMENT: Option<u64> = None;
+
 impl Actor {
+    /// Re-reads balances after a fill. A sweep already outstanding was issued before the fill and
+    /// can only answer with pre-fill balances, so the restatement waits and fires when that sweep
+    /// lands.
+    pub(super) fn restate_balances(&mut self) {
+        if self.balances_outstanding > 0 {
+            self.is_restatement_due = true;
+            return;
+        }
+        // A restatement that could not be sent stays owed. Nothing else would ask again, and a
+        // reservation is only released by a balance read carrying settlement the hot side has not
+        // already seen.
+        self.is_restatement_due = !self.request_balance_sweep(RESTATEMENT);
+    }
+
+    /// Reads each asset separately, since this venue has no multi-asset balance endpoint.
+    ///
+    /// Only reads that actually left are counted outstanding. Counting the intent instead leaves the
+    /// gate waiting on an answer nobody asked for: the sweep never reaches zero, the account snapshot
+    /// is never forwarded, and every later restatement defers behind it forever.
+    pub(super) fn request_balance_sweep(&mut self, resync_seq: Option<u64>) -> bool {
+        self.balances.clear();
+        self.is_balance_sweep_readable = true;
+        let mut reads: Vec<(AssetId, super::super::codec::EncodedRequest)> =
+            vec![(self.quote_asset(), collateral_balance(self.signature_type))];
+        for &instrument in self.session.instruments() {
+            let Some(token_id) = self
+                .tokens
+                .live_binding(instrument)
+                .map(|binding| binding.token_id.clone())
+            else {
+                continue;
+            };
+            reads.push((
+                self.base_asset(instrument),
+                conditional_balance(&token_id, self.signature_type),
+            ));
+        }
+        self.balances_outstanding = 0;
+        let mut is_queued = true;
+        for (asset, request) in reads {
+            let purpose = RestPurpose::Balance { asset, resync_seq };
+            match self.submit(Lane::Control, RestJob::signed(purpose, request)) {
+                Submitted::Queued => self.balances_outstanding += 1,
+                // An asset missing from the sweep makes the snapshot partial, and a partial account
+                // is not an account: the reads that did land are discarded with the rest.
+                Submitted::LaneFull => {
+                    is_queued = false;
+                    self.is_balance_sweep_readable = false;
+                }
+            }
+        }
+        is_queued
+    }
+
     pub(super) fn on_balance(
         &mut self,
         asset: AssetId,
@@ -51,7 +110,7 @@ impl Actor {
             },
         );
         self.balances.clear();
-        self.events.send_account(chunks);
+        self.session.events.send_account(chunks);
         self.settle_pass_read(resync_seq);
         // A fill may have landed during the sweep, making these reads stale, so a
         // restatement is issued if one is now due.
@@ -75,34 +134,22 @@ impl Actor {
                 return false;
             }
         };
-        let decoded = {
-            let context = self.decode_context();
-            decode_balance(response.answer(), asset, &context)
+        let decoded = decode_balance(response.answer(), asset, &self.decode_context());
+        let Some(balance) = self.answered(decoded, "a balance") else {
+            return false;
         };
-        match decoded {
-            Ok(VenueAnswer::Answered(balance)) if response.is_success() => {
-                self.balances.push(balance);
-                true
-            }
-            // A failing status decodes to a blank balance, which would starve the funds gate as
-            // convincingly as a real zero.
-            Ok(VenueAnswer::Answered(_)) => {
-                warn!(
-                    "polymarket execution balance read answered http {}: {}",
-                    response.status,
-                    response.excerpt()
-                );
-                false
-            }
-            Ok(VenueAnswer::Unavailable(availability)) => {
-                self.on_unavailable(availability);
-                false
-            }
-            Err(error) => {
-                warn!("polymarket execution could not read a balance: {error}");
-                false
-            }
+        // A failing status decodes to a blank balance, which would starve the funds gate as
+        // convincingly as a real zero.
+        if !response.is_success() {
+            warn!(
+                "polymarket execution balance read answered http {}: {}",
+                response.status,
+                response.excerpt()
+            );
+            return false;
         }
+        self.balances.push(balance);
+        true
     }
 
     /// Reads fills only to watch for settlement and to dedup; quantity itself comes from the
@@ -130,22 +177,10 @@ impl Actor {
                 return;
             }
         };
-        let decoded = {
-            let context = self.decode_context();
-            decode_trades_page(response.answer(), &context)
-        };
-        let fills = match decoded {
-            Ok(VenueAnswer::Answered(fills)) => fills,
-            Ok(VenueAnswer::Unavailable(availability)) => {
-                self.on_unavailable(availability);
-                self.fail_resync(resync_seq);
-                return;
-            }
-            Err(error) => {
-                warn!("polymarket execution could not read a trades page: {error}");
-                self.fail_resync(resync_seq);
-                return;
-            }
+        let decoded = decode_trades_page(response.answer(), &self.decode_context());
+        let Some(fills) = self.answered(decoded, "a trades page") else {
+            self.fail_resync(resync_seq);
+            return;
         };
         for trade in fills.trades {
             self.on_trade(trade);
@@ -173,23 +208,20 @@ impl Actor {
             );
             return PageWalk::Complete;
         }
-        match self.submit(
-            Lane::Control,
-            RestJob {
-                purpose: RestPurpose::Trades {
-                    resync_seq,
-                    page: page + 1,
-                },
-                request: trades_page(Some(cursor)),
-                auth: Auth::Signed,
-            },
-        ) {
-            Submitted::Queued => PageWalk::Pending,
-            Submitted::LaneFull => {
-                self.fail_resync(resync_seq);
-                PageWalk::Pending
-            }
+        let next = RestPurpose::Trades {
+            resync_seq,
+            page: page + 1,
+        };
+        if !self
+            .submit(
+                Lane::Control,
+                RestJob::signed(next, trades_page(Some(cursor))),
+            )
+            .is_queued()
+        {
+            self.fail_resync(resync_seq);
         }
+        PageWalk::Pending
     }
 
     pub(super) fn on_market_answer(

@@ -1,5 +1,6 @@
-//! Execution core/driver interface. Core decides what, driver handles how. Separate module so
-//! fake venue + driver both name these types.
+//! What passes between the execution core and the driver that applies its decisions: the core
+//! decides what to do, and the driver decides how to do it on its venue. These types live in their
+//! own module because every driver, simulated or live, names them.
 
 use crate::ids::{ClientOrderId, InstrumentId, Price, Qty, Side};
 use crate::msg::exec::{CancelReason, OrderStyle};
@@ -145,8 +146,16 @@ pub enum ExecEffect {
     },
 }
 
-// Effect + recon_seq it belongs to (core loses seq mapping to bare read; driver re-attaches at send).
-pub(crate) struct Outgoing {
-    pub(crate) effect: ExecEffect,
-    pub(crate) recon_seq: u64,
+/// An effect paired with the hot reconcile sequence it answers. The core does not remember which
+/// pass a read belongs to, so the driver carries the sequence until the request is sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Outgoing {
+    pub effect: ExecEffect,
+    pub recon_seq: u64,
+}
+
+impl Outgoing {
+    pub fn sink(outgoing: &mut Vec<Outgoing>, recon_seq: u64) -> impl FnMut(ExecEffect) + '_ {
+        move |effect| outgoing.push(Outgoing { effect, recon_seq })
+    }
 }

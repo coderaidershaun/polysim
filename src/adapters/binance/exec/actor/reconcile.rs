@@ -1,19 +1,21 @@
 //! REST-only repairs: lost-answer reads, balance snapshots (not deltas), and fill verification.
 //! `myTrades` is detection only: it asks for the order, and never invents the trade.
 
-use crate::adapters::binance::rest::{AccountTrade, FailureVerdict, OrderRecord, RestError};
-use crate::adapters::exec::{Outgoing, SessionOutcome};
+use crate::adapters::binance::rest::{
+    AccountInfo, AccountTrade, FailureVerdict, OrderRecord, RestError,
+};
+use crate::adapters::exec::{EventSink, Outgoing, SessionOutcome};
 use crate::ids::{ClientOrderId, InstrumentId, Qty};
-use crate::msg::exec::{ExecEvent, ExecKind, Provenance, RejectClass, VenueOrderStatus};
-use crate::msg::inbound::InboundMessage;
+use crate::msg::exec::{
+    ExecCommand, ExecEvent, ExecKind, Provenance, RejectClass, VenueOrderStatus,
+};
 use crate::{error, warn};
 
 use super::super::{
-    ClockOffset, DecodeContext, RejectSubject, account_snapshot_chunks, classify_error,
-    decode_order_record,
+    ClockOffset, RejectSubject, account_snapshot_chunks, classify_error, decode_order_record,
 };
 use super::rest::{RestAnswer, RestJob, RestJobError, RestOutcome, verdict_of};
-use super::{Actor, Writer};
+use super::{Actor, TradeCursor, Writer};
 
 impl Actor {
     pub(super) async fn on_rest_answer(
@@ -62,25 +64,12 @@ impl Actor {
     async fn on_account(
         &mut self,
         job: RestJob,
-        account: &crate::adapters::binance::rest::AccountInfo,
+        account: &AccountInfo,
         writer: Option<&mut Writer>,
     ) {
-        let now = self.control.clock.now();
-        let chunks = {
-            let context = DecodeContext {
-                symbols: &self.symbols,
-                assets: &self.assets,
-                identity: self.identity,
-                received_ts_us: now,
-            };
-            account_snapshot_chunks(&account.balances, account.update_time_ms, &context)
-        };
-        match chunks {
-            Ok(chunks) => {
-                for chunk in chunks {
-                    self.events.send(InboundMessage::Account(chunk));
-                }
-            }
+        let context = self.decode_context(self.control.clock.now());
+        match account_snapshot_chunks(&account.balances, account.update_time_ms, &context) {
+            Ok(chunks) => self.session.events.send_account(chunks),
             // An unreadable balance fails the pass. Reporting without re-reading would leave the
             // mirror empty.
             Err(error) => {
@@ -94,7 +83,7 @@ impl Actor {
         let RestJob::Account { resync_seq } = job else {
             return;
         };
-        if !self.resync.on_read(resync_seq) {
+        if !self.session.resync.on_read(resync_seq) {
             return;
         }
         self.finish_resync(writer).await;
@@ -126,32 +115,31 @@ impl Actor {
         let Some(event) = self.decode_order(order, ExecKind::SnapshotOrder, recon_seq) else {
             return;
         };
-        self.events.send_exec(event);
+        self.session.events.send_exec(event);
+        let core = &mut self.session.core;
+        let mut outgoing = Vec::new();
         if !event.status.is_some_and(VenueOrderStatus::is_terminal) {
             // Still resting, so the cancel latch is re-armed; leaving it would strand the order.
-            self.core.re_arm_cancel(client_id);
-            if self
+            core.re_arm_cancel(client_id);
+            if core
                 .mirrored(client_id)
                 .is_some_and(|order| order.provenance == Provenance::PriorRun)
             {
-                let mut outgoing = Vec::new();
-                self.core.on_command(
-                    crate::msg::exec::ExecCommand::CancelPriorRun {
-                        instrument: event.instrument,
-                    },
-                    &mut |effect| outgoing.push(Outgoing { effect, recon_seq }),
-                );
+                let command = ExecCommand::CancelPriorRun {
+                    instrument: event.instrument,
+                };
+                core.on_command(command, &mut Outgoing::sink(&mut outgoing, recon_seq));
                 self.dispatch(outgoing, writer).await;
             }
             return;
         }
-        let mut outgoing = Vec::new();
-        self.core
-            .on_order_gone(client_id, event.cumulative_qty, &mut |effect| {
-                outgoing.push(Outgoing { effect, recon_seq });
-            });
+        core.on_order_gone(
+            client_id,
+            event.cumulative_qty,
+            &mut Outgoing::sink(&mut outgoing, recon_seq),
+        );
         self.dispatch(outgoing, writer).await;
-        self.finish_readiness_if_clean();
+        self.session.arm_readiness(self.control.clock.now());
     }
 
     // `None` means the order is untracked or failed to decode, so it has no mirror entry and no
@@ -162,12 +150,7 @@ impl Actor {
         kind: ExecKind,
         recon_seq: u64,
     ) -> Option<ExecEvent> {
-        let context = DecodeContext {
-            symbols: &self.symbols,
-            assets: &self.assets,
-            identity: self.identity,
-            received_ts_us: self.control.clock.now(),
-        };
+        let context = self.decode_context(self.control.clock.now());
         match decode_order_record(order, kind, recon_seq, &context) {
             Ok(event) => event,
             Err(error) => {
@@ -203,20 +186,18 @@ impl Actor {
             event.provenance, event.client_id.0, event.cumulative_qty.0, event.qty.0
         );
         self.note_event(&event);
-        self.events.send_exec(event);
+        self.session.events.send_exec(event);
         if !event.status.is_some_and(VenueOrderStatus::is_terminal) {
             return;
         }
         let mut outgoing = Vec::new();
-        self.core
-            .on_order_gone(event.client_id, event.cumulative_qty, &mut |effect| {
-                outgoing.push(Outgoing {
-                    effect,
-                    recon_seq: 0,
-                });
-            });
+        self.session.core.on_order_gone(
+            event.client_id,
+            event.cumulative_qty,
+            &mut Outgoing::sink(&mut outgoing, 0),
+        );
         self.dispatch(outgoing, writer).await;
-        self.finish_readiness_if_clean();
+        self.session.arm_readiness(self.control.clock.now());
     }
 
     // Only detects missing fills, never invents one. Recovery asks for the order's absolute
@@ -232,7 +213,9 @@ impl Actor {
         };
         let mut missed = Vec::new();
         let mut highest = None;
-        let is_primed = self.cursor_is_primed(instrument);
+        let is_primed = self
+            .cursor_mut(instrument)
+            .is_some_and(|cursor| cursor.is_primed);
         for trade in &trades {
             highest = Some(highest.map_or(trade.id, |seen: i64| seen.max(trade.id)));
             if is_primed && !self.has_seen_trade(trade.id) {
@@ -257,12 +240,8 @@ impl Actor {
                         "binance execution never saw trade {trade_id} on order {venue_order_id} — reconciling order {:016x}",
                         client_id.0
                     );
-                    self.core.on_ambiguous(client_id, &mut |effect| {
-                        outgoing.push(Outgoing {
-                            effect,
-                            recon_seq: 0,
-                        })
-                    });
+                    let core = &mut self.session.core;
+                    core.on_ambiguous(client_id, &mut Outgoing::sink(&mut outgoing, 0));
                 }
                 // `myTrades` lacks the client_id, so the order record is asked, which carries it.
                 None => {
@@ -413,14 +392,10 @@ impl Actor {
         }
         let mut outgoing = Vec::new();
         // Gone means it never rested, so the cumulative quantity is zero.
-        self.core.on_order_gone(client_id, Qty(0), &mut |effect| {
-            outgoing.push(Outgoing {
-                effect,
-                recon_seq: 0,
-            });
-        });
+        let core = &mut self.session.core;
+        core.on_order_gone(client_id, Qty(0), &mut Outgoing::sink(&mut outgoing, 0));
         self.dispatch(outgoing, writer).await;
-        self.finish_readiness_if_clean();
+        self.session.arm_readiness(self.control.clock.now());
     }
 
     // A -2011 on cancel probes whether the order is open and holds the latch. Anything else
@@ -435,23 +410,18 @@ impl Actor {
         let is_probe_due =
             class == RejectClass::Ambiguous && subject == RejectSubject::Cancellation;
         if !is_probe_due {
-            return self.core.re_arm_cancel(client_id);
+            return self.session.core.re_arm_cancel(client_id);
         }
         let mut outgoing = Vec::new();
-        self.core.on_ambiguous(client_id, &mut |effect| {
-            outgoing.push(Outgoing {
-                effect,
-                recon_seq: 0,
-            });
-        });
+        let core = &mut self.session.core;
+        core.on_ambiguous(client_id, &mut Outgoing::sink(&mut outgoing, 0));
         self.dispatch(outgoing, writer).await;
     }
 
-    fn cursor_is_primed(&self, instrument: InstrumentId) -> bool {
+    fn cursor_mut(&mut self, instrument: InstrumentId) -> Option<&mut TradeCursor> {
         self.cursors
-            .iter()
+            .iter_mut()
             .find(|cursor| cursor.instrument == instrument)
-            .is_some_and(|cursor| cursor.is_primed)
     }
 
     fn has_seen_trade(&self, trade_id: i64) -> bool {
@@ -460,11 +430,7 @@ impl Actor {
 
     // The first answer only primes the cursor; it never flags that page of history as missed fills.
     fn advance_cursor(&mut self, instrument: InstrumentId, highest: Option<i64>) {
-        let Some(cursor) = self
-            .cursors
-            .iter_mut()
-            .find(|cursor| cursor.instrument == instrument)
-        else {
+        let Some(cursor) = self.cursor_mut(instrument) else {
             return;
         };
         cursor.is_primed = true;
@@ -487,11 +453,7 @@ impl Actor {
     /// The cursor is this actor's whole memory of which fills it has examined, so putting a trade
     /// back in front of it is what turns an abandoned recovery into a retried one.
     fn rewind_cursor(&mut self, instrument: InstrumentId, trade_id: i64) {
-        let Some(cursor) = self
-            .cursors
-            .iter_mut()
-            .find(|cursor| cursor.instrument == instrument)
-        else {
+        let Some(cursor) = self.cursor_mut(instrument) else {
             return;
         };
         if cursor.from_id.is_none_or(|from_id| trade_id < from_id) {

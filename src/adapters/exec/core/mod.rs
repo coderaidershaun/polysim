@@ -45,6 +45,7 @@ pub struct ExecCore {
     mirror: OrderMirror,
     max_orders_per_side: usize,
     sweep: Option<CancelReason>,
+    has_opened_quoting: bool,
 }
 
 #[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -71,6 +72,7 @@ impl ExecCore {
             mirror: OrderMirror::with_capacity(mirror_capacity),
             max_orders_per_side,
             sweep: None,
+            has_opened_quoting: false,
         }
     }
 
@@ -107,9 +109,16 @@ impl ExecCore {
     pub fn on_stream_ready(&mut self) -> bool {
         if matches!(self.phase, Phase::Resyncing) && !self.mirror.has_prior_run() {
             self.phase = Phase::Quoting;
+            self.has_opened_quoting = true;
             return true;
         }
         false
+    }
+
+    /// Never resets. Before this run first quotes, any order found resting cannot be one it placed,
+    /// so the fold treats it as a prior run's.
+    pub fn has_opened_quoting(&self) -> bool {
+        self.has_opened_quoting
     }
 
     pub fn possibly_live_count(&self, instrument: InstrumentId, side: Side) -> usize {
@@ -122,6 +131,10 @@ impl ExecCore {
 
     pub fn is_mirrored(&self, client_id: ClientOrderId) -> bool {
         self.mirror.find(client_id).is_some()
+    }
+
+    pub fn mirrored(&self, client_id: ClientOrderId) -> Option<&MirroredOrder> {
+        self.mirror.find(client_id)
     }
 
     /// Only current-run placement released; prior-run identity with same id stays.

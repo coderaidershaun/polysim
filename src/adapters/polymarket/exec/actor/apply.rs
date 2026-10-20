@@ -10,11 +10,10 @@ use futures_util::SinkExt;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::adapters::exec::{
-    ExecEffect, ExecRequest, LifecycleFold, MirroredOrder, Outgoing, PlaceNotSentReason, RequestId,
-    SessionOutcome, SkipReason, TimeoutFallout, amend_not_sent, place_not_sent, request_timed_out,
-    stream_ready,
+    EventSink, ExecEffect, ExecRequest, InFlightRequest, Outgoing, PlaceNotSentReason, RequestId,
+    SessionOutcome, SkipReason, stream_ready,
 };
-use crate::ids::{ClientOrderId, InstrumentId, Side};
+use crate::ids::{ClientOrderId, Side};
 use crate::msg::exec::{CancelReason, ExecEvent};
 use crate::time::DurationUs;
 use crate::{error, info, warn};
@@ -24,50 +23,16 @@ use super::super::codec::{
     encode_request, subscribe_user_stream,
 };
 use super::super::correlate::{WithheldCancel, restates_balances};
-use super::rest::{Auth, Lane, RestJob, RestPurpose, Submitted};
+use super::rest::{Lane, RestJob, RestPurpose, Submitted};
 use super::{Actor, Writer};
 
 impl Actor {
-    pub(super) async fn plan_exit(&mut self, reason: CancelReason, writer: Option<&mut Writer>) {
-        if !self.control.open_exit(reason) {
-            return;
-        }
-        warn!("polymarket execution pulling every order this run owns: {reason:?}");
-        let outgoing = self.sweep_effects(reason, None);
-        self.dispatch(outgoing, writer).await;
-    }
-
-    // Retries are paced to conserve the cancel budget, and the core tracks one outstanding
-    // retry per order.
-    pub(super) async fn retry_sweep(&mut self, writer: Option<&mut Writer>) {
-        let Some(reason) = self.control.claim_sweep_retry() else {
-            return;
-        };
-        let outgoing = self.sweep_effects(reason, None);
-        self.dispatch(outgoing, writer).await;
-    }
-
-    pub(super) fn sweep_effects(
-        &mut self,
-        reason: CancelReason,
-        instrument: Option<InstrumentId>,
-    ) -> Vec<Outgoing> {
-        let mut outgoing = Vec::new();
-        self.core.begin_sweep(reason, instrument, &mut |effect| {
-            outgoing.push(Outgoing {
-                effect,
-                recon_seq: 0,
-            });
-        });
-        outgoing
-    }
-
     pub(super) async fn dispatch(
         &mut self,
         outgoing: Vec<Outgoing>,
         mut writer: Option<&mut Writer>,
     ) -> Option<SessionOutcome> {
-        let mut session = None;
+        let mut ended = None;
         for Outgoing { effect, recon_seq } in outgoing {
             match effect {
                 ExecEffect::Send {
@@ -78,24 +43,17 @@ impl Actor {
                         .send(request_id, request, recon_seq, writer.as_deref_mut())
                         .await
                     {
-                        session = Some(next);
+                        ended = Some(next);
                     }
                 }
                 ExecEffect::Skipped { client_id, reason } => self.on_skipped(client_id, reason),
-                ExecEffect::PlaceNotSent {
-                    instrument,
-                    client_id,
-                    side,
-                    reason,
-                } => self.on_place_not_sent(instrument, client_id, side, reason),
-                ExecEffect::AmendNotSent {
-                    instrument,
-                    client_id,
-                } => self.on_amend_not_sent(instrument, client_id),
+                ExecEffect::PlaceNotSent { .. } | ExecEffect::AmendNotSent { .. } => {
+                    self.session.on_unsent(&effect, self.control.clock.now());
+                }
                 ExecEffect::SweepComplete { reason } => self.on_sweep_complete(reason),
             }
         }
-        session
+        ended
     }
 
     async fn send(
@@ -109,7 +67,8 @@ impl Actor {
             return self.subscribe(writer).await;
         }
         if let Some(refusal) = self.decide_send(&request) {
-            self.report_refused(request, refusal);
+            self.session
+                .refuse(request, refusal, self.control.clock.now());
             return None;
         }
         if let Some(release_at) = self.cancel_hold(&request) {
@@ -134,7 +93,11 @@ impl Actor {
             Ok(encoded) => encoded,
             Err(error) => {
                 warn!("polymarket execution could not build a request: {error}");
-                self.report_refused(request, PlaceNotSentReason::Encoding);
+                self.session.refuse(
+                    request,
+                    PlaceNotSentReason::Encoding,
+                    self.control.clock.now(),
+                );
                 return None;
             }
         };
@@ -158,22 +121,26 @@ impl Actor {
             ),
             _ => (Lane::Control, None),
         };
-        let job = RestJob {
-            purpose: RestPurpose::Core {
-                request_id,
-                request,
-                recon_seq,
-                place,
-            },
-            request: encoded,
-            auth: Auth::Signed,
+        let purpose = RestPurpose::Core {
+            request_id,
+            request,
+            recon_seq,
+            place,
         };
-        if self.submit(lane, job) == Submitted::LaneFull {
-            self.report_refused(request, PlaceNotSentReason::NoTransport);
+        if self.submit(lane, RestJob::signed(purpose, encoded)) == Submitted::LaneFull {
+            self.session.refuse(
+                request,
+                PlaceNotSentReason::NoTransport,
+                self.control.clock.now(),
+            );
             return None;
         }
-        self.inflight
-            .record(request_id, request, self.control.clock.now(), recon_seq);
+        self.session.inflight.record(InFlightRequest {
+            request_id,
+            request,
+            sent_at: self.control.clock.now(),
+            recon_seq,
+        });
         None
     }
 
@@ -287,17 +254,11 @@ impl Actor {
         if !self.bindings.claim_allowance_refresh(token_id) {
             return;
         }
+        let purpose = RestPurpose::Allowance {
+            token_id: token_id.into(),
+        };
         let request = conditional_allowance_refresh(token_id, self.signature_type);
-        let submitted = self.submit(
-            Lane::Control,
-            RestJob {
-                purpose: RestPurpose::Allowance {
-                    token_id: token_id.into(),
-                },
-                request,
-                auth: Auth::Signed,
-            },
-        );
+        let submitted = self.submit(Lane::Control, RestJob::signed(purpose, request));
         // Only an answer clears the claim, and no answer is coming for a request that never left.
         // Left claimed, the token reads as cold forever and every sell on it is withheld for the
         // rest of the run.
@@ -336,79 +297,6 @@ impl Actor {
         }
     }
 
-    #[cold]
-    fn report_refused(&mut self, request: ExecRequest, reason: PlaceNotSentReason) {
-        match request {
-            ExecRequest::Place {
-                instrument,
-                client_id,
-                side,
-                ..
-            } => {
-                self.core.on_place_not_sent(client_id);
-                self.on_place_not_sent(instrument, client_id, side, reason);
-            }
-            ExecRequest::Cancel { client_id, .. } => self.core.re_arm_cancel(client_id),
-            ExecRequest::AmendQty {
-                instrument,
-                client_id,
-                ..
-            } => self.on_amend_not_sent(instrument, client_id),
-            _ => {}
-        }
-    }
-
-    /// This venue has no amend endpoint at all, so every amend that reaches the wire is refused here
-    /// — which makes the report the only thing releasing the hot slot. The order rests untouched;
-    /// without this the side waits out its in-flight timeout before it can quote again.
-    fn on_amend_not_sent(&mut self, instrument: InstrumentId, client_id: ClientOrderId) {
-        warn!(
-            "polymarket execution cannot amend {client_id:016x} — the order rests unchanged",
-            client_id = client_id.0
-        );
-        self.forward_exec(amend_not_sent(
-            instrument,
-            client_id,
-            self.control.clock.now(),
-        ));
-    }
-
-    /// The one event that closes a hot-side pending slot when no bytes reached the venue. Without
-    /// it an availability refusal or an unbuildable request leaves the slot waiting forever.
-    pub(super) fn on_place_not_sent(
-        &mut self,
-        instrument: InstrumentId,
-        client_id: ClientOrderId,
-        side: Side,
-        reason: PlaceNotSentReason,
-    ) {
-        let now = self.control.clock.now();
-        self.forward_exec(place_not_sent(instrument, client_id, side, now));
-        if reason.is_fatal() {
-            self.control.fatal.trip(format!(
-                "polymarket execution placement admission failed closed: {reason:?}"
-            ));
-        }
-    }
-
-    /// Bytes may have reached the venue, so the order may exist under an id this run never learned.
-    /// The resync's adopt rule is what recovers it.
-    pub(super) fn mark_transport_ambiguous(&mut self, request: ExecRequest) {
-        let TimeoutFallout::OrderInDoubt {
-            instrument,
-            client_id,
-        } = request.timeout_fallout()
-        else {
-            return;
-        };
-        let now = self.control.clock.now();
-        let side = self
-            .mirrored(client_id)
-            .map_or(Side::Buy, |order| order.side);
-        self.core.mark_ambiguous(client_id);
-        self.forward_exec(request_timed_out(instrument, client_id, side, now));
-    }
-
     fn on_skipped(&mut self, client_id: Option<ClientOrderId>, reason: SkipReason) {
         match reason {
             SkipReason::ForeignOrder => warn!(
@@ -431,49 +319,14 @@ impl Actor {
     }
 
     fn re_arm_after_sweep(&mut self) {
-        let mut outgoing = Vec::new();
-        self.core.on_connected(&mut |effect| {
-            outgoing.push(Outgoing {
-                effect,
-                recon_seq: 0,
-            });
-        });
-        // Only the subscribe effect can come out of `on_connected`, and the socket is already
-        // subscribed — so this re-reads state and re-opens quoting without touching the wire.
-        for Outgoing { effect, .. } in outgoing {
-            if let ExecEffect::Send { request, .. } = effect
-                && matches!(
-                    request,
-                    crate::adapters::exec::ExecRequest::SubscribeUserStream
-                )
-            {
-                self.forward_exec(stream_ready(self.control.clock.now()));
-                self.start_resync();
-            }
+        // Connecting the core again asks only for the stream subscription, or for nothing once the
+        // core has stopped for good. The socket is already subscribed, so this re-reads state and
+        // re-opens quoting without touching the wire.
+        if self.session.connect().is_empty() {
+            return;
         }
-    }
-
-    pub(super) fn mirrored(&self, client_id: ClientOrderId) -> Option<&MirroredOrder> {
-        self.core
-            .mirror()
-            .iter()
-            .find(|order| order.client_id == client_id)
-    }
-
-    pub(super) fn fold_mirror(
-        &mut self,
-        event: &ExecEvent,
-        recon_seq: u64,
-        outgoing: &mut Vec<Outgoing>,
-    ) {
-        LifecycleFold {
-            core: &mut self.core,
-            fatal: &self.control.fatal,
-            has_opened_quoting: self.has_opened_quoting,
-        }
-        .on_event(event, &mut |effect| {
-            outgoing.push(Outgoing { effect, recon_seq });
-        });
+        self.forward_exec(stream_ready(self.control.clock.now()));
+        self.start_resync();
     }
 
     pub(super) fn forward_exec(&mut self, event: ExecEvent) {
@@ -484,6 +337,6 @@ impl Actor {
         if restates_balances(&event) {
             self.restate_balances();
         }
-        self.events.send_exec(event);
+        self.session.events.send_exec(event);
     }
 }

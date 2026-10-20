@@ -2,14 +2,14 @@
 //! only place an order's venue id ever appears — so this is also where correlation is established
 //! and where the frames held waiting for it are released.
 
-use crate::adapters::exec::{ExecRequest, Outgoing, SessionOutcome};
+use crate::adapters::exec::{ExecRequest, Outgoing, PlaceNotSentReason, SessionOutcome};
 use crate::msg::exec::ExecEvent;
 use crate::{error, info, warn};
 
 use super::super::binding::BindingStep;
 use super::super::codec::{
-    DecodeContext, KnownOrder, PlaceRequestContext, PlacementStatus, VenueAnswer, decode_cancel,
-    decode_neg_risk, decode_place, decode_single_order,
+    DecodeContext, KnownOrder, PlaceRequestContext, PlacementStatus, VenueAnswer, WireError,
+    decode_cancel, decode_neg_risk, decode_place, decode_single_order,
 };
 use super::super::rest::{ClobHttpError, ClobResponse};
 use super::rest::{OpenOrdersRead, RestOutcome, RestPurpose};
@@ -118,7 +118,7 @@ impl Actor {
         answer: Result<ClobResponse, ClobHttpError>,
         writer: Option<&mut Writer>,
     ) -> Option<SessionOutcome> {
-        let Some(entry) = self.inflight.take(request_id) else {
+        let Some(entry) = self.session.inflight.take(request_id) else {
             self.counts.unmatched_answers += 1;
             return None;
         };
@@ -150,18 +150,18 @@ impl Actor {
                 request_sent_ts_us: Some(entry.sent_at),
                 ..event
             };
-            self.fold_mirror(&event, recon_seq, &mut outgoing);
+            self.session.fold(&event, recon_seq, &mut outgoing);
             // Finding the order still alive on a status probe is what settles an ambiguous cancel here.
             if matches!(request, ExecRequest::OrderStatus { client_id, .. } if client_id == event.client_id)
                 && event.status.is_some_and(|status| !status.is_terminal())
             {
-                self.core.re_arm_cancel(event.client_id);
+                self.session.core.re_arm_cancel(event.client_id);
             }
             self.forward_exec(event);
         }
-        let session = self.dispatch(outgoing, writer).await;
+        let ended = self.dispatch(outgoing, writer).await;
         self.finish_readiness_if_clean();
-        session
+        ended
     }
 
     fn decode_core(
@@ -177,41 +177,20 @@ impl Actor {
                 let Some(context) = place else {
                     return Vec::new();
                 };
-                self.on_place_answer(&context, response, outgoing)
+                self.on_place_answer(*request, &context, response, outgoing)
             }
             ExecRequest::Cancel { .. } => {
-                let decoded = {
-                    let context = self.decode_context();
-                    decode_cancel(response.answer(), &context)
-                };
-                match decoded {
-                    Ok(VenueAnswer::Answered(events)) => events,
-                    Ok(VenueAnswer::Unavailable(availability)) => {
-                        self.on_unavailable(availability);
-                        Vec::new()
-                    }
-                    Err(error) => {
-                        warn!("polymarket execution could not read a cancel answer: {error}");
-                        Vec::new()
-                    }
-                }
+                let decoded = decode_cancel(response.answer(), &self.decode_context());
+                self.answered(decoded, "a cancel answer")
+                    .unwrap_or_default()
             }
             ExecRequest::OrderStatus { .. } => {
-                let decoded = {
-                    let context = self.decode_context();
-                    decode_single_order(response.answer(), recon_seq, &context)
-                };
-                match decoded {
-                    Ok(VenueAnswer::Answered(event)) => event.into_iter().collect(),
-                    Ok(VenueAnswer::Unavailable(availability)) => {
-                        self.on_unavailable(availability);
-                        Vec::new()
-                    }
-                    Err(error) => {
-                        warn!("polymarket execution could not read an order answer: {error}");
-                        Vec::new()
-                    }
-                }
+                let decoded =
+                    decode_single_order(response.answer(), recon_seq, &self.decode_context());
+                self.answered(decoded, "an order answer")
+                    .flatten()
+                    .into_iter()
+                    .collect()
             }
             ExecRequest::OpenOrders { .. }
             | ExecRequest::AmendQty { .. }
@@ -219,38 +198,52 @@ impl Actor {
         }
     }
 
+    /// Parks the driver on a venue-availability verdict and logs an answer that cannot be read;
+    /// either way there is nothing to fold.
+    pub(super) fn answered<T>(
+        &mut self,
+        decoded: Result<VenueAnswer<T>, WireError>,
+        what: &str,
+    ) -> Option<T> {
+        match decoded {
+            Ok(VenueAnswer::Answered(answer)) => Some(answer),
+            Ok(VenueAnswer::Unavailable(availability)) => {
+                self.on_unavailable(availability);
+                None
+            }
+            Err(error) => {
+                warn!("polymarket execution could not read {what}: {error}");
+                None
+            }
+        }
+    }
+
     /// The only answer that mints a mapping. All downstream flows depend on this record.
     fn on_place_answer(
         &mut self,
+        request: ExecRequest,
         context: &PlaceRequestContext,
         response: &ClobResponse,
         outgoing: &mut Vec<Outgoing>,
     ) -> Vec<ExecEvent> {
-        let decoded = {
-            let decode = self.decode_context();
-            decode_place(response.answer(), context, &decode)
-        };
+        let decoded = decode_place(response.answer(), context, &self.decode_context());
         let outcome = match decoded {
             Ok(VenueAnswer::Answered(outcome)) => outcome,
             Ok(VenueAnswer::Unavailable(availability)) => {
                 self.on_unavailable(availability);
                 // The venue is unavailable, so the hot side's pending slot must be released
                 // here or it hangs waiting forever.
-                self.core.on_place_not_sent(context.client_id);
-                self.on_place_not_sent(
-                    context.instrument,
-                    context.client_id,
-                    context.side,
-                    crate::adapters::exec::PlaceNotSentReason::NoTransport,
+                self.session.refuse(
+                    request,
+                    PlaceNotSentReason::NoTransport,
+                    self.control.clock.now(),
                 );
                 return Vec::new();
             }
             Err(error) => {
                 error!("polymarket execution could not read a placement answer: {error}");
-                self.mark_transport_ambiguous(ExecRequest::Cancel {
-                    instrument: context.instrument,
-                    client_id: context.client_id,
-                });
+                self.session
+                    .mark_in_doubt(request, self.control.clock.now());
                 self.nudge_resync();
                 return Vec::new();
             }
@@ -280,6 +273,7 @@ impl Actor {
             return;
         }
         let live: Vec<crate::ids::ClientOrderId> = self
+            .session
             .core
             .mirror()
             .iter()
@@ -302,7 +296,8 @@ impl Actor {
     /// The request's bytes may have already reached the venue, so resync adoption is the
     /// recovery path here rather than a blind retry.
     fn on_transport_failure(&mut self, request: ExecRequest) {
-        self.mark_transport_ambiguous(request);
+        self.session
+            .mark_in_doubt(request, self.control.clock.now());
         if matches!(request, ExecRequest::Place { .. }) {
             self.nudge_resync();
         }
