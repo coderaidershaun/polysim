@@ -14,11 +14,11 @@ use super::record::{Level, LogRecord};
 use crate::time::TsUs;
 
 const UNREGISTERED_TAG: &str = "unregistered";
+const RING_CAPACITY: usize = 8192;
 
 struct Globals {
     registrations: Sender<Registration>,
     backtraces: Sender<BacktraceMessage>,
-    ring_capacity: usize,
 }
 
 static GLOBALS: OnceLock<Globals> = OnceLock::new();
@@ -55,13 +55,12 @@ tokio::task_local! {
     static TASK_LANE: RefCell<Option<Lane>>;
 }
 
-pub(super) fn install(ring_capacity: usize) -> DrainChannels {
+pub(super) fn install() -> DrainChannels {
     let (registration_tx, registration_rx) = mpsc::channel();
     let (backtrace_tx, backtrace_rx) = mpsc::channel();
     let globals = Globals {
         registrations: registration_tx,
         backtraces: backtrace_tx,
-        ring_capacity,
     };
     if GLOBALS.set(globals).is_err() {
         panic!("log::init called more than once");
@@ -74,7 +73,7 @@ pub(super) fn install(ring_capacity: usize) -> DrainChannels {
 
 /// Tags the calling OS thread's lane. A tokio task must use [`tag_task`] instead: tasks share the
 /// worker pool's threads, so a registration made inside one task is overwritten by the next task to
-/// land on that worker. Uses ring capacity from init(); no-op if init() not run.
+/// land on that worker. Does nothing if `init` has not run.
 pub fn register_thread(tag: &'static str) {
     let lane = open_lane(tag);
     THREAD_LANE.with(|cell| {
@@ -108,7 +107,7 @@ pub(crate) fn register_external_ring(
 
 fn open_lane(tag: &'static str) -> Option<Lane> {
     let globals = GLOBALS.get()?;
-    let (producer, consumer) = RingBuffer::<LogRecord>::new(globals.ring_capacity);
+    let (producer, consumer) = RingBuffer::<LogRecord>::new(RING_CAPACITY);
     let drops = Arc::new(AtomicU64::new(0));
     let registration = Registration {
         tag,

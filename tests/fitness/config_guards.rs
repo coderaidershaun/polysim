@@ -265,8 +265,8 @@ source:
             config_with_source(BINANCE_PERP_SOURCE)
                 .replace("spin_interval_us: 100000", "spin_interval_us: 90000000"),
             |error: &ConfigError| {
-                matches!(error, ConfigError::EngineFieldRange { field, value, .. }
-                    if *field == "spin_interval_us" && *value == 90_000_000)
+                matches!(error, ConfigError::Invalid { field, value, .. }
+                    if *field == "engine.spin_interval_us" && value.as_ref() == "90000000")
             },
         ),
         (
@@ -352,6 +352,27 @@ source:
             is_expected_refusal(&error),
             "{case}: the refusal must name the field, got: {error}"
         );
+    }
+}
+
+/// A Linux engine with no hot core named would run its hot thread unpinned without a word, so the
+/// config refuses it there. macOS cannot pin a thread at all, so the same document loads.
+#[test]
+fn the_hot_core_is_required_on_linux_and_ignored_elsewhere() {
+    let unpinned = config_with_source(BINANCE_PERP_SOURCE).replace("  hot_core_id: 0\n", "");
+    assert!(
+        !unpinned.contains("hot_core_id"),
+        "the document under test must name no hot core"
+    );
+    let loaded = polysim::config::Config::<NoParams>::from_yaml(&unpinned);
+    if cfg!(target_os = "linux") {
+        assert!(
+            matches!(loaded, Err(ConfigError::MissingHotCoreId)),
+            "linux must refuse a document with no hot core, got {loaded:?}"
+        );
+    } else {
+        let config = loaded.expect("a document with no hot core loads where nothing is pinned");
+        Registry::build(&config).expect("and its registry builds");
     }
 }
 

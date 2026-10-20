@@ -8,7 +8,6 @@ mod frame;
 mod subscribers;
 mod wire;
 
-pub use actor::LinkHandle;
 pub(crate) use actor::{LinkActor, LinkActorSetup, PeerFeed};
 
 pub use control::{

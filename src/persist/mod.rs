@@ -5,8 +5,7 @@ mod drain;
 mod schema;
 mod table;
 
-use std::any::Any;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::config::{ExecutionMode, RecordedTables, StrategyId, TradingEngineId};
 
@@ -59,20 +58,10 @@ pub enum PersistError {
 }
 
 impl PersistError {
-    /// Panic = breach the panic hook already turned fatal; this only reports it, never re-raises.
-    fn writer_panicked(payload: &(dyn Any + Send)) -> Self {
-        PersistError::WriterPanicked {
-            payload: panic_payload_string(payload),
+    fn io_at(path: &Path) -> impl FnOnce(std::io::Error) -> Self + '_ {
+        move |source| Self::Io {
+            path: path.to_path_buf(),
+            source,
         }
-    }
-}
-
-fn panic_payload_string(payload: &(dyn Any + Send)) -> Box<str> {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).into()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.as_str().into()
-    } else {
-        "non-string panic payload".into()
     }
 }

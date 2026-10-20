@@ -426,7 +426,7 @@ pub fn check_poly_market(market: &GammaMarket) -> Result<(), EngineError> {
 }
 
 /// Map Gamma resolve failure: missing market/too-few windows -> series-not-found, else unreachable.
-pub fn classify_poly_resolve(series: PolySeries, error: GammaError) -> EngineError {
+fn classify_poly_resolve(series: PolySeries, error: GammaError) -> EngineError {
     match error {
         GammaError::MarketNotFound { .. } | GammaError::FallbackTooFew { .. } => {
             EngineError::ScalePolySeriesUnknown {

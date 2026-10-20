@@ -12,7 +12,7 @@ use parquet::file::properties::WriterProperties;
 use arrow_schema::SchemaRef;
 
 use crate::info;
-use crate::time::{TsUs, civil_from_days};
+use crate::time::TsUs;
 
 use super::PersistError;
 use super::schema::TableRow;
@@ -22,8 +22,6 @@ const ROWS_PER_SEAL: u64 = 10_000;
 
 const ZSTD_LEVEL: i32 = 3;
 const US_PER_HOUR: i64 = 3_600_000_000;
-const SECONDS_PER_HOUR: i64 = 3_600;
-const SECONDS_PER_DAY: i64 = 86_400;
 
 struct OpenFile {
     writer: ArrowWriter<File>,
@@ -142,15 +140,9 @@ impl<R: TableRow> TableWriter<R> {
         let path = self.file_path(hour_bucket, self.next_sequence);
         self.next_sequence += 1;
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| PersistError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
+            std::fs::create_dir_all(parent).map_err(PersistError::io_at(parent))?;
         }
-        let file = File::create(&path).map_err(|source| PersistError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let file = File::create(&path).map_err(PersistError::io_at(&path))?;
         let writer =
             ArrowWriter::try_new(file, self.schema.clone(), Some(self.writer_properties()))
                 .map_err(|source| PersistError::Parquet {
@@ -183,13 +175,13 @@ impl<R: TableRow> TableWriter<R> {
 
     /// Zero-padded sequence -> path sort = seal order.
     fn file_path(&self, hour_bucket: i64, sequence: u32) -> PathBuf {
-        let (year, month, day, hour_of_day) = civil_hour(hour_bucket);
+        let at = TsUs::from_micros(hour_bucket * US_PER_HOUR).civil();
         let mut path = self.run_dir.clone();
         path.push(R::NAME);
-        path.push(format!("date={year:04}-{month:02}-{day:02}"));
+        path.push(format!("date={:04}-{:02}-{:02}", at.year, at.month, at.day));
         path.push(format!(
-            "{hour_of_day:02}-{}-{sequence:06}.parquet",
-            self.boot_ts_us
+            "{:02}-{}-{sequence:06}.parquet",
+            at.hour, self.boot_ts_us
         ));
         path
     }
@@ -197,13 +189,4 @@ impl<R: TableRow> TableWriter<R> {
 
 fn hour_bucket(ts: TsUs) -> i64 {
     ts.micros().div_euclid(US_PER_HOUR)
-}
-
-/// Hand-rolled UTC (year, month, day, hour) — no calendar crate dependency.
-fn civil_hour(hour_bucket: i64) -> (i64, u32, u32, u32) {
-    let seconds = hour_bucket * SECONDS_PER_HOUR;
-    let days = seconds.div_euclid(SECONDS_PER_DAY);
-    let hour_of_day = (seconds.rem_euclid(SECONDS_PER_DAY) / SECONDS_PER_HOUR) as u32;
-    let (year, month, day) = civil_from_days(days);
-    (year, month, day, hour_of_day)
 }

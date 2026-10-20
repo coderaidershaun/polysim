@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use tokio::runtime::Handle;
-use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::adapters::backoff::BackoffCaps;
@@ -22,7 +21,7 @@ use crate::ids::{InstrumentId, StreamEpoch};
 use crate::link::RunState;
 use crate::msg::inbound::{InboundMessage, TappedMessage, VenueMeta};
 use crate::registry::{ConnectionCategory, InstrumentRow, ProducerGroup};
-use crate::shutdown::{FatalSignal, RunStateCell};
+use crate::shutdown::{FatalSignal, RunStateCell, TaskHandle};
 use crate::time::{EngineClock, TsUs};
 use crate::{error, info, warn, warn_repeating};
 
@@ -62,16 +61,6 @@ pub struct BinanceAdapterContext {
     pub rest_quiet: SharedRestQuiet,
 }
 
-pub struct BinanceAdapterHandle {
-    join: JoinHandle<()>,
-}
-
-impl BinanceAdapterHandle {
-    pub async fn shutdown(self) {
-        crate::shutdown::abort_and_warn(self.join, "binance adapter").await;
-    }
-}
-
 pub struct BinanceAdapter;
 
 impl BinanceAdapter {
@@ -82,10 +71,10 @@ impl BinanceAdapter {
         producer: QueueProducer,
         context: BinanceAdapterContext,
         rt: &Handle,
-    ) -> BinanceAdapterHandle {
+    ) -> TaskHandle {
         let actor = Actor::new(group, market, instruments, producer, context);
         let join = rt.spawn(crate::log::tag_task("binance", actor.run()));
-        BinanceAdapterHandle { join }
+        TaskHandle::new(join, "binance adapter")
     }
 }
 

@@ -45,6 +45,12 @@ pub(super) struct InstrumentEntry {
     pub(super) basis_quote: i64,
 }
 
+impl InstrumentEntry {
+    pub(super) fn is_zero(&self) -> bool {
+        self.position_base == 0 && self.cash_quote == 0 && self.basis_quote == 0
+    }
+}
+
 /// Asset entries (derived from instruments at write for human readability; load recomputes, avoids second source of truth).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -119,10 +125,7 @@ pub(super) fn write_atomically(
         source: std::io::Error::other(error),
     })?;
     let directory = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(directory).map_err(|source| ExposureError::Write {
-        path: directory.to_path_buf(),
-        source,
-    })?;
+    std::fs::create_dir_all(directory).map_err(ExposureError::write_at(directory))?;
     let temporary = temporary_path(path);
     if let Err(error) = write_then_rename(&temporary, path, &body) {
         remove_temporary(&temporary);
@@ -133,24 +136,13 @@ pub(super) fn write_atomically(
 }
 
 fn write_then_rename(temporary: &Path, path: &Path, body: &[u8]) -> Result<(), ExposureError> {
-    let mut file = File::create(temporary).map_err(|source| ExposureError::Write {
-        path: temporary.to_path_buf(),
-        source,
-    })?;
+    let mut file = File::create(temporary).map_err(ExposureError::write_at(temporary))?;
     file.write_all(body)
-        .map_err(|source| ExposureError::Write {
-            path: temporary.to_path_buf(),
-            source,
-        })?;
+        .map_err(ExposureError::write_at(temporary))?;
     // Fsync before rename: rename publishes, don't publish unflushed bytes.
-    file.sync_all().map_err(|source| ExposureError::Write {
-        path: temporary.to_path_buf(),
-        source,
-    })?;
-    std::fs::rename(temporary, path).map_err(|source| ExposureError::Write {
-        path: path.to_path_buf(),
-        source,
-    })
+    file.sync_all()
+        .map_err(ExposureError::write_at(temporary))?;
+    std::fs::rename(temporary, path).map_err(ExposureError::write_at(path))
 }
 
 /// Dir fsync needed for rename durability; failure warns (prior file still exists, one write stale).

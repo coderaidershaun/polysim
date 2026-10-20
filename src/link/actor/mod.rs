@@ -12,13 +12,12 @@ use std::time::Duration;
 use rtrb::Consumer;
 use tokio::net::UdpSocket;
 use tokio::runtime::Handle;
-use tokio::task::JoinHandle;
 
 use crate::config::{ControllerLoss, ExecutionMode};
 use crate::hot::spawn::LinkQueueProducer;
 use crate::msg::inbound::{InboundMessage, RunControl};
 use crate::msg::ui::UiChannels;
-use crate::shutdown::{RunAssertion, RunControlGate};
+use crate::shutdown::{RunAssertion, RunControlGate, TaskHandle};
 use crate::time::{DurationUs, EngineClock, TsUs};
 use crate::{info, warn, warn_repeating};
 
@@ -69,23 +68,12 @@ pub(crate) struct LinkActorSetup {
     pub feature_count: u16,
 }
 
-pub struct LinkHandle {
-    join: JoinHandle<()>,
-}
-
-impl LinkHandle {
-    pub async fn shutdown(self) {
-        crate::shutdown::abort_and_warn(self.join, "link").await;
-    }
-}
-
 pub(crate) struct LinkActor;
 
 impl LinkActor {
-    pub(crate) fn spawn(setup: LinkActorSetup, rt: &Handle) -> LinkHandle {
-        LinkHandle {
-            join: rt.spawn(crate::log::tag_task("link", Actor::new(setup).run())),
-        }
+    pub(crate) fn spawn(setup: LinkActorSetup, rt: &Handle) -> TaskHandle {
+        let join = rt.spawn(crate::log::tag_task("link", Actor::new(setup).run()));
+        TaskHandle::new(join, "link")
     }
 }
 

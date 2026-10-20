@@ -1,5 +1,5 @@
-//! Instruments sharing one venue connection -> one group, one input queue.
-//! Binance splits by (market, category); Polymarket on one socket per series.
+//! Instruments that share one venue connection form one producer group with one input queue.
+//! Binance opens a connection per market and category; Polymarket opens one per series.
 
 use crate::config::{BinanceMarket, PolySeries, Subscriptions, VenueMarket};
 use crate::ids::{InstrumentId, QueueId, SourceId};
@@ -20,6 +20,17 @@ labelled_enum! {
 }
 
 impl ConnectionCategory {
+    fn serving(market: VenueMarket) -> &'static [ConnectionCategory] {
+        match market {
+            VenueMarket::Binance(_) => &[
+                ConnectionCategory::Trades,
+                ConnectionCategory::Depth,
+                ConnectionCategory::Klines,
+            ],
+            VenueMarket::Polymarket(_) => &[ConnectionCategory::Market],
+        }
+    }
+
     fn is_active_for(self, subscriptions: &Subscriptions) -> bool {
         match self {
             ConnectionCategory::Trades => subscriptions.trades,
@@ -42,58 +53,43 @@ pub struct ProducerGroup {
     pub instruments: Vec<InstrumentId>,
 }
 
+// Group order fixes the queue and source ids, and those ids are recorded on every message, so a
+// new order would re-attribute every recorded tape.
 pub(super) fn group_producers(instruments: &[InstrumentRow]) -> Vec<ProducerGroup> {
+    let binance = [BinanceMarket::Spot, BinanceMarket::Perpetual].map(VenueMarket::Binance);
+    let polymarket = poly_series_present(instruments)
+        .into_iter()
+        .map(VenueMarket::Polymarket);
     let mut groups = Vec::new();
-    group_binance(instruments, &mut groups);
-    group_polymarket(instruments, &mut groups);
+    for market in binance.into_iter().chain(polymarket) {
+        push_market_groups(&mut groups, instruments, market);
+    }
     groups
 }
 
-fn group_binance(instruments: &[InstrumentRow], groups: &mut Vec<ProducerGroup>) {
-    for binance_market in [BinanceMarket::Spot, BinanceMarket::Perpetual] {
-        let market = VenueMarket::Binance(binance_market);
-        let members: Vec<&InstrumentRow> = instruments
+fn push_market_groups(
+    groups: &mut Vec<ProducerGroup>,
+    instruments: &[InstrumentRow],
+    market: VenueMarket,
+) {
+    for &category in ConnectionCategory::serving(market) {
+        let subscribed: Vec<InstrumentId> = instruments
             .iter()
-            .filter(|row| row.market == market)
+            .filter(|row| row.market == market && category.is_active_for(&row.subscriptions))
+            .map(|row| row.instrument_id)
             .collect();
-        if members.is_empty() {
-            continue;
-        }
-        for category in [
-            ConnectionCategory::Trades,
-            ConnectionCategory::Depth,
-            ConnectionCategory::Klines,
-        ] {
-            let subscribed = subscribed_ids(&members, category);
-            if subscribed.is_empty() {
-                continue;
-            }
-            push_group(groups, market, category, subscribed);
-        }
-    }
-}
-
-fn group_polymarket(instruments: &[InstrumentRow], groups: &mut Vec<ProducerGroup>) {
-    for series in poly_series_present(instruments) {
-        let market = VenueMarket::Polymarket(series);
-        let members: Vec<&InstrumentRow> = instruments
-            .iter()
-            .filter(|row| row.market == market)
-            .collect();
-        let subscribed = subscribed_ids(&members, ConnectionCategory::Market);
         if subscribed.is_empty() {
             continue;
         }
-        push_group(groups, market, ConnectionCategory::Market, subscribed);
+        let ordinal = groups.len();
+        groups.push(ProducerGroup {
+            source_id: SourceId(ordinal as u16),
+            queue_id: QueueId(ordinal as u8),
+            market,
+            category,
+            instruments: subscribed,
+        });
     }
-}
-
-fn subscribed_ids(members: &[&InstrumentRow], category: ConnectionCategory) -> Vec<InstrumentId> {
-    members
-        .iter()
-        .filter(|row| category.is_active_for(&row.subscriptions))
-        .map(|row| row.instrument_id)
-        .collect()
 }
 
 fn poly_series_present(instruments: &[InstrumentRow]) -> Vec<PolySeries> {
@@ -106,20 +102,4 @@ fn poly_series_present(instruments: &[InstrumentRow]) -> Vec<PolySeries> {
         }
     }
     seen
-}
-
-fn push_group(
-    groups: &mut Vec<ProducerGroup>,
-    market: VenueMarket,
-    category: ConnectionCategory,
-    instruments: Vec<InstrumentId>,
-) {
-    let ordinal = groups.len();
-    groups.push(ProducerGroup {
-        source_id: SourceId(ordinal as u16),
-        queue_id: QueueId(ordinal as u8),
-        market,
-        category,
-        instruments,
-    });
 }

@@ -9,7 +9,7 @@ use crate::adapters::polymarket::rest::GammaError;
 use crate::config::ConfigError;
 use crate::exposure::ExposureError;
 use crate::ids::{DecimalError, Price, Qty};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(thiserror::Error, Debug)]
 pub enum EngineError {
@@ -203,4 +203,13 @@ pub enum EngineError {
         found: usize,
         max: usize,
     },
+}
+
+impl EngineError {
+    pub(super) fn identity_io_at(path: &Path) -> impl FnOnce(std::io::Error) -> Self + '_ {
+        move |source| Self::ExecutionIdentityIo {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
 }

@@ -2,16 +2,15 @@
 //! under a watchdog deadline.
 //!
 //! Every submodule is either a PHASE of one run — `prepare`, `run`, `drain`, in that order — or the
-//! bring-up of ONE subsystem, named for it: `adapters`, `exec`, `exposure`, `link`, `persist`,
-//! `metrics`, `timer`, `queues`. The rest are leaves those two lean on: `error`, `preflight`,
-//! `rate_limits`, `exec_identity`.
+//! bring-up of ONE subsystem, named for it: `adapters`, `exec`, `link`, `persist`, `metrics`,
+//! `timer`, `queues`. The rest are leaves those two lean on: `error`, `preflight`, `rate_limits`,
+//! `exec_identity`.
 
 mod adapters;
 mod drain;
 mod error;
 mod exec;
 mod exec_identity;
-mod exposure;
 mod link;
 mod metrics;
 mod persist;
@@ -24,7 +23,6 @@ mod sim;
 mod timer;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -36,41 +34,37 @@ use tokio::sync::mpsc;
 use crate::adapters::exec::EdgeHandle;
 use crate::adapters::polymarket::rotation::WindowAssignment;
 use crate::config::{Config, ExecutionMode, RunIdentity};
-use crate::exposure::ExposureHandle;
+use crate::exposure::{ExposureHandle, ExposureWriter, ExposureWriterConfig};
 use crate::hot::dispatch::{ExposureWiring, HotEngine, HotEngineSetup, LinkWiring};
 use crate::hot::metrics::MetricsSnapshot;
 use crate::hot::spawn::{HotThreadConfig, SimTapGate, spawn_hot_thread};
 use crate::hot::strategy::Strategy;
-use crate::link::{LinkActor, LinkActorSetup, LinkHandle, OutboundLink};
+use crate::link::{LinkActor, LinkActorSetup, OutboundLink};
 use crate::log::{self, LogConfig, LogHandle, LogRecord};
 use crate::msg::persist::RotationRow;
 use crate::msg::ui::{UiCatalog, UiLifecycle, ui_channel};
 use crate::persist::PersistHandle;
-use crate::shutdown::{DrainSignal, FatalSignal, RunControlGate, ShutdownRequest};
+use crate::shutdown::{DrainSignal, FatalSignal, RunControlGate, ShutdownRequest, TaskHandle};
 use crate::sink::{LinkSink, MetricsSink, StrategyLogSink};
 use crate::time::{DurationUs, EngineClock};
 use crate::{error, info};
 
-use adapters::{AdapterWiring, SpawnedAdapter, spawn_adapters, tap_heartbeat};
-use drain::{
-    Trigger, install_panic_hook, join_hot, report_drain_failure, spawn_watchdog,
-    stop_edge_producers, wait_for_shutdown,
-};
+use adapters::{AdapterWiring, spawn_adapters, tap_heartbeat};
+use drain::install_panic_hook;
 use exec::{ExecBringUp, ExecBringUpSetup, exec_bring_up};
-use exposure::exposure_bring_up;
 use link::link_bring_up;
 use metrics::MetricsHandle;
 use persist::{PersistBringUp, PersistBringUpSetup, persist_bring_up};
 use prepare::{Prepared, prepare};
 use queues::{InputQueues, attach_market_taps, build_input_queues};
-use timer::TimerHandle;
+use timer::spawn_timer;
 
 pub use drain::decide_exit;
 pub use error::EngineError;
 pub use exec_identity::ExecutionLease;
 pub use preflight::{
     SymbolScales, check_poly_market, check_symbol_order_capacity, check_symbol_scale,
-    classify_poly_resolve, stamp_poly_scales,
+    stamp_poly_scales,
 };
 pub use rate_limits::{check_order_rate_limits, order_budget};
 pub use run::run_trading_engine;
@@ -98,10 +92,10 @@ struct Engine {
     runtime: Runtime,
     log_handle: LogHandle,
     hot: JoinHandle<()>,
-    adapters: Vec<SpawnedAdapter>,
-    timer: TimerHandle,
+    adapters: Vec<TaskHandle>,
+    timer: TaskHandle,
     /// `None` when the config carries no `link:` block.
-    link: Option<LinkHandle>,
+    link: Option<TaskHandle>,
     /// `None` when the config carries no `persistence:` block.
     persistence: Option<PersistHandle>,
     /// Always present, since position outlives any single run.
@@ -143,7 +137,6 @@ impl Engine {
         let log_handle = log::init(&LogConfig {
             dir: config.logging.dir.clone(),
             file_stem: ExecutionMode::artifact_stem(mode, &identity).into(),
-            ..LogConfig::default()
         });
         log::register_thread("main");
         info!("polysim starting — trading engine {identity}");
@@ -206,14 +199,17 @@ impl Engine {
             rotations: rotations_rx,
         });
 
-        // This runs before the hot thread, so the writer knows the disk state before
-        // anything changes it; the sink it produces goes to the hot engine.
-        let (exposure, exposure_sink) = exposure_bring_up(
-            &config.exposure,
-            &identity,
-            &registry,
+        // This runs before the hot thread, so the writer knows the disk state before anything
+        // changes it. `mode` names the ledger file, so it must be the same value the load was
+        // given, or this run writes a ledger it did not read.
+        let (exposure, exposure_sink) = ExposureWriter::spawn(
+            ExposureWriterConfig::new(
+                config.exposure.dir.clone(),
+                identity.clone(),
+                mode,
+                &registry,
+            ),
             &restored_exposure,
-            mode,
         );
 
         let (metrics_producer, metrics_consumer) =
@@ -259,6 +255,7 @@ impl Engine {
         // keeps its own separate one.
         let clock = EngineClock::start();
         let drain_deadline = Duration::from_millis(config.engine.drain_deadline_ms);
+        let spin_interval = config.engine.spin_interval();
         let ExecBringUp {
             wiring: exec_wiring,
             spawn: exec_spawn,
@@ -276,7 +273,7 @@ impl Engine {
             fatal: &fatal,
             desired_run_state: control.desired().clone(),
             drain_deadline,
-            spin_interval: DurationUs::from_micros(config.engine.spin_interval_us as i64),
+            spin_interval,
             input_capacity: config.queues.input_capacity,
             lease_dir: &config.exposure.dir,
         }) {
@@ -331,8 +328,7 @@ impl Engine {
             move |pop, message| hot_engine.dispatch(pop, &message),
         );
 
-        let interval = DurationUs::from_micros(config.engine.spin_interval_us as i64);
-        let timer = TimerHandle::spawn(interval, timer_producer, &clock, &tokio_handle);
+        let timer = spawn_timer(spin_interval, timer_producer, &clock, &tokio_handle);
         // This runs after the hot thread, so input-queue producers start only after their
         // consumer exists.
         let exec = exec_spawn.map(|spawn| spawn(&tokio_handle));
@@ -381,7 +377,7 @@ impl Engine {
                     channels: ui_channels,
                     control,
                     clock: clock.clone(),
-                    spin_interval: interval,
+                    spin_interval,
                     topic_count: bound.topic_count,
                     feature_count: bound.feature_count,
                 },
@@ -408,96 +404,5 @@ impl Engine {
             lifecycle,
             drain_deadline,
         })
-    }
-
-    /// Blocks until a signal, a shutdown request, or a fatal trip, then drains under a
-    /// hard deadline enforced by a watchdog.
-    fn run_until_shutdown(self) -> ExitReport {
-        let Engine {
-            _execution_lease: execution_lease,
-            runtime,
-            log_handle,
-            hot,
-            adapters,
-            timer,
-            link,
-            persistence,
-            exposure,
-            exec,
-            exec_tap_gate,
-            metrics,
-            fatal,
-            drain,
-            shutdown,
-            lifecycle,
-            drain_deadline,
-        } = self;
-
-        let trigger = runtime.block_on(wait_for_shutdown(&fatal, &shutdown));
-        let drain_reason: Box<str> = match &trigger {
-            Trigger::Signal(name) => {
-                info!("received {name} — draining");
-                format!("received {name}").into()
-            }
-            Trigger::Fatal => {
-                let reason = fatal
-                    .reason()
-                    .unwrap_or_else(|| Box::<str>::from("fatal signal tripped"));
-                error!("fatal: {reason} — draining");
-                reason
-            }
-        };
-        // Uses try_send only, so a dead receiver never blocks the drain.
-        lifecycle
-            .try_send(UiLifecycle::Draining {
-                reason: drain_reason,
-            })
-            .ok();
-
-        let done = Arc::new(AtomicBool::new(false));
-        spawn_watchdog(drain_deadline, Arc::clone(&done));
-
-        let (exposure_result, persist_result) = runtime.block_on(async {
-            stop_edge_producers(exec, exec_tap_gate, timer, adapters, link).await;
-            drain.request();
-            join_hot(hot).await;
-            // Position is drained before research data: closing Parquet takes time, and
-            // running out of it still leaves a recoverable position.
-            let exposure = exposure.drain().await;
-            let persist = match persistence {
-                Some(handle) => handle.drain().await,
-                None => Ok(()),
-            };
-            metrics.abort();
-            (exposure, persist)
-        });
-        let exposure_failure = report_drain_failure("exposure", exposure_result);
-        let persist_failure = report_drain_failure("persistence", persist_result);
-        // Exposure first: position is what the next run inherits, so it names the exit.
-        let drain_error = exposure_failure.or(persist_failure);
-
-        // The fatal latch is re-read after the drain, since a hot-thread panic during it
-        // must override an otherwise graceful shutdown.
-        let signal_name = match &trigger {
-            Trigger::Signal(name) => Some(*name),
-            Trigger::Fatal => None,
-        };
-        let report = decide_exit(signal_name, fatal.reason(), drain_error);
-
-        info!(
-            "drain complete ({})",
-            if report.graceful { "graceful" } else { "fatal" }
-        );
-        // The last word to the UI is the authoritative exit report, sent with try_send so
-        // a gone receiver simply drops it.
-        lifecycle
-            .try_send(UiLifecycle::Stopped(report.clone()))
-            .ok();
-        log_handle.drain();
-        done.store(true, Ordering::Release);
-        // Released only after every order-related component has stopped, so a replacement
-        // process cannot start while this one is still draining.
-        drop(execution_lease);
-        report
     }
 }

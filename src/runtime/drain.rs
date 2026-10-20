@@ -10,21 +10,112 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::adapters::exec::EdgeHandle;
 use crate::hot::spawn::SimTapGate;
-use crate::link::LinkHandle;
-use crate::shutdown::{FatalSignal, ShutdownRequest};
-use crate::{error, warn};
+use crate::msg::ui::UiLifecycle;
+use crate::shutdown::{FatalSignal, ShutdownRequest, TaskHandle, panic_text};
+use crate::{error, info, warn};
 
-use super::ExitReport;
-use super::adapters::SpawnedAdapter;
-use super::timer::TimerHandle;
+use super::{Engine, ExitReport};
 
 /// The poll frequency for latches that cannot be awaited directly, such as a fatal trip
 /// or a shutdown request.
 const LATCH_POLL: Duration = Duration::from_millis(20);
 
-pub(super) enum Trigger {
+enum Trigger {
     Signal(&'static str),
     Fatal,
+}
+
+impl Engine {
+    /// Blocks until a signal, a shutdown request, or a fatal trip, then drains under a
+    /// hard deadline enforced by a watchdog.
+    pub(super) fn run_until_shutdown(self) -> ExitReport {
+        let Engine {
+            _execution_lease: execution_lease,
+            runtime,
+            log_handle,
+            hot,
+            adapters,
+            timer,
+            link,
+            persistence,
+            exposure,
+            exec,
+            exec_tap_gate,
+            metrics,
+            fatal,
+            drain,
+            shutdown,
+            lifecycle,
+            drain_deadline,
+        } = self;
+
+        let trigger = runtime.block_on(wait_for_shutdown(&fatal, &shutdown));
+        let drain_reason: Box<str> = match &trigger {
+            Trigger::Signal(name) => {
+                info!("received {name} — draining");
+                format!("received {name}").into()
+            }
+            Trigger::Fatal => {
+                let reason = fatal
+                    .reason()
+                    .unwrap_or_else(|| Box::<str>::from("fatal signal tripped"));
+                error!("fatal: {reason} — draining");
+                reason
+            }
+        };
+        // Uses try_send only, so a dead receiver never blocks the drain.
+        lifecycle
+            .try_send(UiLifecycle::Draining {
+                reason: drain_reason,
+            })
+            .ok();
+
+        let done = Arc::new(AtomicBool::new(false));
+        spawn_watchdog(drain_deadline, Arc::clone(&done));
+
+        let (exposure_result, persist_result) = runtime.block_on(async {
+            stop_edge_producers(exec, exec_tap_gate, timer, adapters, link).await;
+            drain.request();
+            join_hot(hot).await;
+            // Position is drained before research data: closing Parquet takes time, and
+            // running out of it still leaves a recoverable position.
+            let exposure = exposure.drain().await;
+            let persist = match persistence {
+                Some(handle) => handle.drain().await,
+                None => Ok(()),
+            };
+            metrics.abort();
+            (exposure, persist)
+        });
+        let exposure_failure = report_drain_failure("exposure", exposure_result);
+        let persist_failure = report_drain_failure("persistence", persist_result);
+        // Exposure first: position is what the next run inherits, so it names the exit.
+        let drain_error = exposure_failure.or(persist_failure);
+
+        // The fatal latch is re-read after the drain, since a hot-thread panic during it
+        // must override an otherwise graceful shutdown.
+        let signal_name = match &trigger {
+            Trigger::Signal(name) => Some(*name),
+            Trigger::Fatal => None,
+        };
+        let report = decide_exit(signal_name, fatal.reason(), drain_error);
+
+        info!(
+            "drain complete ({})",
+            if report.graceful { "graceful" } else { "fatal" }
+        );
+        // The last word to the UI is the authoritative exit report, sent with try_send so
+        // a gone receiver simply drops it.
+        lifecycle
+            .try_send(UiLifecycle::Stopped(report.clone()))
+            .ok();
+        log_handle.drain();
+        done.store(true, Ordering::Release);
+        // Released only after every order-related component has stopped, so a replacement
+        // process cannot start while this one is still draining.
+        drop(execution_lease);
+        report
+    }
 }
 
 pub(super) fn install_panic_hook(fatal: FatalSignal) {
@@ -33,23 +124,13 @@ pub(super) fn install_panic_hook(fatal: FatalSignal) {
             .location()
             .map(|loc| format!("{}:{}", loc.file(), loc.line()))
             .unwrap_or_else(|| "unknown location".to_owned());
-        let message = panic_message(info.payload());
+        let message = panic_text(info.payload());
         error!("thread panicked at {location}: {message}");
         fatal.trip(format!("panic at {location}: {message}"));
     }));
 }
 
-pub(super) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(text) = payload.downcast_ref::<&str>() {
-        (*text).to_owned()
-    } else if let Some(text) = payload.downcast_ref::<String>() {
-        text.clone()
-    } else {
-        "non-string panic payload".to_owned()
-    }
-}
-
-pub(super) async fn wait_for_shutdown(fatal: &FatalSignal, shutdown: &ShutdownRequest) -> Trigger {
+async fn wait_for_shutdown(fatal: &FatalSignal, shutdown: &ShutdownRequest) -> Trigger {
     tokio::select! {
         () = wait_sigint() => Trigger::Signal("SIGINT"),
         () = wait_sigterm() => Trigger::Signal("SIGTERM"),
@@ -96,12 +177,12 @@ async fn poll_shutdown_request(shutdown: &ShutdownRequest) {
 }
 
 /// Stops producers in dependency order.
-pub(super) async fn stop_edge_producers(
+async fn stop_edge_producers(
     exec: Option<EdgeHandle>,
     exec_tap_gate: Option<Arc<SimTapGate>>,
-    timer: TimerHandle,
-    adapters: Vec<SpawnedAdapter>,
-    link: Option<LinkHandle>,
+    timer: TaskHandle,
+    adapters: Vec<TaskHandle>,
+    link: Option<TaskHandle>,
 ) {
     timer.shutdown().await;
     if let Some(exec) = exec {
@@ -127,7 +208,7 @@ async fn stop_execution(exec: EdgeHandle, tap_gate: Option<Arc<SimTapGate>>) {
     gate.disable();
 }
 
-pub(super) async fn join_hot(hot: JoinHandle<()>) {
+async fn join_hot(hot: JoinHandle<()>) {
     let joined = tokio::task::spawn_blocking(move || {
         if hot.join().is_err() {
             warn!("hot thread ended by panic — cause already logged");
@@ -142,7 +223,7 @@ pub(super) async fn join_hot(hot: JoinHandle<()>) {
     }
 }
 
-pub(super) fn spawn_watchdog(deadline: Duration, done: Arc<AtomicBool>) {
+fn spawn_watchdog(deadline: Duration, done: Arc<AtomicBool>) {
     std::thread::Builder::new()
         .name("polysim-drain-watchdog".to_owned())
         .spawn(move || {
@@ -164,7 +245,7 @@ pub(super) fn spawn_watchdog(deadline: Duration, done: Arc<AtomicBool>) {
         .expect("failed to spawn drain watchdog thread");
 }
 
-pub(super) fn report_drain_failure<E: core::fmt::Display>(
+fn report_drain_failure<E: core::fmt::Display>(
     what: &str,
     result: Result<(), E>,
 ) -> Option<Box<str>> {

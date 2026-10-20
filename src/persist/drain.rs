@@ -2,7 +2,6 @@
 //! cap, hour cross, or shutdown. Dedicated thread (encode and fsync both block).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -14,6 +13,7 @@ use crate::msg::persist::{
     BookEventRow, FeatureRow, FillRow, KlineRow, LinkFrameRow, OrderRow, PersistRecord,
     RotationRow, TradeRow,
 };
+use crate::shutdown::WriterThread;
 use crate::time::boot_stamp_us;
 
 use super::schema::{self, TableRow};
@@ -42,7 +42,7 @@ impl PersistWriter {
             boot_ts_us,
             footer: &footer,
         };
-        let writer = WriterState {
+        let state = WriterState {
             consumer: records,
             features: writers.named(TableKind::Features),
             trades: writers.named(TableKind::Trades),
@@ -54,14 +54,9 @@ impl PersistWriter {
             rotations: writers.always_written(),
             rotations_rx: rotations,
             unnamed_table_rows: 0,
-            drain: Arc::new(AtomicBool::new(false)),
         };
-        let drain = Arc::clone(&writer.drain);
-        let join = std::thread::Builder::new()
-            .name("persist".into())
-            .spawn(move || writer.run())
-            .expect("os refused to spawn the persistence writer thread at init");
-        PersistHandle { drain, join }
+        let writer = WriterThread::spawn("persist", move |drain| state.run(&drain));
+        PersistHandle(writer)
     }
 }
 
@@ -100,10 +95,7 @@ impl TableWriterBuilder<'_> {
     }
 }
 
-pub struct PersistHandle {
-    drain: Arc<AtomicBool>,
-    join: std::thread::JoinHandle<Result<(), PersistError>>,
-}
+pub struct PersistHandle(WriterThread<PersistError>);
 
 impl PersistHandle {
     /// Call once the hot thread has stopped, so the records drained here are the run's last.
@@ -112,16 +104,12 @@ impl PersistHandle {
     /// [`PersistError`] if a table failed to seal, or if the writer thread panicked or was never
     /// joined — an unsealed Parquet file has no footer and no reader can open it.
     pub async fn drain(self) -> Result<(), PersistError> {
-        self.drain.store(true, Ordering::Release);
-        let thread = self.join;
-        match tokio::task::spawn_blocking(move || thread.join()).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(panic)) => Err(PersistError::writer_panicked(&*panic)),
-            Err(join_error) if join_error.is_panic() => {
-                Err(PersistError::writer_panicked(&*join_error.into_panic()))
-            }
-            Err(_) => Err(PersistError::DrainInterrupted),
-        }
+        self.0
+            .drain(
+                |payload| PersistError::WriterPanicked { payload },
+                PersistError::DrainInterrupted,
+            )
+            .await
     }
 }
 
@@ -138,13 +126,12 @@ struct WriterState {
     rotations_rx: mpsc::Receiver<RotationRow>,
     /// Rows for unnamed tables (hot path gates, so counts direct calls only; loud not fatal).
     unnamed_table_rows: u64,
-    drain: Arc<AtomicBool>,
 }
 
 impl WriterState {
-    fn run(mut self) -> Result<(), PersistError> {
+    fn run(mut self, drain: &AtomicBool) -> Result<(), PersistError> {
         crate::log::register_thread("persist");
-        let pump_result = self.pump();
+        let pump_result = self.pump(drain);
         // Seal on the failure path too: a stopped pump still owes its healthy tables a footer.
         let seal_result = self.seal_all();
         let outcome = pump_result.and(seal_result);
@@ -154,7 +141,7 @@ impl WriterState {
         outcome
     }
 
-    fn pump(&mut self) -> Result<(), PersistError> {
+    fn pump(&mut self, drain: &AtomicBool) -> Result<(), PersistError> {
         let mut last_seal = Instant::now();
         loop {
             let drained_any = self.consume_batch()?;
@@ -162,7 +149,7 @@ impl WriterState {
                 self.seal_all()?;
                 last_seal = Instant::now();
             }
-            if self.drain.load(Ordering::Acquire) {
+            if drain.load(Ordering::Acquire) {
                 self.consume_all()?;
                 return Ok(());
             }

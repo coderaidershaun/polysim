@@ -310,7 +310,6 @@ pub fn instrument_row(id: u16, tracker: TrackerSpec, book_capacity: usize) -> In
         max_num_orders: None,
         max_num_order_amends: None,
         max_price: None,
-        price_scale: FIXED_SCALE,
         qty_scale: FIXED_SCALE,
         subscriptions: Subscriptions::default(),
         kline_intervals: vec![KlineInterval::OneMinute],

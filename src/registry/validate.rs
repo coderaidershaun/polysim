@@ -15,11 +15,7 @@ pub(super) fn validate_binance_tracker(
     kline_intervals: &[KlineInterval],
 ) -> Result<(), ConfigError> {
     validate_tracker(tracker)?;
-    let is_kline_threshold = tracker
-        .volume_bars
-        .as_ref()
-        .is_some_and(|bars| bars.threshold == VolumeThreshold::Klines);
-    if !is_kline_threshold {
+    if !tracker.uses_kline_threshold() {
         return Ok(());
     }
     if !kline_intervals.contains(&KlineInterval::OneMinute) {
@@ -49,11 +45,7 @@ pub(super) fn validate_poly_tracker(tracker: &TrackerSpec) -> Result<(), ConfigE
             "unset for polymarket — candles derive from klines, which polymarket lacks",
         ));
     }
-    let is_kline_threshold = tracker
-        .volume_bars
-        .as_ref()
-        .is_some_and(|bars| bars.threshold == VolumeThreshold::Klines);
-    if is_kline_threshold {
+    if tracker.uses_kline_threshold() {
         return Err(tracker_invalid(
             "source.tracker.volume_bars.threshold",
             "klines",
@@ -64,27 +56,10 @@ pub(super) fn validate_poly_tracker(tracker: &TrackerSpec) -> Result<(), ConfigE
 }
 
 fn validate_tracker(tracker: &TrackerSpec) -> Result<(), ConfigError> {
-    let window_specs = [
-        (
-            "source.tracker.trades_all.windows",
-            windows_of(&tracker.trades_all),
-        ),
-        (
-            "source.tracker.trades_buy.windows",
-            windows_of(&tracker.trades_buy),
-        ),
-        (
-            "source.tracker.trades_sell.windows",
-            windows_of(&tracker.trades_sell),
-        ),
-        (
-            "source.tracker.microprice.windows",
-            windows_of(&tracker.microprice),
-        ),
-    ];
-    for (field, windows) in window_specs {
-        check_windows(field, windows)?;
-    }
+    check_windows("source.tracker.trades_all.windows", &tracker.trades_all)?;
+    check_windows("source.tracker.trades_buy.windows", &tracker.trades_buy)?;
+    check_windows("source.tracker.trades_sell.windows", &tracker.trades_sell)?;
+    check_windows("source.tracker.microprice.windows", &tracker.microprice)?;
     if let Some(imbalance) = &tracker.imbalance {
         // Empty windows = latest-only (block existence computes latest.imbalance).
         if imbalance.windows.contains(&0) {
@@ -94,22 +69,10 @@ fn validate_tracker(tracker: &TrackerSpec) -> Result<(), ConfigError> {
                 "all windows greater than 0",
             ));
         }
-        if imbalance.top_n == 0 {
-            return Err(tracker_invalid(
-                "source.tracker.imbalance.top_n",
-                "0",
-                "greater than 0",
-            ));
-        }
+        check_positive_count("source.tracker.imbalance.top_n", imbalance.top_n)?;
     }
-    if let Some(candles) = &tracker.candles
-        && candles.keep == 0
-    {
-        return Err(tracker_invalid(
-            "source.tracker.candles.keep",
-            "0",
-            "greater than 0",
-        ));
+    if let Some(candles) = &tracker.candles {
+        check_positive_count("source.tracker.candles.keep", candles.keep)?;
     }
     if let Some(spin) = &tracker.spin_sampled {
         if spin.fields.is_empty() {
@@ -119,13 +82,7 @@ fn validate_tracker(tracker: &TrackerSpec) -> Result<(), ConfigError> {
                 "at least one field",
             ));
         }
-        if spin.window == 0 {
-            return Err(tracker_invalid(
-                "source.tracker.spin_sampled.window",
-                "0",
-                "greater than 0",
-            ));
-        }
+        check_positive_count("source.tracker.spin_sampled.window", spin.window)?;
         check_imbalance_available(
             "source.tracker.spin_sampled.fields",
             &spin.fields,
@@ -135,14 +92,11 @@ fn validate_tracker(tracker: &TrackerSpec) -> Result<(), ConfigError> {
     if let Some(bars) = &tracker.volume_bars {
         check_volume_bars(bars, tracker.imbalance.is_some())?;
     }
-    if let Some(ewma) = &tracker.ewma_vol
-        && ewma.halflife_events < 1
-    {
-        return Err(tracker_invalid(
+    if let Some(ewma) = &tracker.ewma_vol {
+        check_positive_count(
             "source.tracker.ewma_vol.halflife_events",
-            "0",
-            "greater than 0",
-        ));
+            ewma.halflife_events as usize,
+        )?;
     }
     if let Some(intensity) = &tracker.intensity {
         // Fit needs interior bin + tail; positive finite half-life + event floor -> decay + gate well-defined.
@@ -181,13 +135,7 @@ fn check_volume_bars(bars: &VolumeBarsSpec, imbalance_configured: bool) -> Resul
             "at least 1 and within the i64 notional range",
         ));
     }
-    if bars.keep == 0 {
-        return Err(tracker_invalid(
-            "source.tracker.volume_bars.keep",
-            "0",
-            "greater than 0",
-        ));
-    }
+    check_positive_count("source.tracker.volume_bars.keep", bars.keep)?;
     let Some(sampled) = &bars.sampled else {
         return Ok(());
     };
@@ -198,13 +146,7 @@ fn check_volume_bars(bars: &VolumeBarsSpec, imbalance_configured: bool) -> Resul
             "at least one field",
         ));
     }
-    if sampled.window == 0 {
-        return Err(tracker_invalid(
-            "source.tracker.volume_bars.sampled.window",
-            "0",
-            "greater than 0",
-        ));
-    }
+    check_positive_count("source.tracker.volume_bars.sampled.window", sampled.window)?;
     check_imbalance_available(
         "source.tracker.volume_bars.sampled.fields",
         &sampled.fields,
@@ -227,20 +169,22 @@ fn check_imbalance_available(
     Ok(())
 }
 
-fn windows_of(spec: &Option<WindowsSpec>) -> Option<&[usize]> {
-    spec.as_ref().map(|spec| spec.windows.as_slice())
-}
-
-fn check_windows(field: &'static str, windows: Option<&[usize]>) -> Result<(), ConfigError> {
-    if let Some(windows) = windows {
-        if windows.is_empty() {
-            return Err(tracker_invalid(field, "[]", "at least one window"));
-        }
-        if windows.contains(&0) {
-            return Err(tracker_invalid(field, "0", "all windows greater than 0"));
-        }
+fn check_windows(field: &'static str, spec: &Option<WindowsSpec>) -> Result<(), ConfigError> {
+    let Some(spec) = spec else { return Ok(()) };
+    if spec.windows.is_empty() {
+        return Err(tracker_invalid(field, "[]", "at least one window"));
+    }
+    if spec.windows.contains(&0) {
+        return Err(tracker_invalid(field, "0", "all windows greater than 0"));
     }
     Ok(())
+}
+
+fn check_positive_count(field: &'static str, count: usize) -> Result<(), ConfigError> {
+    if count > 0 {
+        return Ok(());
+    }
+    Err(tracker_invalid(field, "0", "greater than 0"))
 }
 
 fn tracker_invalid(field: &'static str, value: &str, expected: &'static str) -> ConfigError {

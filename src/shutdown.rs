@@ -1,5 +1,5 @@
 //! The shutdown latches: `FatalSignal` stops NOW, `DrainSignal` finishes the input then stops, and
-//! `ShutdownRequest` is the external graceful trigger. `abort_and_warn` stops a spawned task, and
+//! `ShutdownRequest` is the external graceful trigger. `TaskHandle` stops a spawned task, and
 //! `WriterThread` lets a blocking file writer finish before exit. `RunStateCell` is a TWO-WAY
 //! toggle for trading on and off rather than an ending; SIGINT remains the only real exit.
 
@@ -220,6 +220,22 @@ pub(crate) async fn abort_and_warn(join: tokio::task::JoinHandle<()>, task_name:
     }
 }
 
+/// Dropping it detaches the task; `shutdown` aborts it and notes whether it panicked.
+pub struct TaskHandle {
+    join: tokio::task::JoinHandle<()>,
+    name: &'static str,
+}
+
+impl TaskHandle {
+    pub(crate) fn new(join: tokio::task::JoinHandle<()>, name: &'static str) -> Self {
+        Self { join, name }
+    }
+
+    pub async fn shutdown(self) {
+        abort_and_warn(self.join, self.name).await;
+    }
+}
+
 pub(crate) fn panic_text(payload: &(dyn Any + Send)) -> Box<str> {
     payload
         .downcast_ref::<&str>()
@@ -235,7 +251,6 @@ pub(crate) struct WriterThread<E> {
     join: std::thread::JoinHandle<Result<(), E>>,
 }
 
-#[allow(dead_code)] // adopted by the next lean-overhaul stream; remove with the first caller
 impl<E: Send + 'static> WriterThread<E> {
     /// `body` receives the drain flag: once it is set, write what is left and return.
     pub(crate) fn spawn(

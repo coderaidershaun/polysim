@@ -6,7 +6,6 @@ use std::process::ExitCode;
 
 use crate::config::{Config, RunIdentity};
 use crate::hot::strategy::{EngineView, Strategy, StrategyConfig};
-use crate::time::DurationUs;
 
 use super::Engine;
 
@@ -55,7 +54,7 @@ where
         }
     };
     let engine_view = EngineView {
-        spin_interval: DurationUs::from_micros(config.engine.spin_interval_us as i64),
+        spin_interval: config.engine.spin_interval(),
     };
     let strategy = Box::new(S::from_spec(&config.strategy, engine_view));
     match Engine::start(identity, config, strategy) {

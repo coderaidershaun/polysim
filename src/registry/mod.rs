@@ -43,7 +43,6 @@ pub struct InstrumentRow {
     /// Polymarket, whose prices are probabilities — an aggressive price walked past `1 − tick`
     /// there is rejected outright rather than merely optimistic.
     pub max_price: Option<Price>,
-    pub price_scale: i64,
     pub qty_scale: i64,
     pub subscriptions: Subscriptions,
     pub kline_intervals: Vec<KlineInterval>,
@@ -133,12 +132,8 @@ pub struct Registry {
 
 impl Registry {
     /// # Errors
-    /// A missing hot_core_id, an unresolvable instrument symbol, or a source/tracker violation.
+    /// A strategy instrument that names no row, or a tracker block the source cannot serve.
     pub fn build<P>(config: &Config<P>) -> Result<Registry, ConfigError> {
-        if cfg!(target_os = "linux") && config.engine.hot_core_id.is_none() {
-            return Err(ConfigError::MissingHotCoreId);
-        }
-
         let (instruments, assets) = build_instrument_rows(&config.source)?;
         check_strategy_instruments(&config.strategy.instruments, &instruments)?;
 

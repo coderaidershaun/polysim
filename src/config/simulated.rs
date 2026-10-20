@@ -3,7 +3,9 @@
 use serde::Deserialize;
 
 use super::ConfigError;
-use super::execution::{check_bounded_milliseconds, check_non_zero, check_nonnegative_amount};
+use super::execution::{
+    check_bounded_milliseconds, check_nonnegative_amount, check_positive_milliseconds,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,25 +49,16 @@ impl SimConfig {
             });
         }
 
-        check_non_zero(
+        check_positive_milliseconds(
             "execution.sim.max_market_data_delay_ms",
             self.max_market_data_delay_ms,
         )?;
-        check_non_zero("execution.sim.heartbeat_ms", self.heartbeat_ms)?;
-        for (field, value) in [
-            (
-                "execution.sim.order_entry_latency_ms",
-                self.order_entry_latency_ms,
-            ),
-            ("execution.sim.ack_latency_ms", self.ack_latency_ms),
-            (
-                "execution.sim.max_market_data_delay_ms",
-                self.max_market_data_delay_ms,
-            ),
-            ("execution.sim.heartbeat_ms", self.heartbeat_ms),
-        ] {
-            check_bounded_milliseconds(field, value)?;
-        }
+        check_positive_milliseconds("execution.sim.heartbeat_ms", self.heartbeat_ms)?;
+        check_bounded_milliseconds(
+            "execution.sim.order_entry_latency_ms",
+            self.order_entry_latency_ms,
+        )?;
+        check_bounded_milliseconds("execution.sim.ack_latency_ms", self.ack_latency_ms)?;
 
         let heartbeat_us = u128::from(self.heartbeat_ms) * 1_000;
         let slowest_heartbeat_us = heartbeat_us.max(u128::from(spin_interval_us));

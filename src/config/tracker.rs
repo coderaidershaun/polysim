@@ -27,6 +27,14 @@ pub struct TrackerSpec {
     pub intensity: Option<IntensitySpec>,
 }
 
+impl TrackerSpec {
+    pub(crate) fn uses_kline_threshold(&self) -> bool {
+        self.volume_bars
+            .as_ref()
+            .is_some_and(|bars| bars.threshold == VolumeThreshold::Klines)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WindowsSpec {

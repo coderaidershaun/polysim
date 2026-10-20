@@ -12,22 +12,26 @@ use crate::config::ExecutionMode;
 use crate::ids::Side;
 use crate::time::TsUs;
 
+use self::column::Column;
 use super::RunMeta;
 
-pub(super) trait TableRow {
+pub(super) trait TableRow: Sized + 'static {
     const NAME: &'static str;
-
-    fn schema() -> SchemaRef;
+    const COLUMNS: &'static [Column<Self>];
 
     /// Record's local-receipt time (hour rotation + date/HH partitioning key).
     fn partition_ts(&self) -> TsUs;
 
+    fn schema() -> SchemaRef {
+        Column::schema(Self::COLUMNS)
+    }
+
     /// # Errors
     /// [`ArrowError`] if the built columns do not match `schema` — an internal invariant
     /// breach, since both are defined here.
-    fn to_batch(rows: &[Self], schema: &SchemaRef) -> Result<RecordBatch, ArrowError>
-    where
-        Self: Sized;
+    fn to_batch(rows: &[Self], schema: &SchemaRef) -> Result<RecordBatch, ArrowError> {
+        Column::batch(Self::COLUMNS, rows, schema)
+    }
 }
 
 /// Footer metadata: fixed-point scale + id-to-name dicts for mantissa/index interpretation.

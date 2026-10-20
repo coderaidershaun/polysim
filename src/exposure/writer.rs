@@ -1,9 +1,7 @@
 //! Writer thread: drain ring to newest snapshot, write to disk on change. Dedicated thread (blocks on fsync).
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 use rtrb::{Consumer, RingBuffer};
@@ -11,6 +9,7 @@ use rtrb::{Consumer, RingBuffer};
 use crate::config::{ExecutionMode, RunIdentity};
 use crate::ids::{AssetId, FIXED_SCALE, InstrumentId};
 use crate::registry::Registry;
+use crate::shutdown::WriterThread;
 use crate::sink::ExposureSink;
 use crate::time::boot_stamp_us;
 use crate::{error, info};
@@ -76,7 +75,6 @@ impl ExposureWriter {
         restored: &ExposureState,
     ) -> (ExposureHandle, ExposureSink) {
         let (producer, consumer) = RingBuffer::<ExposureSnapshot>::new(RING_CAPACITY);
-        let drain = Arc::new(AtomicBool::new(false));
         let state = WriterState {
             config,
             consumer,
@@ -85,13 +83,9 @@ impl ExposureWriter {
             // 1, so the first genuine change is the first write.
             written_seq: Some(0),
             failed_writes: 0,
-            drain: Arc::clone(&drain),
         };
-        let join = std::thread::Builder::new()
-            .name("exposure".into())
-            .spawn(move || state.run())
-            .expect("os refused to spawn the exposure writer thread at init");
-        (ExposureHandle { drain, join }, ExposureSink::new(producer))
+        let writer = WriterThread::spawn("exposure", move |drain| state.run(&drain));
+        (ExposureHandle(writer), ExposureSink::new(producer))
     }
 }
 
@@ -109,10 +103,7 @@ fn seed_snapshot(restored: &ExposureState) -> ExposureSnapshot {
     snapshot
 }
 
-pub struct ExposureHandle {
-    drain: Arc<AtomicBool>,
-    join: JoinHandle<Result<(), ExposureError>>,
-}
+pub struct ExposureHandle(WriterThread<ExposureError>);
 
 impl ExposureHandle {
     /// Call once the hot thread has stopped, so the snapshot drained here is the run's last.
@@ -120,16 +111,12 @@ impl ExposureHandle {
     /// # Errors
     /// [`ExposureError`] if writing or joining the writer fails.
     pub async fn drain(self) -> Result<(), ExposureError> {
-        self.drain.store(true, Ordering::Release);
-        let thread = self.join;
-        match tokio::task::spawn_blocking(move || thread.join()).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(panic)) => Err(ExposureError::writer_panicked(&*panic)),
-            Err(join_error) if join_error.is_panic() => {
-                Err(ExposureError::writer_panicked(&*join_error.into_panic()))
-            }
-            Err(_) => Err(ExposureError::DrainInterrupted),
-        }
+        self.0
+            .drain(
+                |payload| ExposureError::WriterPanicked { payload },
+                ExposureError::DrainInterrupted,
+            )
+            .await
     }
 }
 
@@ -140,15 +127,14 @@ struct WriterState {
     /// Sequence of last write (None until first, so static position still writes once).
     written_seq: Option<u64>,
     failed_writes: u64,
-    drain: Arc<AtomicBool>,
 }
 
 impl WriterState {
-    fn run(mut self) -> Result<(), ExposureError> {
+    fn run(mut self, drain: &AtomicBool) -> Result<(), ExposureError> {
         crate::log::register_thread("exposure");
         loop {
             self.take_latest();
-            if self.drain.load(Ordering::Acquire) {
+            if drain.load(Ordering::Acquire) {
                 self.take_latest();
                 return self.write_if_changed();
             }

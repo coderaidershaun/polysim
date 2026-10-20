@@ -12,18 +12,20 @@ use crate::adapters::binance::exec::{
     BinanceExecAdapter, BinanceExecAdapterContext, BinanceExecAdapterSetup, RecvWindow,
 };
 use crate::adapters::exchange_sim;
-use crate::adapters::exec::{EdgeHandle, EngineIdentity, LeaseNamespace, TeTag, VenueCapabilities};
+use crate::adapters::exec::{EdgeHandle, LeaseNamespace, TeTag, VenueCapabilities};
 use crate::adapters::polymarket::exec as polymarket_exec;
 use crate::adapters::polymarket::exec::handle::{
     PolymarketExecAdapter, PolymarketExecAdapterContext, PolymarketExecAdapterSetup,
 };
 use crate::adapters::polymarket::rotation::WindowAssignment;
 use crate::config::{
-    DEFAULT_QUOTE_STOP_MARGIN_MS, ExecutionConfig, ExecutionMode, RunIdentity, validated_mantissa,
+    DEFAULT_QUOTE_STOP_MARGIN_MS, ExecutionConfig, ExecutionMode, MAX_ORDERS_PER_SIDE, RunIdentity,
+    validated_mantissa,
 };
 use crate::hot::dispatch::ExecWiring;
 use crate::hot::exec::{
-    ExecLaneBudget, ExecLimits, ExecSettings, FeeModel, MAX_ORDER_INSTRUMENTS, exec_lane_capacity,
+    ExecLaneBudget, ExecLimits, ExecSettings, FeeModel, MAX_ORDER_INSTRUMENTS, MAX_QUOTE_LEVELS,
+    exec_lane_capacity,
 };
 use crate::hot::spawn::{QueueProducer, SimTapGate};
 use crate::info;
@@ -39,6 +41,10 @@ use super::prepare::VenuePreflight;
 use super::queues::MarketTaps;
 use super::rate_limits::order_budget;
 use super::sim::{SimBringUp, SimEdge, sim_bring_up};
+
+// Config refuses a ladder deeper than the hot side's fixed one, so the two bounds must name the
+// same number.
+const _: () = assert!(MAX_ORDERS_PER_SIDE as usize == MAX_QUOTE_LEVELS);
 
 /// The cancel sweep's share of the drain deadline, as a fraction rather than a fixed
 /// reserve: half goes to the sweep, half to the hot-thread join and the file drains.
@@ -144,10 +150,7 @@ pub(super) fn exec_bring_up(mut setup: ExecBringUpSetup<'_>) -> Result<ExecBring
         ExecutionMode::Sim => {
             let capabilities = exchange_sim::capabilities();
             let lease = refuse_or_acquire_lease(&capabilities, &exchange_sim::lease_namespace())?;
-            let identity = EngineIdentity {
-                te_tag,
-                run_nonce: lease.run_nonce(),
-            };
+            let identity = lease.identity(te_tag);
             let taps = setup.taps.take();
             let SimEdge { spawn, tap_gate } = sim_bring_up(SimBringUp {
                 setup: &setup,
@@ -187,10 +190,7 @@ pub(super) fn exec_bring_up(mut setup: ExecBringUpSetup<'_>) -> Result<ExecBring
                         preflight.credentials.api_key().expose_bytes(),
                     ),
                 )?;
-                let identity = EngineIdentity {
-                    te_tag,
-                    run_nonce: lease.run_nonce(),
-                };
+                let identity = lease.identity(te_tag);
                 let live = BinanceExecAdapterSetup {
                     instruments: instruments.to_vec(),
                     assets: setup.registry.assets().clone(),

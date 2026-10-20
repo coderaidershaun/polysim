@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tokio::time::Interval;
 use tokio_tungstenite::tungstenite::{Error as ProtocolError, Message};
 
@@ -24,7 +23,7 @@ use crate::hot::spawn::QueueProducer;
 use crate::link::RunState;
 use crate::msg::persist::RotationRow;
 use crate::registry::{InstrumentRow, ProducerGroup};
-use crate::shutdown::{FatalSignal, RunStateCell};
+use crate::shutdown::{FatalSignal, RunStateCell, TaskHandle};
 use crate::time::{EngineClock, TsUs};
 use crate::{error, warn};
 
@@ -52,16 +51,6 @@ pub struct PolymarketAdapterContext {
     pub window_assignments: Option<mpsc::Sender<WindowAssignment>>,
 }
 
-pub struct PolymarketAdapterHandle {
-    join: JoinHandle<()>,
-}
-
-impl PolymarketAdapterHandle {
-    pub async fn shutdown(self) {
-        crate::shutdown::abort_and_warn(self.join, "polymarket adapter").await;
-    }
-}
-
 pub struct PolymarketAdapter;
 
 impl PolymarketAdapter {
@@ -72,10 +61,10 @@ impl PolymarketAdapter {
         producer: QueueProducer,
         context: PolymarketAdapterContext,
         rt: &Handle,
-    ) -> PolymarketAdapterHandle {
+    ) -> TaskHandle {
         let (actor, results_rx) = Actor::new(group, series, instruments, producer, context);
         let join = rt.spawn(crate::log::tag_task("polymarket", actor.run(results_rx)));
-        PolymarketAdapterHandle { join }
+        TaskHandle::new(join, "polymarket adapter")
     }
 }
 

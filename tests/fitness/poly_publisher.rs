@@ -155,7 +155,6 @@ fn poly_rows() -> Vec<InstrumentRow> {
             max_num_orders: None,
             max_num_order_amends: None,
             max_price: None,
-            price_scale: FIXED_SCALE,
             qty_scale: FIXED_SCALE,
             subscriptions: Subscriptions {
                 klines: false,

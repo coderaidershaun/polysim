@@ -1,8 +1,11 @@
-//! Source schema: tagged enum; seam for new venues.
+//! The `source:` block: which venue an engine reads, which instruments, and which streams. It also
+//! holds `VenueMarket`, the venue plus its sub-market, so one registry can hold Binance and
+//! Polymarket rows without either venue's wire words leaking into the other.
 
 use serde::Deserialize;
 
-use super::execution::ExecutionMode;
+use super::ConfigError;
+use super::execution::{ExecutionMode, check_money};
 use super::tracker::TrackerSpec;
 use crate::labelled_enum::labelled_enum;
 use crate::time::DurationUs;
@@ -59,6 +62,23 @@ impl SourceSpec {
 
     pub fn supports_execution(&self, mode: ExecutionMode) -> bool {
         self.execution_modes().contains(&mode)
+    }
+
+    pub(super) fn validate(&self) -> Result<(), ConfigError> {
+        let max_exposure_quote = match self {
+            SourceSpec::Binance {
+                max_exposure_quote, ..
+            } => *max_exposure_quote,
+            SourceSpec::Polymarket {
+                subscriptions,
+                max_exposure_quote,
+                ..
+            } => {
+                subscriptions.validate()?;
+                *max_exposure_quote
+            }
+        };
+        check_money("source.max_exposure_quote", max_exposure_quote)
     }
 }
 
@@ -123,6 +143,21 @@ impl PolySeries {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VenueMarket {
+    Binance(BinanceMarket),
+    Polymarket(PolySeries),
+}
+
+impl VenueMarket {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VenueMarket::Binance(market) => market.as_str(),
+            VenueMarket::Polymarket(series) => series.as_str(),
+        }
+    }
+}
+
 /// No klines here (single market-data channel; unexpressable > default-true trap).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -142,6 +177,26 @@ impl Default for PolySubscriptions {
             book_updates: true,
             book_snapshots: true,
         }
+    }
+}
+
+impl PolySubscriptions {
+    /// Polymarket delivers trades and the book on one combined channel, so a partial subscription
+    /// is a promise this engine cannot keep: `trades: false` would still record trades.
+    fn validate(self) -> Result<(), ConfigError> {
+        if self.trades == self.book_updates && self.trades == self.book_snapshots {
+            return Ok(());
+        }
+        let disabled: Vec<String> = Subscriptions::from(self)
+            .disabled_streams()
+            .iter()
+            .map(|name| format!("{name}: false"))
+            .collect();
+        Err(ConfigError::Invalid {
+            field: "source.subscriptions",
+            value: disabled.join(", ").into(),
+            expected: "all flags equal — polymarket's single combined channel delivers trades and books together, so v1 cannot honour a partial subscription",
+        })
     }
 }
 
@@ -168,6 +223,22 @@ pub struct Subscriptions {
     pub book_snapshots: bool,
     #[serde(default = "default_true")]
     pub klines: bool,
+}
+
+impl Subscriptions {
+    /// The market-data streams that are switched off, named as the config spells them. Klines are
+    /// left out because no check that reads this depends on them.
+    pub(super) fn disabled_streams(&self) -> Vec<&'static str> {
+        [
+            ("trades", self.trades),
+            ("book_updates", self.book_updates),
+            ("book_snapshots", self.book_snapshots),
+        ]
+        .into_iter()
+        .filter(|(_, enabled)| !enabled)
+        .map(|(name, _)| name)
+        .collect()
+    }
 }
 
 impl Default for Subscriptions {

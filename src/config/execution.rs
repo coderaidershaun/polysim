@@ -16,7 +16,9 @@ use super::{ConfigError, MAX_OPERATIONAL_DURATION_MS, RunIdentity};
 
 /// The declarative ladder is fixed-size so quote publication, reconciliation and the UI all share
 /// one compile-time bound. Configuration chooses how much of it is active, never its allocation.
-const MAX_ORDERS_PER_SIDE: u32 = 8;
+pub(crate) const MAX_ORDERS_PER_SIDE: u32 = 8;
+// The refusal text spells this bound out, so changing it must fail here until the text changes too.
+const _: () = assert!(MAX_ORDERS_PER_SIDE == 8);
 /// Named because bring-up compares against it: a venue whose markets never close reads a margin
 /// left at the default as "unset" and anything else as an operator expecting it to do something.
 pub(crate) const DEFAULT_QUOTE_STOP_MARGIN_MS: u64 = 3_000;
@@ -319,7 +321,10 @@ pub(super) fn check_bounded_milliseconds(
     })
 }
 
-fn check_positive_milliseconds(field: &'static str, value: u64) -> Result<(), ConfigError> {
+pub(super) fn check_positive_milliseconds(
+    field: &'static str,
+    value: u64,
+) -> Result<(), ConfigError> {
     check_non_zero(field, value)?;
     check_bounded_milliseconds(field, value)
 }

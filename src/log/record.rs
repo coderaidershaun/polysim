@@ -3,7 +3,7 @@
 use core::fmt;
 
 use crate::labelled_enum::labelled_enum;
-use crate::time::TsUs;
+use crate::time::{TsUs, boot_stamp_us};
 
 labelled_enum! {
     /// Three levels only (no debug/trace).
@@ -45,7 +45,7 @@ impl LogRecord {
         line: u32,
         args: fmt::Arguments<'_>,
     ) -> Self {
-        Self::at(super::wall_now(), level, module, file, line, args)
+        Self::at(boot_stamp_us(), level, module, file, line, args)
     }
 
     /// Stamps event_ts (not wall clock), no backtrace. Strategy log = pure fn (replay-diffable).

@@ -1,45 +1,42 @@
 //! Turns YAML into a validated config. An unknown-field typo becomes a named startup
 //! error rather than silent data loss. Defaults live in code, not in the file.
-//! One submodule per block a config file can carry, plus `error` and `identity`; the root schema
-//! that names those blocks lives here, so a caller writes `config::LinkConfig`, never the file.
+//! Each larger block a config file can carry has its own submodule, beside `error` and `identity`.
+//! The root schema and the small blocks that only name a directory live here, so a caller writes
+//! `config::LinkConfig` and never names a submodule.
 
 mod error;
 mod execution;
-mod exposure;
 mod identity;
 mod link;
 mod simulated;
 mod sources;
 mod tables;
 mod tracker;
-mod venue;
 
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::time::DurationUs;
+
 pub use error::ConfigError;
 pub use execution::{ExecutionConfig, ExecutionMode};
-pub use exposure::ExposureConfig;
 pub use identity::{RunIdentity, StrategyId, TradingEngineId};
 pub use link::{ControllerLoss, LinkConfig, PeerSubscription};
 pub use simulated::SimConfig;
 pub use sources::{
     BinanceEnv, BinanceMarket, KlineInterval, PolySeries, PolySubscriptions, SourceSpec,
-    Subscriptions,
+    Subscriptions, VenueMarket,
 };
 pub use tables::{RecordedTables, TableKind};
 pub use tracker::{
     CandlesSpec, EwmaVolSpec, ImbalanceSpec, IntensitySpec, SpinField, SpinSampledSpec,
     TrackerSpec, VolumeBarsSpec, VolumeThreshold, WindowsSpec,
 };
-pub use venue::VenueMarket;
 
-pub(crate) use execution::{DEFAULT_QUOTE_STOP_MARGIN_MS, validated_mantissa};
+pub(crate) use execution::{DEFAULT_QUOTE_STOP_MARGIN_MS, MAX_ORDERS_PER_SIDE, validated_mantissa};
 
-const SPIN_INTERVAL_US_RANGE: std::ops::RangeInclusive<u64> = 1_000..=60_000_000;
-
-const WARMUP_SECS_RANGE: std::ops::RangeInclusive<u64> = 0..=3_600;
 const MAX_OPERATIONAL_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 
 /// `P` is the strategy's own `params:` type, deserialized in the same single pass so
@@ -90,6 +87,9 @@ impl<P: serde::de::DeserializeOwned + Default> Config<P> {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        if cfg!(target_os = "linux") && self.engine.hot_core_id.is_none() {
+            return Err(ConfigError::MissingHotCoreId);
+        }
         if self.persistence.is_none() && !self.strategy.tables.is_empty() {
             let named: Vec<&str> = self
                 .strategy
@@ -102,44 +102,37 @@ impl<P: serde::de::DeserializeOwned + Default> Config<P> {
                 tables: named.join(", ").into_boxed_str(),
             });
         }
-        let spin = self.engine.spin_interval_us;
-        if !SPIN_INTERVAL_US_RANGE.contains(&spin) {
-            return Err(ConfigError::EngineFieldRange {
-                field: "spin_interval_us",
-                value: spin,
-                expected: "1000..=60000000 (1ms to 60s)",
-            });
-        }
-        let warmup = self.engine.warmup_secs;
-        if !WARMUP_SECS_RANGE.contains(&warmup) {
-            return Err(ConfigError::EngineFieldRange {
-                field: "warmup_secs",
-                value: warmup,
-                expected: "0..=3600 (0 disables warmup; beyond 1h a run is mostly suppressed)",
-            });
-        }
-        if self.engine.drain_deadline_ms == 0 {
-            return Err(ConfigError::EngineFieldZero {
-                field: "drain_deadline_ms",
-            });
-        }
-        if self.engine.drain_deadline_ms > MAX_OPERATIONAL_DURATION_MS {
-            return Err(ConfigError::EngineFieldRange {
-                field: "drain_deadline_ms",
-                value: self.engine.drain_deadline_ms,
-                expected: "1..=86400000 (24h operational ceiling)",
-            });
-        }
-        if self.queues.input_capacity == 0 {
-            return Err(ConfigError::QueueCapacityZero {
-                field: "input_capacity",
-            });
-        }
-        if self.queues.persistence_capacity == 0 {
-            return Err(ConfigError::QueueCapacityZero {
-                field: "persistence_capacity",
-            });
-        }
+        check_range(
+            "engine.spin_interval_us",
+            self.engine.spin_interval_us,
+            1_000..=60_000_000,
+            "1000..=60000000 (1ms to 60s)",
+        )?;
+        check_range(
+            "engine.warmup_secs",
+            self.engine.warmup_secs,
+            0..=3_600,
+            "0..=3600 (0 disables warmup; beyond 1h a run is mostly suppressed)",
+        )?;
+        check_range(
+            "engine.drain_deadline_ms",
+            self.engine.drain_deadline_ms,
+            1..=MAX_OPERATIONAL_DURATION_MS,
+            "1..=86400000 (24h operational ceiling)",
+        )?;
+        check_range(
+            "queues.input_capacity",
+            self.queues.input_capacity as u64,
+            1..=u64::MAX,
+            "greater than 0",
+        )?;
+        check_range(
+            "queues.persistence_capacity",
+            self.queues.persistence_capacity as u64,
+            1..=u64::MAX,
+            "greater than 0",
+        )?;
+        self.source.validate()?;
         if let Some(link) = &self.link {
             link.validate()?;
         }
@@ -184,15 +177,7 @@ impl<P: serde::de::DeserializeOwned + Default> Config<P> {
                 market: market.as_str(),
             });
         }
-        let missing: Vec<&str> = [
-            ("trades", subscriptions.trades),
-            ("book_updates", subscriptions.book_updates),
-            ("book_snapshots", subscriptions.book_snapshots),
-        ]
-        .into_iter()
-        .filter(|(_, enabled)| !enabled)
-        .map(|(name, _)| name)
-        .collect();
+        let missing = subscriptions.disabled_streams();
         if !missing.is_empty() {
             return Err(ConfigError::SimulatedExecutionSubscriptions {
                 missing: missing.join(", ").into_boxed_str(),
@@ -216,6 +201,12 @@ pub struct EngineConfig {
     pub drain_deadline_ms: u64,
     #[serde(default = "default_warmup_secs")]
     pub warmup_secs: u64,
+}
+
+impl EngineConfig {
+    pub(crate) fn spin_interval(&self) -> DurationUs {
+        DurationUs::from_micros(self.spin_interval_us as i64)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -258,6 +249,22 @@ pub struct PersistenceConfig {
 pub struct LoggingConfig {
     #[serde(default = "default_logs_dir")]
     pub dir: PathBuf,
+}
+
+/// Separate from `persistence:` and always in force, because position outlives any single run.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExposureConfig {
+    #[serde(default = "default_exposure_dir")]
+    pub dir: PathBuf,
+}
+
+impl Default for ExposureConfig {
+    fn default() -> Self {
+        ExposureConfig {
+            dir: default_exposure_dir(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -304,6 +311,22 @@ impl<'de> Deserialize<'de> for Instruments {
     }
 }
 
+fn check_range(
+    field: &'static str,
+    value: u64,
+    range: RangeInclusive<u64>,
+    expected: &'static str,
+) -> Result<(), ConfigError> {
+    if range.contains(&value) {
+        return Ok(());
+    }
+    Err(ConfigError::Invalid {
+        field,
+        value: value.to_string().into(),
+        expected,
+    })
+}
+
 fn default_tokio_workers() -> usize {
     2
 }
@@ -330,4 +353,8 @@ fn default_data_dir() -> PathBuf {
 
 fn default_logs_dir() -> PathBuf {
     PathBuf::from("./logs")
+}
+
+fn default_exposure_dir() -> PathBuf {
+    PathBuf::from("./exposure")
 }

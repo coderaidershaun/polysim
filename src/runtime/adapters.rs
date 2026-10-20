@@ -6,36 +6,18 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::adapters::backoff::BackoffCaps;
-use crate::adapters::binance::actor::{
-    BinanceAdapter, BinanceAdapterContext, BinanceAdapterHandle,
-};
-use crate::adapters::polymarket::actor::{
-    PolymarketAdapter, PolymarketAdapterContext, PolymarketAdapterHandle,
-};
+use crate::adapters::binance::actor::{BinanceAdapter, BinanceAdapterContext};
+use crate::adapters::polymarket::actor::{PolymarketAdapter, PolymarketAdapterContext};
 use crate::adapters::polymarket::rotation::WindowAssignment;
 use crate::adapters::rest_quiet::SharedRestQuiet;
 use crate::config::{Config, VenueMarket};
 use crate::hot::spawn::QueueProducer;
 use crate::msg::persist::RotationRow;
 use crate::registry::Registry;
-use crate::shutdown::{FatalSignal, RunStateCell};
+use crate::shutdown::{FatalSignal, RunStateCell, TaskHandle};
 use crate::time::EngineClock;
 
 const DEFAULT_TAP_HEARTBEAT: Duration = Duration::from_millis(100);
-
-pub(super) enum SpawnedAdapter {
-    Binance(BinanceAdapterHandle),
-    Polymarket(PolymarketAdapterHandle),
-}
-
-impl SpawnedAdapter {
-    pub(super) async fn shutdown(self) {
-        match self {
-            SpawnedAdapter::Binance(handle) => handle.shutdown().await,
-            SpawnedAdapter::Polymarket(handle) => handle.shutdown().await,
-        }
-    }
-}
 
 pub(super) fn tap_heartbeat<P>(config: &Config<P>) -> Duration {
     config
@@ -65,7 +47,7 @@ pub(super) struct AdapterWiring<'a> {
     pub tokio_handle: &'a tokio::runtime::Handle,
 }
 
-pub(super) fn spawn_adapters(wiring: AdapterWiring<'_>) -> Vec<SpawnedAdapter> {
+pub(super) fn spawn_adapters(wiring: AdapterWiring<'_>) -> Vec<TaskHandle> {
     let AdapterWiring {
         registry,
         producers,
@@ -95,14 +77,14 @@ pub(super) fn spawn_adapters(wiring: AdapterWiring<'_>) -> Vec<SpawnedAdapter> {
                     tap_heartbeat,
                     rest_quiet: binance_rest_quiet.clone(),
                 };
-                handles.push(SpawnedAdapter::Binance(BinanceAdapter::spawn(
+                handles.push(BinanceAdapter::spawn(
                     group,
                     market,
                     registry.instruments(),
                     producer,
                     context,
                     tokio_handle,
-                )));
+                ));
             }
             VenueMarket::Polymarket(series) => {
                 let context = PolymarketAdapterContext {
@@ -113,14 +95,14 @@ pub(super) fn spawn_adapters(wiring: AdapterWiring<'_>) -> Vec<SpawnedAdapter> {
                     rotations_tx: rotations_tx.clone(),
                     window_assignments: window_assignments.clone(),
                 };
-                handles.push(SpawnedAdapter::Polymarket(PolymarketAdapter::spawn(
+                handles.push(PolymarketAdapter::spawn(
                     group,
                     series,
                     registry.instruments(),
                     producer,
                     context,
                     tokio_handle,
-                )));
+                ));
             }
         }
     }

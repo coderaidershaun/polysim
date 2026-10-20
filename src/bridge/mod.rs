@@ -43,7 +43,6 @@ pub fn run_bridge(config: BridgeConfig) -> Result<(), BridgeError> {
     let logging = crate::log::init(&LogConfig {
         dir: PathBuf::from("logs"),
         file_stem: LOG_FILE_STEM.into(),
-        ..LogConfig::default()
     });
     crate::log::register_thread("bridge");
     let outcome = run::serve(config);

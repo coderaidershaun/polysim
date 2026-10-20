@@ -97,7 +97,6 @@ pub fn run_desktop(config: LinkClientConfig) -> Result<(), DesktopError> {
     let logging = crate::log::init(&LogConfig {
         dir: PathBuf::from("logs"),
         file_stem: LOG_FILE_STEM.into(),
-        ..LogConfig::default()
     });
     crate::log::register_thread("ui");
     let outcome = attach_and_run(config);

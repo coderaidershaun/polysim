@@ -14,7 +14,7 @@ use crate::time::TsUs;
 
 /// Column name, arrow type and accessor in one. `Ts` and `Mantissa` are both non-null `Int64` and
 /// stay apart because a clock reading and a fixed-point mantissa are not the same column to a reader.
-pub(super) enum Column<R> {
+pub(in crate::persist) enum Column<R> {
     Ts(&'static str, fn(&R) -> TsUs),
     Mantissa(&'static str, fn(&R) -> i64),
     /// Nullable: absent means the venue never assigned one, and a zero would read as a real id.

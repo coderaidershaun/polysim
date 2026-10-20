@@ -3,12 +3,12 @@
 
 use std::sync::Arc;
 
-use rtrb::{Consumer, RingBuffer};
+use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::config::{BinanceMarket, VenueMarket};
 use crate::hot::ingress::IngressQueues;
 use crate::hot::spawn::{LinkQueueProducer, QueueProducer, SimTapGate};
-use crate::ids::SourceId;
+use crate::ids::{QueueId, SourceId};
 use crate::info;
 use crate::msg::inbound::{InboundMessage, MarketTapItem};
 use crate::registry::{ConnectionCategory, Registry};
@@ -35,8 +35,7 @@ pub(super) fn build_input_queues(
     // Push in producer_groups() order so Vec aligns for spawn_adapters zip.
     let mut group_producers = Vec::with_capacity(registry.producer_groups().len());
     for group in registry.producer_groups() {
-        let (producer, consumer) = RingBuffer::<InboundMessage>::new(capacity);
-        consumers[usize::from(group.queue_id.0)] = Some(consumer);
+        let producer = attach_ring(&mut consumers, group.queue_id, capacity);
         group_producers.push(QueueProducer::new(
             producer,
             fatal.clone(),
@@ -46,23 +45,19 @@ pub(super) fn build_input_queues(
     }
 
     let timer_queue_id = registry.timer_queue_id();
-    let (timer_ring, timer_consumer) = RingBuffer::<InboundMessage>::new(capacity);
-    consumers[usize::from(timer_queue_id.0)] = Some(timer_consumer);
+    let timer_ring = attach_ring(&mut consumers, timer_queue_id, capacity);
     // Timer not a producer group -> source id one past last group.
     let timer_source_id = SourceId(registry.producer_groups().len() as u16);
     let timer_producer =
         QueueProducer::new(timer_ring, fatal.clone(), timer_queue_id, timer_source_id);
 
     let link_producer = registry.link_queue_id().map(|queue_id| {
-        let (link_ring, link_consumer) = RingBuffer::<InboundMessage>::new(capacity);
-        consumers[usize::from(queue_id.0)] = Some(link_consumer);
-        LinkQueueProducer::new(link_ring, queue_id)
+        LinkQueueProducer::new(attach_ring(&mut consumers, queue_id, capacity), queue_id)
     });
 
     // One past last producer group + timer -> unique source id.
     let exec_producer = registry.exec_queue_id().map(|queue_id| {
-        let (exec_ring, exec_consumer) = RingBuffer::<InboundMessage>::new(capacity);
-        consumers[usize::from(queue_id.0)] = Some(exec_consumer);
+        let exec_ring = attach_ring(&mut consumers, queue_id, capacity);
         let source_id = SourceId(registry.producer_groups().len() as u16 + 1);
         QueueProducer::new(exec_ring, fatal.clone(), queue_id, source_id)
     });
@@ -78,6 +73,16 @@ pub(super) fn build_input_queues(
         link: link_producer,
         exec: exec_producer,
     }
+}
+
+fn attach_ring(
+    consumers: &mut [Option<Consumer<InboundMessage>>],
+    queue_id: QueueId,
+    capacity: usize,
+) -> Producer<InboundMessage> {
+    let (producer, consumer) = RingBuffer::<InboundMessage>::new(capacity);
+    consumers[usize::from(queue_id.0)] = Some(consumer);
+    producer
 }
 
 pub(super) struct MarketTaps {

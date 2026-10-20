@@ -9,9 +9,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use crate::time::TsUs;
 
 pub use producer::register_thread;
 pub use record::{Level, LogRecord};
@@ -22,14 +19,12 @@ pub(crate) use record::MSG_CAPACITY;
 #[doc(hidden)]
 pub use producer::{error_message, info_message, warn_message};
 
-const DEFAULT_RING_CAPACITY: usize = 8192;
 const DEFAULT_FILE_STEM: &str = "polysim";
 
 #[derive(Debug, Clone)]
 pub struct LogConfig {
     /// Log file directory (release only; debug -> stderr).
     pub dir: PathBuf,
-    pub ring_capacity: usize,
     /// File stem for `{file_stem}-YYYY-MM-DD.log`; engine sets the two-part run identity.
     pub file_stem: Box<str>,
 }
@@ -38,7 +33,6 @@ impl Default for LogConfig {
     fn default() -> Self {
         Self {
             dir: PathBuf::from("logs"),
-            ring_capacity: DEFAULT_RING_CAPACITY,
             file_stem: DEFAULT_FILE_STEM.into(),
         }
     }
@@ -65,7 +59,7 @@ impl LogHandle {
 /// # Panics
 /// Panics if called more than once in a process.
 pub fn init(config: &LogConfig) -> LogHandle {
-    let channels = producer::install(config.ring_capacity);
+    let channels = producer::install();
     let output = output::Output::open(config);
     let drain = Arc::new(AtomicBool::new(false));
     let thread_drain = Arc::clone(&drain);
@@ -74,14 +68,6 @@ pub fn init(config: &LogConfig) -> LogHandle {
         .spawn(move || drain::run(channels, output, thread_drain))
         .expect("failed to spawn logging drain thread");
     LogHandle { drain, join }
-}
-
-fn wall_now() -> TsUs {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        // Pre-epoch -> 0 (logging must not crash).
-        .map_or(0, |elapsed| elapsed.as_micros() as i64);
-    TsUs::from_micros(micros)
 }
 
 /// Logs at INFO (format-arg syntax like std::format).

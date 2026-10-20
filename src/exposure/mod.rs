@@ -165,15 +165,11 @@ pub enum ExposureError {
 }
 
 impl ExposureError {
-    fn writer_panicked(payload: &(dyn std::any::Any + Send)) -> Self {
-        let payload: Box<str> = if let Some(text) = payload.downcast_ref::<&str>() {
-            (*text).into()
-        } else if let Some(text) = payload.downcast_ref::<String>() {
-            text.as_str().into()
-        } else {
-            "non-string panic payload".into()
-        };
-        Self::WriterPanicked { payload }
+    fn write_at(path: &Path) -> impl FnOnce(std::io::Error) -> Self + '_ {
+        move |source| Self::Write {
+            path: path.to_path_buf(),
+            source,
+        }
     }
 }
 
@@ -209,7 +205,7 @@ pub fn load(
             .iter()
             .find(|row| row.venue_symbol.as_ref() == entry.symbol.as_str())
         else {
-            if entry.position_base == 0 && entry.cash_quote == 0 && entry.basis_quote == 0 {
+            if entry.is_zero() {
                 continue;
             }
             return Err(ExposureError::UnknownInstrument {

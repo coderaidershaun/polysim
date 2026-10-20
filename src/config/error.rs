@@ -21,16 +21,6 @@ pub enum ConfigError {
     },
     #[error("engine.hot_core_id is required on linux — add a core id to pin the hot thread")]
     MissingHotCoreId,
-    #[error("engine.{field} must be greater than 0")]
-    EngineFieldZero { field: &'static str },
-    #[error("engine.{field} = {value}, expected {expected}")]
-    EngineFieldRange {
-        field: &'static str,
-        value: u64,
-        expected: &'static str,
-    },
-    #[error("queues.{field} must be greater than 0")]
-    QueueCapacityZero { field: &'static str },
     #[error(
         "strategy.tables names {tables} but there is no persistence: block to write them into — add one, or drop the tables list to run without persistence"
     )]
