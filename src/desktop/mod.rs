@@ -36,8 +36,6 @@ mod latency;
 #[cfg(feature = "ui")]
 mod layout;
 #[cfg(feature = "ui")]
-mod lifecycle;
-#[cfg(feature = "ui")]
 mod link_bar;
 pub(crate) mod link_client;
 pub mod link_model;
@@ -49,8 +47,6 @@ mod monitor_account;
 #[cfg(feature = "ui")]
 mod monitor_channels;
 pub mod monitor_model;
-#[cfg(feature = "ui")]
-mod monitor_rows;
 #[cfg(feature = "ui")]
 mod monitor_summary;
 pub mod monitor_view;

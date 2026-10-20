@@ -1,12 +1,13 @@
 //! One declaration per wire record: writer and reader are generated from the same field list, so no
-//! edit can teach one half a layout the other never learned.
-//! Macro bodies sit outside the fmt gate (rustfmt skips brace-delimited item macros) — hand-formatted.
+//! edit can teach one half a layout the other never learned. Every number rides little-endian.
+//! Rustfmt skips the bodies of brace-delimited item macros, so the macro bodies here are formatted by
+//! hand.
 
 use crate::ids::{AssetId, ClientOrderId, InstrumentId, Price, Qty};
 use crate::msg::persist::FeatureId;
 use crate::time::{DurationUs, TsUs};
 
-use super::envelope::{ByteReader, ByteWriter, LinkDecodeError, LinkHash, TopicId, WireName};
+use super::envelope::{ByteReader, ByteWriter, LinkDecodeError, LinkHash, TopicId};
 
 /// Reading is fallible for every type so one declaration form serves plain fields and tagged ones
 /// alike; the plain cases return `Ok` unconditionally.
@@ -16,16 +17,32 @@ pub(super) trait WireField: Sized {
 }
 
 macro_rules! wire_primitive {
-    ($($ty:ty => $write:ident / $read:ident),+ $(,)?) => {
+    ($($ty:ty),+ $(,)?) => {
         $(impl WireField for $ty {
             #[inline]
             fn write(&self, writer: &mut ByteWriter<'_>) {
-                writer.$write(*self);
+                writer.write_bytes(&self.to_le_bytes());
             }
 
             #[inline]
             fn read(reader: &mut ByteReader<'_>) -> Result<Self, LinkDecodeError> {
-                Ok(reader.$read())
+                Ok(Self::from_le_bytes(reader.take()))
+            }
+        })+
+    };
+}
+
+macro_rules! wire_micros {
+    ($($ty:ident),+ $(,)?) => {
+        $(impl WireField for $ty {
+            #[inline]
+            fn write(&self, writer: &mut ByteWriter<'_>) {
+                self.micros().write(writer);
+            }
+
+            #[inline]
+            fn read(reader: &mut ByteReader<'_>) -> Result<Self, LinkDecodeError> {
+                Ok($ty::from_micros(i64::read(reader)?))
             }
         })+
     };
@@ -47,16 +64,39 @@ macro_rules! wire_newtype {
     };
 }
 
-/// A missing mantissa still occupies its eight bytes, so the tail width never depends on the data.
+/// An absent value still occupies its bytes, so the tail width never depends on the data. The reader
+/// therefore takes the value before it looks at the presence byte.
+macro_rules! wire_optional {
+    ($($ty:ty, $label:literal);+ $(;)?) => {
+        $(impl WireField for Option<$ty> {
+            fn write(&self, writer: &mut ByteWriter<'_>) {
+                let tag = if self.is_some() { PRESENT } else { ABSENT };
+                tag.write(writer);
+                self.unwrap_or_default().write(writer);
+            }
+
+            fn read(reader: &mut ByteReader<'_>) -> Result<Self, LinkDecodeError> {
+                let tag = u8::read(reader)?;
+                let value = <$ty as WireField>::read(reader)?;
+                match tag {
+                    ABSENT => Ok(None),
+                    PRESENT => Ok(Some(value)),
+                    _ => Err(LinkDecodeError::unknown($label, tag)),
+                }
+            }
+        })+
+    };
+}
+
 macro_rules! wire_optional_mantissa {
     ($($ty:ident),+ $(,)?) => {
         $(impl WireField for Option<$ty> {
             fn write(&self, writer: &mut ByteWriter<'_>) {
-                writer.write_optional_mantissa(self.map(|value| value.0));
+                self.map(|value| value.0).write(writer);
             }
 
             fn read(reader: &mut ByteReader<'_>) -> Result<Self, LinkDecodeError> {
-                Ok(reader.read_optional_mantissa()?.map($ty))
+                Ok(Option::<i64>::read(reader)?.map($ty))
             }
         })+
     };
@@ -69,13 +109,14 @@ macro_rules! wire_enum {
     ($ty:ty, $label:literal; $( ($($value:tt)+) = $tag:literal ),+ $(,)?) => {
         impl WireField for $ty {
             fn write(&self, writer: &mut ByteWriter<'_>) {
-                writer.write_u8(match *self {
+                let tag: u8 = match *self {
                     $( $($value)+ => $tag, )+
-                });
+                };
+                tag.write(writer);
             }
 
             fn read(reader: &mut ByteReader<'_>) -> Result<Self, LinkDecodeError> {
-                let tag = reader.read_u8();
+                let tag = u8::read(reader)?;
                 match tag {
                     $( $tag => Ok($($value)+), )+
                     _ => Err(LinkDecodeError::unknown($label, tag)),
@@ -129,18 +170,9 @@ macro_rules! wire_array {
 
 pub(super) use {wire_array, wire_enum, wire_struct};
 
-wire_primitive! {
-    u8 => write_u8 / read_u8,
-    u16 => write_u16 / read_u16,
-    u32 => write_u32 / read_u32,
-    i32 => write_i32 / read_i32,
-    u64 => write_u64 / read_u64,
-    i64 => write_i64 / read_i64,
-    f64 => write_f64 / read_f64,
-    TsUs => write_ts / read_ts,
-    DurationUs => write_duration / read_duration,
-    LinkHash => write_hash / read_hash,
-}
+wire_primitive!(u8, u16, u32, i32, u64, i64, f64);
+
+wire_micros!(TsUs, DurationUs);
 
 wire_newtype! {
     TopicId => u16,
@@ -150,26 +182,33 @@ wire_newtype! {
     ClientOrderId => u64,
     Price => i64,
     Qty => i64,
+    LinkHash => u64,
+}
+
+pub(super) const OPTIONAL_MANTISSA_LEN: usize = 1 + 8;
+pub(super) const OPTIONAL_F64_LEN: usize = 1 + 8;
+pub(super) const OPTIONAL_LEVEL_LEN: usize = OPTIONAL_MANTISSA_LEN + 8;
+
+const ABSENT: u8 = 0;
+const PRESENT: u8 = 1;
+
+wire_optional! {
+    i64, "optional mantissa";
+    f64, "optional f64";
 }
 
 wire_optional_mantissa!(Price, Qty);
 
-impl WireField for WireName {
-    fn write(&self, writer: &mut ByteWriter<'_>) {
-        writer.write_name(*self);
-    }
-
-    fn read(reader: &mut ByteReader<'_>) -> Result<Self, LinkDecodeError> {
-        reader.read_name()
-    }
-}
-
+/// The quantity rides even when the price is absent, so every level is one width.
 impl WireField for Option<(Price, Qty)> {
     fn write(&self, writer: &mut ByteWriter<'_>) {
-        writer.write_optional_level(*self);
+        self.map(|(price, _)| price).write(writer);
+        self.map_or(Qty(0), |(_, qty)| qty).write(writer);
     }
 
     fn read(reader: &mut ByteReader<'_>) -> Result<Self, LinkDecodeError> {
-        reader.read_optional_level()
+        let price = Option::<Price>::read(reader)?;
+        let qty = Qty::read(reader)?;
+        Ok(price.map(|price| (price, qty)))
     }
 }

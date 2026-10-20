@@ -1,4 +1,6 @@
-//! Custom-painted OHLC/line chart with fills. Shares window with stacked risk chart via returned geometry.
+//! The mid chart, painted by hand as a line or as candles with this engine's fills marked on it. It
+//! also owns the frame and inset both stacked charts paint in, and hands its plot geometry back for
+//! the crosshair.
 
 use std::cmp::Ordering;
 use std::mem;
@@ -44,36 +46,53 @@ impl<B: Copy + Into<ChartBounds>> Plot<B> {
         let fraction = chart_view::y_fraction(value, self.bounds.into());
         egui::lerp(self.rect.bottom()..=self.rect.top(), fraction)
     }
+
+    pub(super) fn point(&self, index: u64, value: i64) -> egui::Pos2 {
+        egui::pos2(self.x(index), self.y(value))
+    }
 }
 
 pub type PlotGeometry = Plot<ChartBounds>;
 
 impl PlotGeometry {
-    fn point(&self, index: u64, half_ticks: i64) -> egui::Pos2 {
-        egui::pos2(self.x(index), self.y(half_ticks))
-    }
-
     fn slot_width(&self) -> f32 {
         self.rect.width() / self.domain.width() as f32
     }
 }
 
 #[must_use]
-pub struct ChartPaint {
+pub struct ChartPaint<B> {
     pub response: egui::Response,
-    pub geometry: Option<PlotGeometry>,
+    pub geometry: Option<Plot<B>>,
 }
 
-pub fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &ChartFrame<'_>) -> ChartPaint {
-    let response = ui.interact(rect, egui::Id::new("polysim-chart"), egui::Sense::hover());
+pub fn paint(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    frame: &ChartFrame<'_>,
+) -> ChartPaint<ChartBounds> {
+    paint_frame(ui, rect, "polysim-chart", |painter, plot| {
+        paint_plot(painter, plot, frame)
+    })
+}
+
+/// Every plot of the stack gets the same frame and the same inset, so the stacked charts' x extents
+/// match by construction and their axes line up.
+pub(super) fn paint_frame<B>(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    id: &str,
+    paint_plot: impl FnOnce(&egui::Painter, egui::Rect) -> Option<Plot<B>>,
+) -> ChartPaint<B> {
+    let response = ui.interact(rect, egui::Id::new(id), egui::Sense::hover());
     let painter = ui.painter().with_clip_rect(rect);
 
     painter.rect_filled(rect, 0.0, DARK.panel);
-    let geometry = plot_rect(rect).and_then(|plot_rect| paint_plot(&painter, plot_rect, frame));
+    let geometry = plot_rect(rect).and_then(|plot_rect| paint_plot(&painter, plot_rect));
     ChartPaint { response, geometry }
 }
 
-pub(crate) fn plot_rect(rect: egui::Rect) -> Option<egui::Rect> {
+fn plot_rect(rect: egui::Rect) -> Option<egui::Rect> {
     let pad = egui::vec2(METRICS.chart_pad, METRICS.chart_pad);
     let gutter = egui::vec2(METRICS.chart_axis_gutter, 0.0);
     let plot = egui::Rect::from_min_max(rect.min + pad, rect.max - pad - gutter);

@@ -1,5 +1,6 @@
-//! Pure projection: exact integer tick math, fixed-center ladder with grouping N. One [`BucketLadder`]
-//! serves public levels, desire and real orders so they agree on rows; desire and orders never merge.
+//! The ladder as a pure projection, in exact integer tick maths around a fixed center, with N ticks
+//! to a row. One [`BucketLadder`] places public levels, the desired quote and real orders, so they
+//! agree on rows, and the desired quote and real orders never merge.
 //! [`fit_rows`] belongs here and not beside the painter for the same reason as the rest: how many
 //! rows a ladder has is projection, not paint. It takes its floor as an argument, so like every
 //! other rule in this module it names no toolkit type.
@@ -409,6 +410,15 @@ impl BucketLadder {
             .ok()
             .filter(|offset| *offset < self.rows)
     }
+
+    fn off_screen(&self, tick_index: i64, mid_half_ticks: i64) -> QuotePlacement {
+        let delta_half_ticks = delta_from_mid(tick_index, mid_half_ticks);
+        if tick_index < self.lowest_edge() {
+            QuotePlacement::OffScreenBelow { delta_half_ticks }
+        } else {
+            QuotePlacement::OffScreenAbove { delta_half_ticks }
+        }
+    }
 }
 
 fn saturating_i64(value: i128) -> i64 {
@@ -419,12 +429,12 @@ fn place_public(rows: &mut [DomRow], levels: &[Level], tick: Price, ladder: &Buc
     for level in levels {
         let Some(level_tick) = tick_index(level.price, tick) else { continue };
         let Some(offset) = ladder.row_of(level_tick) else { continue };
-        let row = &mut rows[offset];
-        let bucket_qty = row
-            .public_qty
-            .map_or(level.qty, |seen| Qty(seen.0.saturating_add(level.qty.0)));
-        row.public_qty = Some(bucket_qty);
+        add_qty(&mut rows[offset].public_qty, level.qty);
     }
+}
+
+fn add_qty(slot: &mut Option<Qty>, qty: Qty) {
+    *slot = Some(slot.map_or(qty, |seen| Qty(seen.0.saturating_add(qty.0))));
 }
 
 fn place_quote(
@@ -437,18 +447,10 @@ fn place_quote(
     let Some((price, qty)) = quote else { return QuotePlacement::None };
     let Some(quote_tick) = tick_index(price, tick) else { return QuotePlacement::None };
     let Some(offset) = ladder.row_of(quote_tick) else {
-        let delta_half_ticks = delta_from_mid(quote_tick, mid_half_ticks);
-        return if quote_tick < ladder.lowest_edge() {
-            QuotePlacement::OffScreenBelow { delta_half_ticks }
-        } else {
-            QuotePlacement::OffScreenAbove { delta_half_ticks }
-        };
+        return ladder.off_screen(quote_tick, mid_half_ticks);
     };
     let row = &mut rows[offset];
-    row.strategy_qty = Some(
-        row.strategy_qty
-            .map_or(qty, |seen| Qty(seen.0.saturating_add(qty.0))),
-    );
+    add_qty(&mut row.strategy_qty, qty);
     row.is_quoted = true;
     QuotePlacement::Visible
 }
@@ -464,19 +466,11 @@ fn place_orders(
     for order in orders {
         let Some(order_tick) = tick_index(order.price, tick) else { continue };
         let Some(offset) = ladder.row_of(order_tick) else {
-            let delta_half_ticks = delta_from_mid(order_tick, mid_half_ticks);
-            placement = placement.or(if order_tick < ladder.lowest_edge() {
-                QuotePlacement::OffScreenBelow { delta_half_ticks }
-            } else {
-                QuotePlacement::OffScreenAbove { delta_half_ticks }
-            });
+            placement = placement.or(ladder.off_screen(order_tick, mid_half_ticks));
             continue;
         };
         let row = &mut rows[offset];
-        let bucket_qty = row.order_qty.map_or(order.remaining(), |seen| {
-            Qty(seen.0.saturating_add(order.remaining().0))
-        });
-        row.order_qty = Some(bucket_qty);
+        add_qty(&mut row.order_qty, order.remaining());
         row.order_status = Some(match row.order_status {
             Some(held) => most_alarming(held, order.status),
             None => order.status,

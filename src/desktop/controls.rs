@@ -16,10 +16,7 @@ pub(crate) fn paint_execution_mode_badge(
     strip: egui::Rect,
     mode: Option<ExecutionMode>,
 ) {
-    let rect = egui::Rect::from_min_max(
-        egui::pos2(strip.right() - EXECUTION_MODE_BADGE_WIDTH, strip.top()),
-        egui::pos2(strip.right(), strip.bottom()),
-    );
+    let rect = strip.with_min_x(strip.right() - EXECUTION_MODE_BADGE_WIDTH);
     let (badge, tone) = text::execution_badge(mode);
     let (fill, text_color) = match tone {
         Tone::Text => (DARK.border, DARK.text_primary),
@@ -68,7 +65,7 @@ pub(crate) fn paint_segmented_toggle<T: Copy + PartialEq>(
             if active { DARK.text_primary } else { DARK.text_secondary },
         );
         if index > 0 {
-            part(&painter, cell.left(), rect);
+            theme::rules_v(&painter, [cell.left()], rect.y_range());
         }
 
         if response.clicked() {
@@ -101,12 +98,11 @@ pub(crate) fn paint_stepper(
     painter.rect_filled(rect, 0.0, DARK.panel);
 
     let step_width = rect.height();
-    let track = egui::Rect::from_min_max(
-        egui::pos2(rect.left() + step_width, rect.top()),
-        egui::pos2(rect.right() - step_width, rect.bottom()),
-    );
-    let down = egui::Rect::from_min_max(rect.min, egui::pos2(track.left(), rect.bottom()));
-    let up = egui::Rect::from_min_max(egui::pos2(track.right(), rect.top()), rect.max);
+    let track = rect
+        .with_min_x(rect.left() + step_width)
+        .with_max_x(rect.right() - step_width);
+    let down = rect.with_max_x(track.left());
+    let up = rect.with_min_x(track.right());
 
     let dragged = paint_track(ui, &painter, track, id_salt, &spec);
     // Both step cells paint every frame: short-circuiting on the first click would leave the other
@@ -119,8 +115,7 @@ pub(crate) fn paint_stepper(
         _ => None,
     };
 
-    part(&painter, track.left(), rect);
-    part(&painter, track.right(), rect);
+    theme::rules_v(&painter, [track.left(), track.right()], rect.y_range());
     enclose(&painter, rect);
 
     stepped
@@ -147,10 +142,7 @@ fn paint_track(
 
     let span = spec.max.saturating_sub(spec.min).max(1) as f32;
     let filled = (spec.value.saturating_sub(spec.min) as f32 / span).clamp(0.0, 1.0);
-    let grown = egui::Rect::from_min_max(
-        track.min,
-        egui::pos2(track.left() + track.width() * filled, track.bottom()),
-    );
+    let grown = track.with_max_x(track.left() + track.width() * filled);
     fill_selected(painter, grown);
 
     paint_readout(painter, track, spec);
@@ -219,24 +211,10 @@ fn paint_step(
 }
 
 /// Selection is a fill plus a bar along the cell's bottom edge — the shell's one selected idiom.
-fn fill_selected(painter: &egui::Painter, cell: egui::Rect) {
+pub(crate) fn fill_selected(painter: &egui::Painter, cell: egui::Rect) {
     painter.rect_filled(cell, 0.0, DARK.selected.gamma_multiply(0.28));
-    painter.rect_filled(
-        egui::Rect::from_min_max(
-            egui::pos2(cell.left(), cell.bottom() - METRICS.accent_thickness),
-            cell.max,
-        ),
-        0.0,
-        DARK.selected,
-    );
-}
-
-fn part(painter: &egui::Painter, x: f32, rect: egui::Rect) {
-    painter.vline(
-        theme::crisp(painter, x),
-        rect.y_range(),
-        theme::hairline(painter, DARK.border),
-    );
+    let accent = cell.with_min_y(cell.bottom() - METRICS.accent_thickness);
+    painter.rect_filled(accent, 0.0, DARK.selected);
 }
 
 fn enclose(painter: &egui::Painter, rect: egui::Rect) {

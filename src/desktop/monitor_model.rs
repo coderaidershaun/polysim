@@ -1,6 +1,7 @@
-//! Feature store + channel histories. Pure data; folds events in event time (never wall clock).
+//! The feature store and the channel histories: pure data that folds events in event time and never
+//! reads the wall clock.
 
-use super::history::BoundedHistory;
+use super::history::{BoundedHistory, grow_to};
 use crate::hot::exec::{OrderState, QuoteLevel, RejectOrigin};
 use crate::ids::{AssetId, ClientOrderId, InstrumentId, Price, Qty, Side};
 use crate::msg::exec::Liquidity;
@@ -126,19 +127,19 @@ impl MonitorModel {
         feature_count: usize,
         spin_interval: DurationUs,
     ) -> Self {
-        Self {
+        let mut model = Self {
             feature_count,
-            features: vec![None; instrument_count * feature_count],
-            latest_feed_ts_us: vec![None; instrument_count],
-            book_state: vec![None; instrument_count],
-            trades: (0..instrument_count)
-                .map(|_| BoundedHistory::new(TRADE_TAPE_CAPACITY))
-                .collect(),
+            features: Vec::new(),
+            latest_feed_ts_us: Vec::new(),
+            book_state: Vec::new(),
+            trades: Vec::new(),
             system: BoundedHistory::new(SYSTEM_CAPACITY),
             orders: BoundedHistory::new(ORDER_CAPACITY),
             fills: BoundedHistory::new(FILL_CAPACITY),
             spin_interval,
-        }
+        };
+        model.configure(instrument_count, feature_count, spin_interval);
+        model
     }
 
     /// Adopt run dimensions once catalog arrives (spin cadence, feature width). Grid rebuild discards nothing (empty at startup).
@@ -150,13 +151,8 @@ impl MonitorModel {
     ) {
         self.spin_interval = spin_interval;
         self.feature_count = feature_count;
-        let instruments = instrument_count.max(self.latest_feed_ts_us.len());
-        self.latest_feed_ts_us.resize(instruments, None);
-        self.book_state.resize(instruments, None);
-        while self.trades.len() < instruments {
-            self.trades.push(BoundedHistory::new(TRADE_TAPE_CAPACITY));
-        }
-        self.features = vec![None; instruments * feature_count];
+        self.ensure_instruments(instrument_count);
+        self.features = vec![None; self.latest_feed_ts_us.len() * feature_count];
     }
 
     pub(crate) fn apply_event(&mut self, event: &UiEvent) {
@@ -400,9 +396,7 @@ impl MonitorModel {
         let index = instrument.0 as usize;
         self.ensure_instruments(index + 1);
         let slot = &mut self.latest_feed_ts_us[index];
-        if slot.is_none_or(|existing| at.micros() > existing.micros()) {
-            *slot = Some(at);
-        }
+        *slot = (*slot).max(Some(at));
     }
 
     fn apply_feature(
@@ -442,9 +436,9 @@ impl MonitorModel {
         }
         self.latest_feed_ts_us.resize(len, None);
         self.book_state.resize(len, None);
-        while self.trades.len() < len {
-            self.trades.push(BoundedHistory::new(TRADE_TAPE_CAPACITY));
-        }
+        grow_to(&mut self.trades, len, || {
+            BoundedHistory::new(TRADE_TAPE_CAPACITY)
+        });
         self.features.resize(len * self.feature_count, None);
     }
 }

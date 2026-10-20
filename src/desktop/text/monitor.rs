@@ -48,13 +48,9 @@ pub(crate) fn write_delta(
     mid_half_ticks: Option<i64>,
     unit: DomUnit,
 ) -> Wrote {
-    match (unit, delta_half_ticks) {
-        (DomUnit::Bps, _) => format::write_opt_bps_delta(buf, delta_half_ticks, mid_half_ticks),
-        (DomUnit::Ticks, Some(delta)) => {
-            format::write_half_tick_delta(buf, delta);
-            Wrote::Value
-        }
-        (DomUnit::Ticks, None) => format::write_missing(buf),
+    match unit {
+        DomUnit::Bps => format::write_opt_bps_delta(buf, delta_half_ticks, mid_half_ticks),
+        DomUnit::Ticks => format::write_opt(buf, delta_half_ticks, format::write_mid),
     }
 }
 
@@ -104,12 +100,9 @@ pub(crate) fn asset_label(asset: AssetRowView<'_>) -> &str {
 }
 
 pub(crate) fn write_amount(scratch: &mut String, mantissa: Option<i64>, decimals: usize) {
-    match mantissa {
-        Some(mantissa) => format::write_quote_amount(scratch, mantissa, decimals),
-        None => {
-            format::write_missing(scratch);
-        }
-    }
+    format::write_opt(scratch, mantissa, |buf, mantissa| {
+        format::write_quote_amount(buf, mantissa, decimals)
+    });
 }
 
 /// The last refusal the account band shows. None yet reads as no reading.
@@ -145,9 +138,7 @@ pub(crate) fn feature_name<'a>(row: &FeatureRowView, names: &'a [Box<str>]) -> &
 pub(crate) fn feature_hover(row: &FeatureRowView, names: &[Box<str>]) -> String {
     let mut hover = String::from(feature_name(row, names));
     hover.push_str("  =  ");
-    let mut value = String::new();
-    write_feature_cell(&mut value, row);
-    hover.push_str(&value);
+    hover.push_str(&format::render(|out| write_feature_cell(out, row)));
     if row.stale {
         hover.push_str("   (stale)");
     }
@@ -155,10 +146,5 @@ pub(crate) fn feature_hover(row: &FeatureRowView, names: &[Box<str>]) -> String 
 }
 
 pub(crate) fn write_feature_cell(buf: &mut String, row: &FeatureRowView) {
-    match row.value {
-        Some(value) => format::write_feature_value(buf, value),
-        None => {
-            format::write_missing(buf);
-        }
-    }
+    format::write_opt(buf, row.value, format::write_feature_value);
 }

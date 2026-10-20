@@ -54,12 +54,9 @@ pub(crate) fn mid_tone(mid_half_ticks: Option<i64>) -> Tone {
 }
 
 pub(crate) fn row_price(buf: &mut String, tick: Price, price_decimals: usize, tick_index: i64) {
-    match price_for_row(tick, tick_index) {
-        Some(price) => format::write_venue_price(buf, price, price_decimals),
-        None => {
-            format::write_missing(buf);
-        }
-    }
+    format::write_opt(buf, price_for_row(tick, tick_index), |buf, price| {
+        format::write_venue_price(buf, price, price_decimals)
+    });
 }
 
 /// The groupings offered per unit, in dropdown order: tick multiples here, fractions of the mid

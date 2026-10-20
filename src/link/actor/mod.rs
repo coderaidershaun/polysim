@@ -1,4 +1,6 @@
-//! Link actor: tokio task owning UDP socket, subscriber table, sequence gate. Adapter inbound (validate+push); metrics outbound (timer poll). ONLY consumer of hot-thread UI rings.
+//! The link actor: one tokio task that owns the UDP socket, the subscriber table and the sequence
+//! gate. Inbound frames are validated and pushed to the engine like any other input, and outbound
+//! frames are drained on timers from the hot thread's UI rings, which nothing else reads.
 
 mod outbound;
 
@@ -277,8 +279,7 @@ impl Actor {
     }
 
     fn check_peer_silence(&mut self, now: TsUs) {
-        for index in 0..self.peers.len() {
-            let peer = &self.peers[index];
+        for peer in &mut self.peers {
             let is_silent = peer
                 .last_seen_ts_us
                 .is_none_or(|seen| now.diff(seen) >= PEER_SILENCE_LIMIT);
@@ -286,7 +287,7 @@ impl Actor {
                 continue;
             }
             let address = peer.feed.address;
-            self.peers[index].is_silent = true;
+            peer.is_silent = true;
             self.counts.peer_silenced += 1;
             warn!(
                 "link peer {address} silent for {}s — its feed is stale, not merely quiet",

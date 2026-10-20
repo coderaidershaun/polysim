@@ -4,7 +4,7 @@
 //! runs — its helpers serve unchanged rather than growing `f64` twins.
 
 use super::chart_model::{bucket_capacity, bucket_index};
-use super::history::BoundedHistory;
+use super::history::{BoundedHistory, grow_to};
 use crate::ids::{InstrumentId, fixed_mantissa};
 use crate::msg::ui::UiEvent;
 use crate::time::{DurationUs, TsUs};
@@ -27,15 +27,14 @@ pub struct PositionModel {
 
 impl PositionModel {
     pub fn with_capacity(instrument_count: usize, spin_interval: DurationUs) -> Self {
-        let bucket_capacity = bucket_capacity(spin_interval);
-        Self {
-            series: (0..instrument_count)
-                .map(|_| BoundedHistory::new(bucket_capacity))
-                .collect(),
+        let mut model = Self {
+            series: Vec::new(),
             spin_interval,
-            bucket_capacity,
+            bucket_capacity: 0,
             rejected_frames: 0,
-        }
+        };
+        model.configure(instrument_count, spin_interval);
+        model
     }
 
     pub fn configure(&mut self, instrument_count: usize, spin_interval: DurationUs) {
@@ -143,8 +142,8 @@ impl PositionModel {
     }
 
     fn ensure_instruments(&mut self, len: usize) {
-        while self.series.len() < len {
-            self.series.push(BoundedHistory::new(self.bucket_capacity));
-        }
+        grow_to(&mut self.series, len, || {
+            BoundedHistory::new(self.bucket_capacity)
+        });
     }
 }

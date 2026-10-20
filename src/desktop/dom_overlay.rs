@@ -1,4 +1,5 @@
-//! DOM overlays: off-screen chevrons, hover readouts, status badges. Never reorder rows.
+//! What the ladder paints over its rows: the chevrons for orders off screen, the hover readout and
+//! the status badge. None of it ever reorders the rows.
 
 use eframe::egui;
 
@@ -25,7 +26,7 @@ pub(crate) fn paint_offscreen(painter: &egui::Painter, layout: &DomLayout, view:
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Direction {
+pub(crate) enum Direction {
     Up,
     Down,
 }
@@ -37,10 +38,8 @@ fn chevron(
     delta_half_ticks: i64,
 ) {
     // The triangle beside the number is what says "delta": every `format::write_*` opens by clearing
-    // the buffer, so a prefix written here would be discarded, and the glyph that reads as one has no
-    // face in the bundled default fonts.
-    let mut label = String::new();
-    format::write_mid(&mut label, delta_half_ticks);
+    // the buffer, so a prefix written here would be discarded.
+    let label = format::render(|out| format::write_mid(out, delta_half_ticks));
     let galley = painter.layout_no_wrap(
         label,
         egui::FontId::proportional(METRICS.dom_tag_font + 1.0),
@@ -61,7 +60,7 @@ fn chevron(
     fill_pill(painter, pill, DARK.focus);
 
     let arrow_center = egui::pos2(pill.left() + pad + arrow / 2.0, pill.center().y);
-    painter.add(triangle(arrow_center, arrow, direction));
+    painter.add(triangle(arrow_center, arrow, direction, DARK.selected));
     painter.galley(
         egui::pos2(
             arrow_center.x + arrow / 2.0 + METRICS.space_1,
@@ -72,7 +71,14 @@ fn chevron(
     );
 }
 
-fn triangle(center: egui::Pos2, size: f32, direction: Direction) -> egui::Shape {
+/// Painted as a shape rather than set as a glyph: the bundled default fonts have no face for the
+/// arrows and triangles this would otherwise be written with.
+pub(crate) fn triangle(
+    center: egui::Pos2,
+    size: f32,
+    direction: Direction,
+    color: egui::Color32,
+) -> egui::Shape {
     let half = size / 2.0;
     let points = match direction {
         Direction::Up => vec![
@@ -86,7 +92,7 @@ fn triangle(center: egui::Pos2, size: f32, direction: Direction) -> egui::Shape 
             egui::pos2(center.x + half, center.y - half),
         ],
     };
-    egui::Shape::convex_polygon(points, DARK.selected, egui::Stroke::NONE)
+    egui::Shape::convex_polygon(points, color, egui::Stroke::NONE)
 }
 
 pub(crate) fn paint_hover(
@@ -134,33 +140,20 @@ fn hovered_row(
 }
 
 fn row_detail(row: &DomRow, frame: &DomFrame<'_>) -> RowDetail {
-    let mut price = String::new();
-    let mut public = String::new();
-    let mut order = String::new();
-    let mut desired = String::new();
-    frame.write_row_price(&mut price, row.tick_index);
-    format::write_opt_qty(
-        &mut public,
-        row.public_qty,
-        frame.qty_scale,
-        frame.qty_decimals,
-    );
-    format::write_opt_qty(
-        &mut order,
-        row.order_qty,
-        frame.qty_scale,
-        frame.qty_decimals,
-    );
+    let price = format::render(|out| frame.write_row_price(out, row.tick_index));
+    let public = format::render(|out| {
+        format::write_opt_qty(out, row.public_qty, frame.qty_scale, frame.qty_decimals);
+    });
+    let mut order = format::render(|out| {
+        format::write_opt_qty(out, row.order_qty, frame.qty_scale, frame.qty_decimals);
+    });
     if let Some(status) = row.order_status {
         order.push_str("  ");
         order.push_str(status.word());
     }
-    format::write_opt_qty(
-        &mut desired,
-        row.strategy_qty,
-        frame.qty_scale,
-        frame.qty_decimals,
-    );
+    let desired = format::render(|out| {
+        format::write_opt_qty(out, row.strategy_qty, frame.qty_scale, frame.qty_decimals);
+    });
     RowDetail {
         price,
         public,

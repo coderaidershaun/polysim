@@ -1,5 +1,5 @@
-//! Hover crosshair spanning both stacked plots. Clipped to stack to cross both charts.
-//! Painted last so it's over both plots, not inside either.
+//! The hover crosshair across both stacked plots. It is clipped to the whole stack and painted last,
+//! so it lies over both plots rather than inside either one.
 
 use eframe::egui;
 
@@ -56,23 +56,13 @@ pub fn paint(ui: &egui::Ui, frame: &CrosshairFrame<'_>) {
         && let Some(close) = mid_close(frame, bucket)
     {
         format::write_venue_mid(&mut label, close, frame.tick);
-        paint_pill(
-            &painter,
-            frame,
-            &label,
-            egui::pos2(mid.x(bucket), mid.y(close)),
-        );
+        paint_pill(&painter, frame, &label, mid.point(bucket, close));
     }
     if let Some(lower) = frame.lower
         && let Some(value) = position_value(frame, bucket)
     {
         format::write_quote_amount(&mut label, value, RiskSeries::READOUT_DECIMALS);
-        paint_pill(
-            &painter,
-            frame,
-            &label,
-            egui::pos2(lower.x(bucket), lower.y(value)),
-        );
+        paint_pill(&painter, frame, &label, lower.point(bucket, value));
     }
     paint_time(&painter, frame, bucket, &mut label);
 }

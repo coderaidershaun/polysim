@@ -1,12 +1,15 @@
-//! Tab strip + channel rows, newest-first. Independent scroll; scrolled away -> resume badge. Venue state verbatim.
+//! The monitor's tab strip and the active channel's rows, newest first, each row in fixed columns
+//! taken from its own rect so the numbers never shift while the rows scroll.
 
 use eframe::egui;
 
-use super::monitor::{Channel, MonitorFrame, MonitorUiState, RowList, paint_row_list};
+use super::controls;
+use super::dom_overlay::{Direction, triangle};
+use super::monitor::{
+    Channel, MonitorFrame, MonitorUiState, RowList, paint_left_ellipsized, paint_row_list,
+};
 use super::monitor_model::{FillRow, OrderRow, SystemRow, TradeRow};
-use super::monitor_rows::paint_cells;
-use super::monitor_view::unseen;
-use super::text::{Cell, ChannelRow, record_row};
+use super::text::{Cell, ChannelRow, TagColumn, record_row};
 use super::theme::{self, DARK, METRICS};
 
 /// Scroll offset threshold for "pinned to newest". Hair above zero absorbs sub-pixel jitter.
@@ -31,13 +34,7 @@ pub(super) fn paint_tabs(ui: &mut egui::Ui, rect: egui::Rect, state: &mut Monito
         );
 
         if active {
-            painter.rect_filled(cell, 0.0, DARK.selected.gamma_multiply(0.28));
-            // Selected tab claims the strip's bottom edge: the channel it governs sits below it.
-            let accent = egui::Rect::from_min_max(
-                egui::pos2(cell.left(), cell.bottom() - METRICS.accent_thickness),
-                cell.max,
-            );
-            painter.rect_filled(accent, 0.0, DARK.selected);
+            controls::fill_selected(&painter, cell);
         } else if response.hovered() {
             painter.rect_filled(cell, 0.0, DARK.panel);
         }
@@ -54,11 +51,8 @@ pub(super) fn paint_tabs(ui: &mut egui::Ui, rect: egui::Rect, state: &mut Monito
         }
     }
 
-    let stroke = theme::hairline(&painter, DARK.border);
-    for boundary in 1..Channel::ALL.len() {
-        let x = rect.left() + boundary as f32 * cell_w;
-        painter.vline(theme::crisp(&painter, x), rect.y_range(), stroke);
-    }
+    let dividers = (1..Channel::ALL.len()).map(|boundary| rect.left() + boundary as f32 * cell_w);
+    theme::rules_v(&painter, dividers, rect.y_range());
 }
 
 /// Paint active channel rows. Each channel keeps bounded history newest-first (tabs don't clear).
@@ -86,10 +80,9 @@ fn render_channel<R: ChannelRow>(
     let appended = R::appended(frame);
     let slot = state.channel(R::CHANNEL);
     let forced = slot.take_pending_offset();
-    let following = slot.following();
-    let unseen_count = if following { 0 } else { unseen(appended, slot.seen()) };
-    if following {
-        slot.mark_seen(appended);
+    let unseen_count = if slot.following { 0 } else { appended.saturating_sub(slot.seen) };
+    if slot.following {
+        slot.seen = appended;
     }
 
     let mut cells: Vec<Cell> = Vec::new();
@@ -111,9 +104,7 @@ fn render_channel<R: ChannelRow>(
         },
         |index| R::at(frame, index).map_or_else(String::new, |row| record_row(&row, frame)),
     );
-    state
-        .channel(R::CHANNEL)
-        .set_following(offset <= FOLLOW_EPS);
+    state.channel(R::CHANNEL).following = offset <= FOLLOW_EPS;
 
     if unseen_count > 0 {
         paint_unseen_badge(ui, rect, R::CHANNEL, unseen_count, state);
@@ -153,7 +144,8 @@ fn paint_unseen_badge(
         badge.left() + METRICS.space_2 + marker_size / 2.0,
         badge.center().y,
     );
-    painter.add(up_triangle(marker_center, marker_size));
+    let marker = triangle(marker_center, marker_size, Direction::Up, DARK.text_primary);
+    painter.add(marker);
     painter.galley(
         egui::pos2(
             marker_center.x + marker_size / 2.0 + METRICS.space_1,
@@ -168,17 +160,101 @@ fn paint_unseen_badge(
     }
 }
 
-/// The badge's up-marker, painted as a shape rather than set as a glyph: the bundled default fonts
-/// have no face for the arrows and triangles this would otherwise be written with.
-fn up_triangle(center: egui::Pos2, size: f32) -> egui::Shape {
-    let half = size / 2.0;
-    egui::Shape::convex_polygon(
-        vec![
-            egui::pos2(center.x, center.y - half),
-            egui::pos2(center.x - half, center.y + half),
-            egui::pos2(center.x + half, center.y + half),
-        ],
-        DARK.text_primary,
-        egui::Stroke::NONE,
-    )
+fn mono_font() -> egui::FontId {
+    egui::FontId::monospace(METRICS.monitor_channel_font)
+}
+
+fn text_font() -> egui::FontId {
+    egui::FontId::proportional(METRICS.monitor_channel_font)
+}
+
+fn paint_cells(painter: &egui::Painter, rect: egui::Rect, cells: &[Cell]) {
+    let cols = ChannelColumns::new(painter, rect);
+    let mut description_offset = 0.0;
+    for cell in cells {
+        match cell {
+            Cell::Time(text) => cols.paint_time(painter, text),
+            Cell::Tag(tag) => {
+                cols.paint_tag(painter, tag);
+                description_offset = METRICS.monitor_intent_tag_w;
+            }
+            Cell::Description { text, tone } => paint_left_ellipsized(
+                painter,
+                rect.with_min_x(cols.tag_x + description_offset)
+                    .with_max_x(cols.qty_x),
+                text,
+                text_font(),
+                DARK.tone(*tone),
+            ),
+            Cell::Price(text) => cols.paint_number(painter, cols.price_x, text),
+            Cell::Qty(text) => cols.paint_number(painter, cols.qty_x, text),
+            Cell::Detail(_) => {}
+        }
+    }
+}
+
+/// The column anchors and the text baseline, taken from the row's rect so the columns never move.
+struct ChannelColumns {
+    tag_x: f32,
+    time_x: f32,
+    price_x: f32,
+    qty_x: f32,
+    y: f32,
+}
+
+impl ChannelColumns {
+    fn new(painter: &egui::Painter, rect: egui::Rect) -> Self {
+        let pad = METRICS.space_2;
+        let time_w = METRICS.monitor_time_col_w;
+        let qty_w = METRICS.monitor_qty_col_w;
+        Self {
+            time_x: rect.left() + pad,
+            tag_x: rect.left() + pad + time_w,
+            price_x: rect.right() - pad - qty_w,
+            qty_x: rect.right() - pad,
+            y: theme::crisp(painter, rect.center().y),
+        }
+    }
+
+    /// Liquidity note first when present, and the side word one tag width right of it.
+    fn paint_tag(&self, painter: &egui::Painter, tag: &TagColumn) {
+        let mut x = self.tag_x;
+        if let Some(liquidity) = tag.liquidity {
+            painter.text(
+                egui::pos2(x, self.y),
+                egui::Align2::LEFT_CENTER,
+                liquidity,
+                text_font(),
+                DARK.text_secondary,
+            );
+            x += METRICS.monitor_fill_tag_w;
+        }
+        painter.text(
+            egui::pos2(x, self.y),
+            egui::Align2::LEFT_CENTER,
+            tag.side,
+            mono_font(),
+            DARK.tone(tag.tone),
+        );
+    }
+
+    fn paint_time(&self, painter: &egui::Painter, text: &str) {
+        painter.text(
+            egui::pos2(self.time_x, self.y),
+            egui::Align2::LEFT_CENTER,
+            text,
+            mono_font(),
+            DARK.text_secondary,
+        );
+    }
+
+    fn paint_number(&self, painter: &egui::Painter, x: f32, text: &str) {
+        painter.text(
+            egui::pos2(x, self.y),
+            egui::Align2::RIGHT_CENTER,
+            text,
+            mono_font(),
+            DARK.text_primary,
+        );
+    }
 }

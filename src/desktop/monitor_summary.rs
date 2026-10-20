@@ -1,5 +1,5 @@
-//! Quote summary band: bid Δ / mid / ask Δ. Deltas follow the DOM's unit selector; the mid is
-//! always a venue price.
+//! The quote summary band: the bid's distance from the mid, the mid, and the ask's distance. The
+//! distances follow the ladder's unit selector, and the mid is always a venue price.
 
 use eframe::egui;
 
@@ -31,10 +31,7 @@ pub(super) fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &MonitorFrame<'_
         rect.right(),
     ];
 
-    let stroke = theme::hairline(&painter, DARK.border);
-    for edge in &edges[1..CELLS] {
-        painter.vline(theme::crisp(&painter, *edge), rect.y_range(), stroke);
-    }
+    theme::rules_v(&painter, edges[1..CELLS].iter().copied(), rect.y_range());
 
     let mut scratch = String::new();
     let cells = [
@@ -53,10 +50,7 @@ pub(super) fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &MonitorFrame<'_
         ),
     ];
     for (col, lane, tone, value) in cells {
-        let cell = egui::Rect::from_min_max(
-            egui::pos2(edges[col], rect.top()),
-            egui::pos2(edges[col + 1], rect.bottom()),
-        );
+        let cell = rect.with_min_x(edges[col]).with_max_x(edges[col + 1]);
         painter.text(
             egui::pos2(cell.center().x, cell.top() + METRICS.space_3),
             egui::Align2::CENTER_CENTER,

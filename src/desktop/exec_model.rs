@@ -6,6 +6,7 @@
 //! correct without a per-order sequence of its own. A ring drop surfaces as a lane-wide seq gap
 //! [`UiModel`](super::model::UiModel) counts and the monitor reports — a stale cell is never silent.
 
+use super::history::grow_to;
 use crate::hot::exec::{ExecHalt, OrderState, QuoteLevel, RejectOrigin};
 use crate::ids::{AssetId, ClientOrderId, InstrumentId, Price, Qty, Side};
 use crate::msg::ui::{UI_ORDER_SNAPSHOT_MAX_TOTAL, UiEvent, UiWorkingOrder};
@@ -171,11 +172,8 @@ impl SideOrders {
         self.working.clear();
         self.untracked.clear();
         self.snapshot_overflow = u64::from(total_working) - detail_len as u64;
-        for order in details
-            .iter()
-            .filter_map(|order| OrderStatus::of(order.state).map(|status| (order, status)))
-        {
-            let (order, status) = order;
+        for order in details {
+            let Some(status) = OrderStatus::of(order.state) else { continue };
             self.working.push(OrderCell {
                 client_id: order.client_id,
                 quote_level: order.quote_level,
@@ -217,12 +215,9 @@ pub struct ExecModel {
 
 impl ExecModel {
     pub fn with_capacity(instrument_count: usize) -> Self {
-        Self {
-            sides: (0..instrument_count)
-                .map(|_| <[SideOrders; 2]>::default())
-                .collect(),
-            ..Self::default()
-        }
+        let mut model = Self::default();
+        model.configure(instrument_count);
+        model
     }
 
     pub(crate) fn configure(&mut self, instrument_count: usize) {
@@ -310,10 +305,7 @@ impl ExecModel {
     }
 
     pub fn working(&self, instrument: InstrumentId, side: Side) -> &[OrderCell] {
-        match self.sides.get(instrument.0 as usize) {
-            Some(sides) => sides[side as usize].working(),
-            None => &[],
-        }
+        self.side(instrument, side).map_or(&[], SideOrders::working)
     }
 
     pub fn side(&self, instrument: InstrumentId, side: Side) -> Option<&SideOrders> {
@@ -359,8 +351,6 @@ impl ExecModel {
     }
 
     fn ensure_instruments(&mut self, len: usize) {
-        while self.sides.len() < len {
-            self.sides.push(<[SideOrders; 2]>::default());
-        }
+        grow_to(&mut self.sides, len, <[SideOrders; 2]>::default);
     }
 }

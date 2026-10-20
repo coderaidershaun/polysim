@@ -5,9 +5,9 @@
 //!
 //! Label convention: PRICES read as venue prices at the instrument's tick precision, so a 0.01-tick
 //! book shows `118000.005` rather than a tick count. DISTANCES follow the DOM's unit toggle: tick
-//! COUNTS ([`write_half_tick_delta`], [`write_tick_price`]), which are grouping- and
-//! venue-independent, or BASIS POINTS ([`write_bps_delta`]), which are not. A half-tick mid never
-//! rounds: [`write_venue_mid`] widens its decimals until the value is exact.
+//! COUNTS ([`write_mid`], [`write_tick_price`]), which are grouping- and venue-independent, or
+//! BASIS POINTS ([`write_bps_delta`]), which are not. A half-tick mid never rounds:
+//! [`write_venue_mid`] widens its decimals until the value is exact.
 
 use crate::ids::{FIXED_SCALE, Price, Qty};
 use crate::time::TsUs;
@@ -32,6 +32,12 @@ pub fn write_missing(buf: &mut String) -> Wrote {
     buf.clear();
     buf.push_str(MISSING);
     Wrote::Absent
+}
+
+pub(crate) fn render(write: impl FnOnce(&mut String)) -> String {
+    let mut text = String::new();
+    write(&mut text);
+    text
 }
 
 const DEFAULT_QTY_DECIMALS: usize = 3;
@@ -106,29 +112,17 @@ pub fn quote_axis_decimals(step_mantissa: i64) -> usize {
 }
 
 pub fn write_venue_price(buf: &mut String, price: Price, decimals: usize) {
-    write_fixed_point(buf, price.0, FIXED_SCALE, decimals);
+    write_fixed_point(buf, price.0.into(), FIXED_SCALE as u128, decimals);
 }
 
 pub fn write_quote_amount(buf: &mut String, mantissa: i64, decimals: usize) {
-    write_fixed_point(buf, mantissa, FIXED_SCALE, decimals);
+    write_fixed_point(buf, mantissa.into(), FIXED_SCALE as u128, decimals);
 }
 
 pub fn write_venue_mid(buf: &mut String, mid_half_ticks: i64, tick: Price) {
     let twice_mantissa = i128::from(mid_half_ticks) * i128::from(tick.0);
     let decimals = exact_mid_decimals(twice_mantissa, tick);
-    let divisor = 2 * FIXED_SCALE as u128;
-    let magnitude = twice_mantissa.unsigned_abs();
-    buf.clear();
-    if twice_mantissa < 0 {
-        buf.push('-');
-    }
-    push_uint(buf, u64::try_from(magnitude / divisor).unwrap_or(u64::MAX));
-    if decimals == 0 {
-        return;
-    }
-    buf.push('.');
-    let fraction = (magnitude % divisor) * u128::from(pow10(decimals)) / divisor;
-    push_padded(buf, fraction as u64, decimals);
+    write_fixed_point(buf, twice_mantissa, 2 * FIXED_SCALE as u128, decimals);
 }
 
 pub fn write_opt_venue_mid(buf: &mut String, mid_half_ticks: Option<i64>, tick: Price) -> Wrote {
@@ -139,7 +133,11 @@ pub fn write_opt_venue_mid(buf: &mut String, mid_half_ticks: Option<i64>, tick: 
 
 /// Write a present value through `write`, or [`MISSING`] for an absent one — the whole UI's answer
 /// to "no reading", stated once so no cell can invent its own.
-fn write_opt<T>(buf: &mut String, value: Option<T>, write: impl FnOnce(&mut String, T)) -> Wrote {
+pub(crate) fn write_opt<T>(
+    buf: &mut String,
+    value: Option<T>,
+    write: impl FnOnce(&mut String, T),
+) -> Wrote {
     let Some(value) = value else {
         return write_missing(buf);
     };
@@ -163,24 +161,25 @@ fn exact_mid_decimals(twice_mantissa: i128, tick: Price) -> usize {
 }
 
 pub fn write_qty(buf: &mut String, qty: Qty, scale: i64, decimals: usize) {
-    write_fixed_point(buf, qty.0, scale, decimals);
+    debug_assert!(scale > 0, "fixed-point scale must be positive, got {scale}");
+    write_fixed_point(buf, qty.0.into(), scale.unsigned_abs().into(), decimals);
 }
 
-fn write_fixed_point(buf: &mut String, mantissa: i64, scale: i64, decimals: usize) {
+/// Writes `value / scale` cut to `decimals` places, never rounded. An integer part too wide for `u64`
+/// saturates rather than wrapping.
+fn write_fixed_point(buf: &mut String, value: i128, scale: u128, decimals: usize) {
     buf.clear();
-    debug_assert!(scale > 0, "fixed-point scale must be positive, got {scale}");
-    if mantissa < 0 {
+    if value < 0 {
         buf.push('-');
     }
-    let magnitude = mantissa.unsigned_abs();
-    let scale = scale.unsigned_abs();
-    push_uint(buf, magnitude / scale);
+    let magnitude = value.unsigned_abs();
+    push_uint(buf, u64::try_from(magnitude / scale).unwrap_or(u64::MAX));
     if decimals == 0 {
         return;
     }
     buf.push('.');
-    let remainder = magnitude % scale;
-    push_padded(buf, remainder * pow10(decimals) / scale, decimals);
+    let fraction = (magnitude % scale) * u128::from(pow10(decimals)) / scale;
+    push_padded(buf, fraction as u64, decimals);
 }
 
 pub fn write_opt_qty(buf: &mut String, qty: Option<Qty>, scale: i64, decimals: usize) -> Wrote {
@@ -204,14 +203,6 @@ pub fn write_time_of_day(buf: &mut String, at: TsUs) {
     push_padded(buf, at.second as u64, 2);
     buf.push('.');
     push_padded(buf, (at.micros / 1_000) as u64, 3);
-}
-
-pub fn write_half_tick_delta(buf: &mut String, delta_half_ticks: i64) {
-    buf.clear();
-    push_int(buf, delta_half_ticks.div_euclid(2));
-    if delta_half_ticks.rem_euclid(2) != 0 {
-        buf.push_str(".5");
-    }
 }
 
 /// Write `delta_half_ticks / mid_half_ticks` in basis points — both share the half-tick unit, so the
@@ -457,11 +448,7 @@ fn decimal_digits(value: u64, digits: &mut [u8; 20]) -> usize {
 }
 
 fn push_uint(buf: &mut String, value: u64) {
-    let mut digits = [0u8; 20];
-    let cursor = decimal_digits(value, &mut digits);
-    for &digit in &digits[cursor..] {
-        buf.push(digit as char);
-    }
+    push_padded(buf, value, 0);
 }
 
 /// Push `scaled` as `integer.fraction`, where `scaled` already carries exactly `decimals` places.

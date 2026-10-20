@@ -5,6 +5,7 @@ use crate::hot::exec::{
     CloseReason, ExecHalt, HaltReason, OrderState, ReadinessGap, RejectOrigin, RejectReason,
 };
 use crate::msg::exec::{Liquidity, RejectClass};
+use crate::time::TsUs;
 
 use super::super::envelope::{ByteReader, ByteWriter, LinkDecodeError};
 use super::super::wire::{WireField, wire_enum};
@@ -98,29 +99,29 @@ impl WireField for RejectOrigin {
     fn write(&self, writer: &mut ByteWriter<'_>) {
         match *self {
             RejectOrigin::Local(reason) => {
-                writer.write_u8(REJECT_LOCAL);
+                REJECT_LOCAL.write(writer);
                 reason.write(writer);
-                writer.write_i32(0);
+                0_i32.write(writer);
             }
             RejectOrigin::Venue { class, code } => {
-                writer.write_u8(REJECT_VENUE);
+                REJECT_VENUE.write(writer);
                 class.write(writer);
-                writer.write_i32(code);
+                code.write(writer);
             }
         }
     }
 
     fn read(reader: &mut ByteReader<'_>) -> Result<Self, LinkDecodeError> {
-        let tag = reader.read_u8();
+        let tag = u8::read(reader)?;
         match tag {
             REJECT_LOCAL => {
                 let reason = WireField::read(reader)?;
-                let _padding = reader.read_i32();
+                let _padding = i32::read(reader)?;
                 Ok(RejectOrigin::Local(reason))
             }
             REJECT_VENUE => Ok(RejectOrigin::Venue {
                 class: WireField::read(reader)?,
-                code: reader.read_i32(),
+                code: WireField::read(reader)?,
             }),
             _ => Err(LinkDecodeError::unknown("reject origin", tag)),
         }
@@ -131,32 +132,32 @@ impl WireField for ExecHalt {
     fn write(&self, writer: &mut ByteWriter<'_>) {
         match *self {
             ExecHalt::Armed => {
-                writer.write_u8(HALT_ARMED);
-                writer.write_u8(0);
-                writer.write_i64(0);
+                HALT_ARMED.write(writer);
+                0_u8.write(writer);
+                0_i64.write(writer);
             }
             ExecHalt::Halted {
                 reason,
                 halted_ts_us,
             } => {
-                writer.write_u8(HALT_HALTED);
+                HALT_HALTED.write(writer);
                 reason.write(writer);
-                writer.write_ts(halted_ts_us);
+                halted_ts_us.write(writer);
             }
         }
     }
 
     fn read(reader: &mut ByteReader<'_>) -> Result<Self, LinkDecodeError> {
-        let tag = reader.read_u8();
+        let tag = u8::read(reader)?;
         match tag {
             HALT_ARMED => {
-                let _padding = reader.read_u8();
-                let _stamp = reader.read_ts();
+                let _padding = u8::read(reader)?;
+                let _stamp = TsUs::read(reader)?;
                 Ok(ExecHalt::Armed)
             }
             HALT_HALTED => Ok(ExecHalt::Halted {
                 reason: WireField::read(reader)?,
-                halted_ts_us: reader.read_ts(),
+                halted_ts_us: WireField::read(reader)?,
             }),
             _ => Err(LinkDecodeError::unknown("halt", tag)),
         }

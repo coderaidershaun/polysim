@@ -1,4 +1,5 @@
-//! Design system: semantic color + metric tokens (avoid inline values).
+//! The design system: named colour and size tokens, so no painter writes a raw value, and the helpers
+//! that snap rules and text to pixel centres.
 
 use eframe::egui;
 
@@ -212,6 +213,43 @@ pub(crate) fn crisp(painter: &egui::Painter, value: f32) -> f32 {
 /// discards — the separator would then draw or vanish depending on the window's height.
 pub(crate) fn crisp_bottom_edge(painter: &egui::Painter, bottom: f32) -> f32 {
     crisp(painter, bottom - one_physical_pixel(painter))
+}
+
+/// [`egui::Painter::text`] with the anchor's y snapped to a pixel centre; x stays where it is.
+pub(crate) fn text_at(
+    painter: &egui::Painter,
+    anchor: egui::Pos2,
+    align: egui::Align2,
+    text: &str,
+    font: egui::FontId,
+    color: egui::Color32,
+) -> egui::Rect {
+    let anchor = egui::pos2(anchor.x, crisp(painter, anchor.y));
+    painter.text(anchor, align, text, font, color)
+}
+
+/// A border hairline at each x across `y_range`, each snapped to a pixel centre.
+pub(crate) fn rules_v(
+    painter: &egui::Painter,
+    xs: impl IntoIterator<Item = f32>,
+    y_range: egui::Rangef,
+) {
+    let stroke = hairline(painter, DARK.border);
+    for x in xs {
+        painter.vline(crisp(painter, x), y_range, stroke);
+    }
+}
+
+/// A border hairline at each y across `x_range`, each snapped to a pixel centre.
+pub(crate) fn rules_h(
+    painter: &egui::Painter,
+    ys: impl IntoIterator<Item = f32>,
+    x_range: egui::Rangef,
+) {
+    let stroke = hairline(painter, DARK.border);
+    for y in ys {
+        painter.hline(x_range, crisp(painter, y), stroke);
+    }
 }
 
 /// Clear color (avoid grey flash).

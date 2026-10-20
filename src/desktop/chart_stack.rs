@@ -1,6 +1,6 @@
-//! Mid and risk charts stacked, one shared window + crosshair.
-//! Window computed once from mid chart and handed to both — deriving separately would put the
-//! same pointer fraction on different buckets.
+//! The mid chart above the risk chart, sharing one window and one crosshair. The window is computed
+//! once from the mid chart and handed to both, because deriving it twice would put the same pointer
+//! position on different buckets.
 
 use eframe::egui;
 
@@ -43,13 +43,9 @@ pub fn paint(
     frame: &ChartStackFrame<'_>,
 ) -> Option<RiskSeries> {
     let split = (rect.top() + rect.height() * MID_FRACTION).round();
-    let mid_rect = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), split));
-    let header_rect = egui::Rect::from_min_max(
-        egui::pos2(rect.left(), split),
-        egui::pos2(rect.right(), split + METRICS.dom_header_height),
-    );
-    let lower_rect =
-        egui::Rect::from_min_max(egui::pos2(rect.left(), header_rect.bottom()), rect.max);
+    let (mid_rect, below_mid) = rect.split_top_bottom_at_y(split);
+    let (header_rect, lower_rect) =
+        below_mid.split_top_bottom_at_y(split + METRICS.dom_header_height);
 
     let domain = chart_view::domain(frame.chart, frame.instrument);
 
@@ -103,10 +99,7 @@ pub fn paint(
 /// pixel row just outside it, and a clip at the strip would then swallow the line whole.
 fn paint_sub_header_seams(ui: &egui::Ui, stack: egui::Rect, header: egui::Rect) {
     let painter = ui.painter_at(stack);
-    let stroke = theme::hairline(&painter, DARK.border);
-    for y in [header.top(), header.bottom()] {
-        painter.hline(header.x_range(), theme::crisp(&painter, y), stroke);
-    }
+    theme::rules_h(&painter, [header.top(), header.bottom()], header.x_range());
 }
 
 fn paint_sub_header(

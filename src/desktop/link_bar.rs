@@ -29,11 +29,7 @@ pub(crate) fn paint(
 ) -> LinkAction {
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, DARK.panel_raised);
-    painter.hline(
-        rect.x_range(),
-        theme::crisp(&painter, rect.top()),
-        theme::hairline(&painter, DARK.border),
-    );
+    theme::rules_h(&painter, [rect.top()], rect.x_range());
 
     let Some(status) = status else {
         chip(
@@ -103,10 +99,7 @@ fn paint_peer_picker(
 
 fn paint_stop_start(ui: &mut egui::Ui, rect: egui::Rect, status: &LinkStatus) -> LinkAction {
     let target = status.next_assertion();
-    let button = egui::Rect::from_min_max(
-        egui::pos2(rect.right() - BUTTON_WIDTH, rect.top()),
-        rect.max,
-    );
+    let button = rect.with_min_x(rect.right() - BUTTON_WIDTH);
     let label = text::button_label(target);
     let response = ui.interact(
         button,
@@ -119,11 +112,7 @@ fn paint_stop_start(ui: &mut egui::Ui, rect: egui::Rect, status: &LinkStatus) ->
         0.0,
         if response.hovered() { DARK.panel } else { DARK.panel_raised },
     );
-    painter.vline(
-        theme::crisp(&painter, button.left()),
-        button.y_range(),
-        theme::hairline(&painter, DARK.border),
-    );
+    theme::rules_v(&painter, [button.left()], button.y_range());
     painter.text(
         egui::pos2(button.center().x, theme::crisp(&painter, button.center().y)),
         egui::Align2::CENTER_CENTER,

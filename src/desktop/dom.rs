@@ -1,5 +1,6 @@
-//! Custom-painted DOM ladder with 3-column mirror layout. Ask: strategy | price | public.
-//! Bid: public | price | strategy. Strategy column: REAL orders or desired quotes, never merged.
+//! The ladder, painted by hand in three mirrored columns: asks read strategy, price, public and bids
+//! read public, price, strategy. The strategy column shows real orders or desired quotes and never
+//! merges the two.
 
 use eframe::egui;
 
@@ -76,10 +77,8 @@ impl RowFonts {
 fn separator_of(rect: egui::Rect) -> egui::Rect {
     let height = rect.height() * METRICS.dom_separator_fraction;
     let center_y = rect.center().y;
-    egui::Rect::from_min_max(
-        egui::pos2(rect.left(), center_y - height / 2.0),
-        egui::pos2(rect.right(), center_y + height / 2.0),
-    )
+    rect.with_min_y(center_y - height / 2.0)
+        .with_max_y(center_y + height / 2.0)
 }
 
 fn side_height(rect: egui::Rect) -> f32 {
@@ -115,26 +114,19 @@ impl DomLayout {
 
     pub(crate) fn ask_row(&self, index: usize) -> egui::Rect {
         let bottom = self.separator.top() - index as f32 * self.row_height;
-        egui::Rect::from_min_max(
-            egui::pos2(self.rect.left(), bottom - self.row_height),
-            egui::pos2(self.rect.right(), bottom),
-        )
+        self.rect
+            .with_min_y(bottom - self.row_height)
+            .with_max_y(bottom)
     }
 
     pub(crate) fn bid_row(&self, index: usize) -> egui::Rect {
         let top = self.separator.bottom() + index as f32 * self.row_height;
-        egui::Rect::from_min_max(
-            egui::pos2(self.rect.left(), top),
-            egui::pos2(self.rect.right(), top + self.row_height),
-        )
+        self.rect.with_min_y(top).with_max_y(top + self.row_height)
     }
 
     pub(crate) fn cell(&self, row: egui::Rect, column: usize) -> egui::Rect {
         let left = self.rect.left() + column as f32 * self.column_width;
-        egui::Rect::from_min_max(
-            egui::pos2(left, row.top()),
-            egui::pos2(left + self.column_width, row.bottom()),
-        )
+        row.with_min_x(left).with_max_x(left + self.column_width)
     }
 }
 
@@ -172,11 +164,8 @@ pub fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &DomFrame<'_>) -> egui:
 }
 
 fn paint_grid(painter: &egui::Painter, layout: &DomLayout) {
-    let columns = theme::hairline(painter, DARK.border);
-    for column in 1..3 {
-        let x = layout.rect.left() + column as f32 * layout.column_width;
-        painter.vline(theme::crisp(painter, x), layout.rect.y_range(), columns);
-    }
+    let columns = (1..3).map(|column| layout.rect.left() + column as f32 * layout.column_width);
+    theme::rules_v(painter, columns, layout.rect.y_range());
     // A ladder at the height floor rules twice the lines one at the reference row does; at full
     // strength that many read as hatching, so the row rules fade as the rows compress.
     let rows = theme::hairline(
@@ -272,18 +261,16 @@ impl LadderPainter<'_> {
         format::write_opt_venue_mid(&mut self.scratch, view.mid_half_ticks, self.frame.tick);
         let color = DARK.tone(text::mid_tone(view.mid_half_ticks));
         let center = separator.center();
+        let y = theme::crisp(self.painter, center.y);
         self.painter.text(
-            egui::pos2(center.x, theme::crisp(self.painter, center.y)),
+            egui::pos2(center.x, y),
             egui::Align2::CENTER_CENTER,
             self.scratch.as_str(),
             egui::FontId::monospace(METRICS.dom_mid_font),
             color,
         );
         self.painter.text(
-            egui::pos2(
-                separator.left() + METRICS.dom_cell_pad,
-                theme::crisp(self.painter, center.y),
-            ),
+            egui::pos2(separator.left() + METRICS.dom_cell_pad, y),
             egui::Align2::LEFT_CENTER,
             "MID",
             egui::FontId::proportional(METRICS.dom_tag_font),

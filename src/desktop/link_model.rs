@@ -1,13 +1,15 @@
-//! The workstation's view of the engine it is attached to: whether the heartbeat is still arriving,
-//! what run state the engine reports against the one this window asserts, and the run catalog
-//! rebuilt from the loose per-item frames the link announces. No socket and no clock of its own, so
-//! the transport thread and the link bar read one source of truth rather than two.
+//! The workstation's view of the engine it is attached to: which run its frames come from, whether
+//! the heartbeat is still arriving, what run state the engine reports against the one this window
+//! asserts, and the run catalog rebuilt from the loose per-item frames the link announces. No socket
+//! and no clock of its own, so the transport thread and the link bar read one source of truth rather
+//! than two.
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::link::{
-    CatalogFeature, CatalogInstrument, LINK_SUBSCRIPTION_TTL, Lifecycle, RunPhase, RunState,
+    CatalogFeature, CatalogInstrument, Envelope, LINK_SUBSCRIPTION_TTL, Lifecycle, LinkHash,
+    RunPhase, RunState,
 };
 use crate::msg::ui::{UiCatalog, UiInstrument};
 use crate::shutdown::RunAssertion;
@@ -18,6 +20,53 @@ use crate::time::TsUs;
 /// stopped hearing the engine" and "the engine has forgotten me" surface at the same moment.
 pub(crate) const PEER_SILENCE_LIMIT: Duration =
     Duration::from_micros(LINK_SUBSCRIPTION_TTL.micros() as u64);
+
+/// One configured socket serves one trading engine run. The envelope names that run on EVERY
+/// topic, so it is the earliest authoritative reset signal — waiting for the first catalog frame
+/// would let a new run's events fold into the previous run's working-order model in the meantime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RemoteRun {
+    sender_te_hash: LinkHash,
+    boot_ts_us: TsUs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RunObservation {
+    First,
+    Same,
+    Restarted,
+    Stale,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct RemoteRunGate {
+    current: Option<RemoteRun>,
+}
+
+impl RemoteRunGate {
+    pub(super) fn observe(&mut self, envelope: &Envelope) -> RunObservation {
+        let incoming = RemoteRun {
+            sender_te_hash: envelope.sender_te_hash,
+            boot_ts_us: envelope.boot_ts_us,
+        };
+        let Some(current) = self.current else {
+            self.current = Some(incoming);
+            return RunObservation::First;
+        };
+        if incoming.boot_ts_us < current.boot_ts_us {
+            return RunObservation::Stale;
+        }
+        if incoming == current {
+            return RunObservation::Same;
+        }
+        self.current = Some(incoming);
+        RunObservation::Restarted
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.current = None;
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ConnectionState {

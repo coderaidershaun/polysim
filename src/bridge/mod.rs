@@ -4,7 +4,6 @@
 
 mod command;
 mod encode;
-mod frame;
 mod run;
 mod session;
 

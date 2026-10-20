@@ -1,6 +1,6 @@
 //! The one bounded ring behind every rolling series the desktop shows: the monitor's four channel
 //! histories, the chart's per-instrument bucket ring and its fill ring. One eviction policy shared by
-//! all of them, so no panel invents its own retention rule.
+//! all of them, so no panel invents its own retention rule, and one way per-instrument storage grows.
 
 /// A fixed-capacity ring of the freshest `capacity` items: pushes past capacity silently evict the
 /// oldest, iteration runs from either end, and `appended` counts every push ever so a viewer derives
@@ -37,18 +37,13 @@ impl<T> BoundedHistory<T> {
         self.oldest = (self.oldest + 1) % self.capacity;
     }
 
-    /// Newest first: physical index of logical position `i` (0 = oldest) is `(oldest + i) % capacity`,
-    /// so iterating `i` downward walks newest → oldest whether or not the ring has wrapped.
-    pub(crate) fn iter_newest_first(&self) -> impl Iterator<Item = &T> {
-        let oldest = self.oldest;
-        let capacity = self.capacity.max(1);
-        (0..self.slots.len())
-            .rev()
-            .map(move |i| &self.slots[(oldest + i) % capacity])
+    pub(crate) fn iter_newest_first(&self) -> impl DoubleEndedIterator<Item = &T> {
+        self.iter_oldest_first().rev()
     }
 
-    /// Oldest first — the same walk the other way, for a chart that paints left → right.
-    pub(crate) fn iter_oldest_first(&self) -> impl Iterator<Item = &T> {
+    /// The `i`-th item counted from the oldest sits at physical index `(oldest + i) % capacity`, so
+    /// the walk is right whether or not the ring has wrapped.
+    pub(crate) fn iter_oldest_first(&self) -> impl DoubleEndedIterator<Item = &T> {
         let oldest = self.oldest;
         let capacity = self.capacity.max(1);
         (0..self.slots.len()).map(move |i| &self.slots[(oldest + i) % capacity])
@@ -64,5 +59,11 @@ impl<T> BoundedHistory<T> {
 
     pub(crate) fn appended(&self) -> u64 {
         self.appended
+    }
+}
+
+pub(crate) fn grow_to<T>(slots: &mut Vec<T>, len: usize, make: impl Fn() -> T) {
+    while slots.len() < len {
+        slots.push(make());
     }
 }

@@ -1,8 +1,9 @@
 //! Link wire fitness: every frame kind survives an encode-then-decode round trip unchanged,
 //! every envelope rejection reports a distinct cause, and the sequence gate drops duplicates
-//! and reorders while letting a restarted peer back in. The failure this suite exists to
-//! prevent is silent: a trading engine and a separately built UI misdecoding each other's
-//! bytes into a plausible-looking book ladder.
+//! and reorders while letting a restarted peer back in. A fixed frame of every kind also
+//! encodes to the exact bytes checked in as `link_frames.txt`, which no round trip can pin.
+//! The failure this suite exists to prevent is silent: a trading engine and a separately built
+//! UI misdecoding each other's bytes into a plausible-looking book ladder.
 
 use std::net::SocketAddr;
 
@@ -1243,6 +1244,469 @@ fn event_encoding_is_independent_of_buffer_reuse() {
     quote.encode(&mut dirty);
     let reused = rotation.encode(&mut dirty);
     assert_eq!(&dirty[..reused], encode(&rotation).as_slice());
+}
+
+const FRAMES: &str = include_str!("link_frames.txt");
+
+/// Where `POLYSIM_BLESS_LINK` writes, relative to the package root the suite runs from.
+const FRAMES_PATH: &str = "tests/fitness/link_frames.txt";
+
+fn event(seq: u64, event: UiEvent) -> LinkDatagram {
+    let mut datagram = event_datagram(event);
+    datagram.envelope.seq = seq;
+    datagram
+}
+
+/// One fixed frame of every kind. Fields carry distinct non-zero values wherever the type allows,
+/// so two fields that swap places or a field whose width changes moves bytes the fixture pins, and
+/// each optional is present in one frame and absent in another.
+fn golden_frames() -> Vec<(&'static str, LinkDatagram)> {
+    let mut subscribe_envelope = envelope(TopicId::SUBSCRIBE, 0x0102_0304_0506_0708);
+    subscribe_envelope.mac = std::array::from_fn(|index| 0xa0 + index as u8);
+    let subscribe = LinkDatagram {
+        envelope: subscribe_envelope,
+        body: LinkBody::Subscribe(Subscribe {
+            topics: TopicSet::new(&[TopicId::BOOKS, TopicId::LIFECYCLE, TopicId(0x1234)])
+                .expect("three topics fit"),
+            desired_state: RunState::Idle,
+            desired_epoch: 0x1122_3344_5566_7788,
+        }),
+    };
+
+    let book = LinkDatagram {
+        envelope: envelope(TopicId::BOOKS, 0x0203_0405_0607_0809),
+        body: LinkBody::Book(UiBookSnapshot {
+            instrument: InstrumentId(0x0a0b),
+            seq: 0x0c0d_0e0f_1011_1213,
+            event_ts_us: TsUs::from_micros(1_700_000_123_456_789),
+            state: UiBookState::AwaitingSnapshot,
+            bid_len: 29,
+            ask_len: 31,
+            bids: std::array::from_fn(|level| Level {
+                price: Price(11_800_000_000_000 - 1_000_000 * level as i64),
+                qty: Qty(1_000 + 7 * level as i64),
+            }),
+            asks: std::array::from_fn(|level| Level {
+                price: Price(-(2_000_000_000_000 + 3_000_000 * level as i64)),
+                qty: Qty(-(500 + 11 * level as i64)),
+            }),
+        }),
+    };
+
+    let lifecycle = |seq, lifecycle| LinkDatagram {
+        envelope: envelope(TopicId::LIFECYCLE, seq),
+        body: LinkBody::Lifecycle(lifecycle),
+    };
+    let catalog_instrument = |seq, instrument| LinkDatagram {
+        envelope: envelope(TopicId::CATALOG_INSTRUMENTS, seq),
+        body: LinkBody::CatalogInstrument(instrument),
+    };
+    let stamped = CatalogInstrument {
+        catalog_ts_us: TsUs::from_micros(1_700_000_000_000_001),
+        total_count: 0x0203,
+        instrument: InstrumentId(0x0405),
+        display: WireName::new("BTCUSDT"),
+        tick_size: Some(Price(1_000_000)),
+        lot_size: Some(Qty(-7_000)),
+        qty_scale: 100_000_000,
+        base_asset: AssetId(0x0607),
+        quote_asset: AssetId(0x0809),
+        base: WireName::new("BTC"),
+        quote: WireName::new("USDT"),
+    };
+    let unstamped = CatalogInstrument {
+        catalog_ts_us: TsUs::from_micros(1_700_000_000_000_002),
+        total_count: 0x0a0b,
+        instrument: InstrumentId(0x0c0d),
+        display: WireName::new("ETH-UP-15M"),
+        tick_size: None,
+        lot_size: None,
+        qty_scale: 1_000_000,
+        base_asset: AssetId(0x0e0f),
+        quote_asset: AssetId(0x1011),
+        base: WireName::new("UP"),
+        quote: WireName::new("USDC"),
+    };
+
+    let mut quote = DomQuote::default();
+    for level in [0, 1, 2, 5] {
+        quote.bids[level] = Some((Price(-90_000 - level as i64), Qty(300 + level as i64)));
+    }
+    for level in [0, 3, 7] {
+        quote.asks[level] = Some((Price(91_000 + level as i64), Qty(-400 - level as i64)));
+    }
+
+    vec![
+        ("subscribe", subscribe),
+        ("book", book),
+        (
+            "lifecycle",
+            lifecycle(
+                0x0304_0506_0708_090a,
+                Lifecycle {
+                    phase: RunPhase::Draining,
+                    run_state: RunState::Running,
+                    execution_mode: Some(ExecutionMode::Live),
+                    acknowledged_epoch: 0x2233_4455_6677_8899,
+                    spin_interval_us: DurationUs::from_micros(250_000),
+                    feature_count: 0x0301,
+                },
+            ),
+        ),
+        (
+            "lifecycle-no-mode",
+            lifecycle(
+                0x0405_0607_0809_0a0b,
+                Lifecycle {
+                    phase: RunPhase::Starting,
+                    run_state: RunState::Idle,
+                    execution_mode: None,
+                    acknowledged_epoch: 0x3344_5566_7788_99aa,
+                    spin_interval_us: DurationUs::from_micros(-1_000_001),
+                    feature_count: 0x0402,
+                },
+            ),
+        ),
+        (
+            "catalog-instrument",
+            catalog_instrument(0x0506_0708_090a_0b0c, stamped),
+        ),
+        (
+            "catalog-instrument-unstamped",
+            catalog_instrument(0x0607_0809_0a0b_0c0d, unstamped),
+        ),
+        (
+            "catalog-feature",
+            LinkDatagram {
+                envelope: envelope(TopicId::CATALOG_FEATURES, 0x0708_090a_0b0c_0d0e),
+                body: LinkBody::CatalogFeature(CatalogFeature {
+                    catalog_ts_us: TsUs::from_micros(1_700_000_000_000_003),
+                    total_count: 0x1213,
+                    feature: FeatureId(0x1415),
+                    name: WireName::new("microprice_gap_bps"),
+                }),
+            },
+        ),
+        (
+            "payload",
+            LinkDatagram {
+                envelope: envelope(TopicId(0x0011), 0x0809_0a0b_0c0d_0e0f),
+                body: LinkBody::Payload(LinkPayload::new(
+                    SCHEMA,
+                    TsUs::from_micros(1_700_000_000_000_004),
+                    &[
+                        std::f64::consts::PI,
+                        -std::f64::consts::E,
+                        1.0e-300,
+                        -0.0,
+                        f64::MAX,
+                        6.022_140_76e23,
+                        f64::NEG_INFINITY,
+                        f64::from_bits(0x7ff8_0000_dead_beef),
+                    ],
+                )),
+            },
+        ),
+        (
+            "event-quote",
+            event(
+                0x1001,
+                UiEvent::Quote {
+                    instrument: InstrumentId(0x0102),
+                    seq: 0x1101,
+                    event_ts_us: TsUs::from_micros(1_700_000_000_001_001),
+                    quote,
+                },
+            ),
+        ),
+        (
+            "event-trade",
+            event(
+                0x1002,
+                UiEvent::Trade {
+                    instrument: InstrumentId(0x0203),
+                    seq: 0x1102,
+                    event_ts_us: TsUs::from_micros(1_700_000_000_001_002),
+                    aggressor: Side::Sell,
+                    price: Price(-123_456_789),
+                    qty: Qty(987_654_321),
+                },
+            ),
+        ),
+        (
+            "event-order-update",
+            event(
+                0x1003,
+                UiEvent::OrderUpdate {
+                    instrument: InstrumentId(0x0304),
+                    seq: 0x1103,
+                    event_ts_us: TsUs::from_micros(1_700_000_000_001_003),
+                    client_id: ClientOrderId(0x1a2b_3c4d_5e6f_7081),
+                    quote_level: QuoteLevel::new(5),
+                    side: Side::Buy,
+                    state: OrderState::CancelInFlight,
+                    price: Price(118_000_123_000_000),
+                    qty: Qty(-5_000_001),
+                    filled: Qty(2_000_003),
+                },
+            ),
+        ),
+        (
+            "event-feature",
+            event(
+                0x1004,
+                UiEvent::Feature {
+                    instrument: InstrumentId(0x0405),
+                    seq: 0x1104,
+                    event_ts_us: TsUs::from_micros(1_700_000_000_001_004),
+                    feature: FeatureId(0x0506),
+                    value: -std::f64::consts::PI * 1.0e-7,
+                },
+            ),
+        ),
+        (
+            "event-fill",
+            event(
+                0x1005,
+                UiEvent::Fill {
+                    instrument: InstrumentId(0x0607),
+                    seq: 0x1105,
+                    event_ts_us: TsUs::from_micros(1_700_000_000_001_005),
+                    quote_level: None,
+                    side: Side::Sell,
+                    price: Price(66_123_450_000_000),
+                    qty: Qty(1_250_000),
+                    commission: -944_000,
+                    commission_asset: AssetId(0x0708),
+                    liquidity: Some(Liquidity::Taker),
+                },
+            ),
+        ),
+        (
+            "event-rotation",
+            event(
+                0x1006,
+                UiEvent::Rotation {
+                    instrument: InstrumentId(0x0809),
+                    seq: 0x1106,
+                    event_ts_us: TsUs::from_micros(1_700_000_000_001_006),
+                },
+            ),
+        ),
+        (
+            "event-position",
+            event(
+                0x1007,
+                UiEvent::Position {
+                    instrument: InstrumentId(0x0a0b),
+                    seq: 0x1107,
+                    event_ts_us: TsUs::from_micros(1_700_000_000_001_007),
+                    exposure_quote: 12_345.678_9,
+                    pnl_quote: -0.000_123_4,
+                },
+            ),
+        ),
+        (
+            "event-balance",
+            event(
+                0x1008,
+                UiEvent::Balance {
+                    asset: AssetId(0x0c0d),
+                    seq: 0x1108,
+                    event_ts_us: TsUs::from_micros(1_700_000_000_001_008),
+                    free: 5_000_000_000_000,
+                    locked: -250_000_000,
+                },
+            ),
+        ),
+        (
+            "event-reject-local",
+            event(
+                0x1009,
+                UiEvent::Reject {
+                    instrument: InstrumentId(0x0e0f),
+                    seq: 0x1109,
+                    event_ts_us: TsUs::from_micros(1_700_000_000_001_009),
+                    side: Side::Buy,
+                    origin: RejectOrigin::Local(RejectReason::NotReady(ReadinessGap::Balances)),
+                },
+            ),
+        ),
+        (
+            "event-reject-venue",
+            event(
+                0x100a,
+                UiEvent::Reject {
+                    instrument: InstrumentId(0x1011),
+                    seq: 0x110a,
+                    event_ts_us: TsUs::from_micros(1_700_000_000_001_010),
+                    side: Side::Sell,
+                    origin: RejectOrigin::Venue {
+                        class: RejectClass::Ambiguous,
+                        code: -2_015,
+                    },
+                },
+            ),
+        ),
+        (
+            "event-execution-armed",
+            event(
+                0x100b,
+                UiEvent::Execution {
+                    seq: 0x110b,
+                    event_ts_us: TsUs::from_micros(1_700_000_000_001_011),
+                    halt: ExecHalt::Armed,
+                },
+            ),
+        ),
+        (
+            "event-execution-halted",
+            event(
+                0x100c,
+                UiEvent::Execution {
+                    seq: 0x110c,
+                    event_ts_us: TsUs::from_micros(1_700_000_000_001_012),
+                    halt: ExecHalt::Halted {
+                        reason: HaltReason::DuplicateResting,
+                        halted_ts_us: TsUs::from_micros(1_700_000_000_000_999),
+                    },
+                },
+            ),
+        ),
+        (
+            "event-order-snapshot",
+            event(
+                0x100d,
+                order_snapshot(
+                    3,
+                    261,
+                    &[
+                        working_order(0x11, OrderState::Live),
+                        UiWorkingOrder {
+                            quote_level: None,
+                            ..working_order(0x22, OrderState::AmendInFlight)
+                        },
+                        working_order(0x33, OrderState::PendingNew),
+                    ],
+                ),
+            ),
+        ),
+        (
+            "event-latency",
+            event(
+                0x100e,
+                UiEvent::Latency {
+                    seq: 0x110e,
+                    event_ts_us: TsUs::from_micros(1_700_000_000_001_014),
+                    summary: UiLatencySummary {
+                        market_data: latency_row(0),
+                        execution: latency_row(10),
+                        hot_path: latency_row(20),
+                        backlog_ema: Some(0.312_5 + 1.0e-9),
+                    },
+                },
+            ),
+        ),
+        (
+            "event-latency-no-backlog",
+            event(
+                0x100f,
+                UiEvent::Latency {
+                    seq: 0x110f,
+                    event_ts_us: TsUs::from_micros(1_700_000_000_001_015),
+                    summary: UiLatencySummary {
+                        market_data: latency_row(30),
+                        execution: latency_row(40),
+                        hot_path: latency_row(50),
+                        backlog_ema: None,
+                    },
+                },
+            ),
+        ),
+    ]
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn from_hex(kind: &str, hex: &str) -> Vec<u8> {
+    hex.as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            std::str::from_utf8(pair)
+                .ok()
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                .unwrap_or_else(|| panic!("{FRAMES_PATH}: frame {kind} holds a non-hex pair"))
+        })
+        .collect()
+}
+
+fn first_difference(encoded: &[u8], checked_in: &[u8]) -> Option<usize> {
+    encoded
+        .iter()
+        .zip(checked_in)
+        .position(|(left, right)| left != right)
+        .or_else(|| {
+            (encoded.len() != checked_in.len()).then(|| encoded.len().min(checked_in.len()))
+        })
+}
+
+/// FITNESS: a fixed frame of every kind encodes to exactly the bytes checked in. Every other test
+/// here is a round trip, and a round trip still passes when the writer and the reader drift
+/// together, while a separately built peer on the old layout misreads every frame.
+///
+/// To accept an intended layout change, bump `LINK_VERSION`, run the suite once with
+/// `POLYSIM_BLESS_LINK=1` to rewrite `link_frames.txt`, then read the diff.
+#[test]
+fn every_frame_kind_encodes_to_checked_in_bytes() {
+    let encoded: Vec<(&str, Vec<u8>)> = golden_frames()
+        .iter()
+        .map(|(kind, datagram)| (*kind, encode(datagram)))
+        .collect();
+    if std::env::var_os("POLYSIM_BLESS_LINK").is_some() {
+        let lines: String = encoded
+            .iter()
+            .map(|(kind, bytes)| format!("{kind} {}\n", to_hex(bytes)))
+            .collect();
+        std::fs::write(FRAMES_PATH, lines).expect("the fixture is writable");
+        return;
+    }
+
+    let checked_in: Vec<(&str, Vec<u8>)> = FRAMES
+        .lines()
+        .map(|line| {
+            let (kind, hex) = line
+                .split_once(' ')
+                .unwrap_or_else(|| panic!("{FRAMES_PATH}: line {line:?} is not `<kind> <hex>`"));
+            (kind, from_hex(kind, hex))
+        })
+        .collect();
+    let encoded_kinds: Vec<&str> = encoded.iter().map(|(kind, _)| *kind).collect();
+    let checked_in_kinds: Vec<&str> = checked_in.iter().map(|(kind, _)| *kind).collect();
+    assert_eq!(
+        encoded_kinds, checked_in_kinds,
+        "the frame kinds drifted from {FRAMES_PATH}; if intended, rerun with POLYSIM_BLESS_LINK=1"
+    );
+
+    let drifted: Vec<String> = encoded
+        .iter()
+        .zip(&checked_in)
+        .filter_map(|((kind, bytes), (_, expected))| {
+            first_difference(bytes, expected).map(|offset| {
+                format!(
+                    "{kind} first differs at byte {offset} ({} bytes encoded, {} checked in)",
+                    bytes.len(),
+                    expected.len()
+                )
+            })
+        })
+        .collect();
+    assert!(
+        drifted.is_empty(),
+        "the link encoding drifted from {FRAMES_PATH}: {drifted:#?}; if intended, bump LINK_VERSION \
+         and rerun with POLYSIM_BLESS_LINK=1"
+    );
 }
 
 /// The gate ages its slots, so every fixture stamps from one instant unless it is deliberately

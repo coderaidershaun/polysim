@@ -4,13 +4,11 @@
 
 use eframe::egui;
 
-use crate::ids::Side;
-
 use super::chart_stack::{self, ChartStackFrame};
 use super::chart_view::ChartMode;
 use super::controls;
 use super::dom::{self, DomFrame};
-use super::dom_view::{DomOverlay, DomUnit, FeedStatus, MAX_ROWS_PER_SIDE, MIN_ROWS_PER_SIDE};
+use super::dom_view::{DomUnit, FeedStatus, MAX_ROWS_PER_SIDE, MIN_ROWS_PER_SIDE};
 use super::format;
 use super::latency::{self, LatencyFrame};
 use super::model::UiModel;
@@ -31,12 +29,6 @@ const DOM_UNIT_WIDTH: f32 = 96.0;
 const DOM_GROUPING_WIDTH: f32 = 88.0;
 const DOM_LEVELS_WIDTH: f32 = 128.0;
 
-struct ShellRects {
-    left: egui::Rect,
-    center: egui::Rect,
-    right: egui::Rect,
-}
-
 /// What the shell asks of its host after a frame. The toolbar's Esc cell is a click like any
 /// other; naming the outcome keeps the caller from reading a bare `true` and guessing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,19 +45,20 @@ pub(crate) fn workstation(
 ) -> ShellAction {
     let full = ui.available_rect_before_wrap();
     ui.allocate_rect(full, egui::Sense::hover());
-    let rects = shell_rects(full);
+    let (left, rest) = full.split_left_right_at_x(full.left() + full.width() * 0.50);
+    let (center, right) = rest.split_left_right_at_x(full.left() + full.width() * 0.75);
     let painter = ui.painter_at(full);
 
     painter.rect_filled(full, 0.0, DARK.canvas);
-    for rect in [rects.left, rects.center, rects.right] {
+    for rect in [left, center, right] {
         painter.rect_filled(rect, 0.0, DARK.panel);
     }
 
-    let action = paint_left_panel(ui, rects.left, model);
-    paint_monitor(ui, rects.center, model, monitor_state);
-    paint_dom(ui, rects.right, model, feed);
+    let action = paint_left_panel(ui, left, model);
+    paint_monitor(ui, center, model, monitor_state);
+    paint_dom(ui, right, model, feed);
 
-    paint_dividers(&painter, &rects);
+    theme::rules_v(&painter, [left.right(), center.right()], full.y_range());
     painter.rect_stroke(
         full,
         0.0,
@@ -76,43 +69,12 @@ pub(crate) fn workstation(
 }
 
 pub(crate) fn split_link_bar(full: egui::Rect) -> (egui::Rect, egui::Rect) {
-    let split = (full.bottom() - METRICS.link_bar_height).max(full.top());
-    (
-        egui::Rect::from_min_max(full.min, egui::pos2(full.right(), split)),
-        egui::Rect::from_min_max(egui::pos2(full.left(), split), full.max),
-    )
-}
-
-fn shell_rects(full: egui::Rect) -> ShellRects {
-    let split_left_center = full.left() + full.width() * 0.50;
-    let split_center_right = full.left() + full.width() * 0.75;
-    let left = egui::Rect::from_min_max(full.min, egui::pos2(split_left_center, full.bottom()));
-    let center = egui::Rect::from_min_max(
-        egui::pos2(split_left_center, full.top()),
-        egui::pos2(split_center_right, full.bottom()),
-    );
-    let right = egui::Rect::from_min_max(egui::pos2(split_center_right, full.top()), full.max);
-    ShellRects {
-        left,
-        center,
-        right,
-    }
-}
-
-fn paint_dividers(painter: &egui::Painter, rects: &ShellRects) {
-    let stroke = theme::hairline(painter, DARK.border);
-    for x in [rects.left.right(), rects.center.right()] {
-        painter.vline(theme::crisp(painter, x), rects.left.y_range(), stroke);
-    }
+    full.split_top_bottom_at_y((full.bottom() - METRICS.link_bar_height).max(full.top()))
 }
 
 fn paint_left_panel(ui: &mut egui::Ui, rect: egui::Rect, model: &mut UiModel) -> ShellAction {
-    let toolbar = egui::Rect::from_min_max(
-        rect.min,
-        egui::pos2(rect.right(), rect.top() + METRICS.toolbar_height),
-    );
+    let (toolbar, body) = rect.split_top_bottom_at_y(rect.top() + METRICS.toolbar_height);
     let action = paint_toolbar(ui, toolbar, model);
-    let body = egui::Rect::from_min_max(egui::pos2(rect.left(), toolbar.bottom()), rect.max);
     paint_left_body(ui, body, model);
     action
 }
@@ -133,10 +95,8 @@ fn paint_toolbar(ui: &mut egui::Ui, toolbar: egui::Rect, model: &mut UiModel) ->
     let mode_rect = strip_cell(toolbar, &mut cursor, CHART_MODE_WIDTH);
     paint_chart_mode_toggle(ui, mode_rect, model);
 
-    let stroke = theme::hairline(&painter, DARK.border);
-    for x in [esc_rect.right(), combo_rect.right(), mode_rect.right()] {
-        painter.vline(theme::crisp(&painter, x), toolbar.y_range(), stroke);
-    }
+    let seams = [esc_rect.right(), combo_rect.right(), mode_rect.right()];
+    theme::rules_v(&painter, seams, toolbar.y_range());
 
     if let Some(catalog) = model.catalog() {
         painter.text(
@@ -154,7 +114,7 @@ fn paint_toolbar(ui: &mut egui::Ui, toolbar: egui::Rect, model: &mut UiModel) ->
     painter.hline(
         toolbar.x_range(),
         theme::crisp_bottom_edge(&painter, toolbar.bottom()),
-        stroke,
+        theme::hairline(&painter, DARK.border),
     );
 
     if is_esc_clicked { ShellAction::CloseRequested } else { ShellAction::None }
@@ -191,10 +151,7 @@ fn paint_left_body(ui: &mut egui::Ui, body: egui::Rect, model: &mut UiModel) {
 fn strip_cell(strip: egui::Rect, cursor: &mut f32, width: f32) -> egui::Rect {
     let left = *cursor;
     *cursor += width;
-    egui::Rect::from_min_max(
-        egui::pos2(left, strip.top()),
-        egui::pos2(left + width, strip.bottom()),
-    )
+    strip.with_min_x(left).with_max_x(left + width)
 }
 
 /// Hand-painted rather than an `egui::Button`: `ui.put` paints its own label immediately, so a
@@ -286,41 +243,22 @@ fn paint_monitor(
 }
 
 fn paint_dom(ui: &mut egui::Ui, rect: egui::Rect, model: &mut UiModel, feed: FeedStatus) {
-    let header = egui::Rect::from_min_max(
-        rect.min,
-        egui::pos2(rect.right(), rect.top() + METRICS.dom_header_height),
-    );
-    let body = egui::Rect::from_min_max(egui::pos2(rect.left(), header.bottom()), rect.max);
+    let (header, body) = rect.split_top_bottom_at_y(rect.top() + METRICS.dom_header_height);
     paint_dom_header(ui, header, model, dom::rows_that_fit(body));
 
-    let selected = model.selected();
     let scales = model.instrument_scales();
-    let snapshot = model.book(selected);
-    let desired = model
-        .is_quote_live(selected)
-        .then(|| model.quote(selected).map(|(quote, _)| quote))
-        .flatten();
-    let stale_age = model.book_staleness(selected);
-    let feed = match (feed, stale_age) {
-        (FeedStatus::Live, Some(_)) => FeedStatus::Stale,
-        (feed, _) => feed,
-    };
-
+    let source = model.dom_source(feed);
     let frame = DomFrame {
-        snapshot,
-        overlay: DomOverlay {
-            desired,
-            bid_orders: model.exec().working(selected, Side::Buy),
-            ask_orders: model.exec().working(selected, Side::Sell),
-        },
+        snapshot: model.book(model.selected()),
+        overlay: source.overlay,
         tick: scales.tick,
         grouping: model.dom_grouping(),
         levels: model.dom_levels(),
         price_decimals: format::price_decimals(scales.tick),
         qty_scale: scales.qty_scale,
         qty_decimals: scales.qty_decimals,
-        feed,
-        stale_age,
+        feed: source.feed,
+        stale_age: source.stale_age,
     };
     dom::paint(ui, body, &frame);
 }
@@ -347,13 +285,7 @@ fn paint_dom_header(
     paint_grouping_dropdown(ui, combo, model);
 
     // Right-aligned, but never allowed to overrun the grouping combo on a narrow window.
-    let levels_rect = egui::Rect::from_min_max(
-        egui::pos2(
-            (rect.right() - DOM_LEVELS_WIDTH).max(combo.right()),
-            rect.top(),
-        ),
-        rect.max,
-    );
+    let levels_rect = rect.with_min_x((rect.right() - DOM_LEVELS_WIDTH).max(combo.right()));
     let spec = controls::StepperSpec {
         label: "LVL",
         value: model.dom_levels(),
@@ -365,14 +297,12 @@ fn paint_dom_header(
         model.set_dom_levels(chosen);
     }
 
-    let stroke = theme::hairline(&painter, DARK.border);
-    for x in [toggle.right(), combo.right(), levels_rect.left()] {
-        painter.vline(theme::crisp(&painter, x), rect.y_range(), stroke);
-    }
+    let seams = [toggle.right(), combo.right(), levels_rect.left()];
+    theme::rules_v(&painter, seams, rect.y_range());
     painter.hline(
         rect.x_range(),
         theme::crisp_bottom_edge(&painter, rect.bottom()),
-        stroke,
+        theme::hairline(&painter, DARK.border),
     );
 }
 

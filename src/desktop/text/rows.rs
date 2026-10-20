@@ -68,9 +68,7 @@ pub(crate) enum Cell {
 
 impl Cell {
     fn time(at: TsUs) -> Self {
-        let mut text = String::new();
-        format::write_time_of_day(&mut text, at);
-        Self::Time(text)
+        Self::Time(format::render(|out| format::write_time_of_day(out, at)))
     }
 
     fn tick_price(price: Price, tick: Price) -> Self {
@@ -232,8 +230,8 @@ impl ChannelRow for FillRow {
 
     fn cells(&self, frame: &MonitorFrame<'_>, out: &mut Vec<Cell>) {
         let (word, tone) = side_word(self.side, Tone::SellFill);
-        let mut fee = String::new();
-        format::write_quote_amount(&mut fee, self.commission, FEE_DECIMALS);
+        let fee =
+            format::render(|out| format::write_quote_amount(out, self.commission, FEE_DECIMALS));
         out.push(Cell::time(self.at));
         out.push(Cell::Tag(TagColumn::fill(self.liquidity, word, tone)));
         out.push(Cell::tick_price(self.price, frame.tick));
@@ -246,15 +244,14 @@ impl ChannelRow for FillRow {
 }
 
 fn system_text(event: &SystemEvent, frame: &MonitorFrame<'_>) -> (String, Tone) {
-    let mut name = String::new();
     match event {
         SystemEvent::Lifecycle(note) => lifecycle_text(note),
         SystemEvent::Rotation { instrument } => {
-            frame.instrument_label(*instrument, &mut name);
+            let name = format::render(|out| frame.instrument_label(*instrument, out));
             (format!("{name} window rotated"), Tone::Text)
         }
         SystemEvent::BookResynced { instrument } => {
-            frame.instrument_label(*instrument, &mut name);
+            let name = format::render(|out| frame.instrument_label(*instrument, out));
             (format!("{name} book resynced"), Tone::Text2)
         }
         SystemEvent::EventsLost { count } => (format!("{count} ui events lost"), Tone::Invalid),
@@ -352,25 +349,16 @@ fn liquidity_word(liquidity: Option<Liquidity>) -> &'static str {
 }
 
 fn qty_text(qty: Qty, frame: &MonitorFrame<'_>) -> String {
-    let mut buf = String::new();
-    format::write_qty(&mut buf, qty, frame.qty_scale, frame.qty_decimals);
-    buf
+    format::render(|out| format::write_qty(out, qty, frame.qty_scale, frame.qty_decimals))
 }
 
 fn price_text(price: Price, tick: Price) -> String {
-    let mut buf = String::new();
-    write_tick_or_missing(&mut buf, price, tick);
-    buf
+    format::render(|out| write_tick_or_missing(out, price, tick))
 }
 
 /// A price off the tick grid shows as missing rather than rounded onto it.
 fn write_tick_or_missing(buf: &mut String, price: Price, tick: Price) {
-    match tick_index(price, tick) {
-        Some(index) => format::write_tick_price(buf, index),
-        None => {
-            format::write_missing(buf);
-        }
-    }
+    format::write_opt(buf, tick_index(price, tick), format::write_tick_price);
 }
 
 /// The side word and the colour it wears. A public print takes ask red, an own fill takes the

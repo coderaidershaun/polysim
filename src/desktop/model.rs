@@ -1,6 +1,7 @@
-//! UI model: catalog/book/quote from hot feed. Folds events in event time (never wall clock).
+//! The workstation's model of the engine feed: the catalog and each instrument's latest book and
+//! quote, plus the panels' own models. It folds events in event time and never reads the wall clock.
 
-use crate::ids::{FIXED_SCALE, InstrumentId, Price};
+use crate::ids::{FIXED_SCALE, InstrumentId, Price, Side};
 use crate::msg::ui::{
     DomQuote, UiBookSnapshot, UiCatalog, UiEvent, UiInstrument, UiLatencySummary,
 };
@@ -9,7 +10,8 @@ use crate::time::{DurationUs, TsUs};
 use super::chart_model::{BookContinuity, ChartModel};
 use super::chart_view::ChartMode;
 use super::dom_view::{
-    DEFAULT_ROWS_PER_SIDE, DomGrouping, DomUnit, MAX_ROWS_PER_SIDE, MIN_ROWS_PER_SIDE,
+    DEFAULT_ROWS_PER_SIDE, DomGrouping, DomOverlay, DomUnit, FeedStatus, MAX_ROWS_PER_SIDE,
+    MIN_ROWS_PER_SIDE,
 };
 use super::exec_model::ExecModel;
 use super::format::qty_decimals;
@@ -24,6 +26,15 @@ pub struct InstrumentScales {
     pub tick: Price,
     pub qty_scale: i64,
     pub qty_decimals: usize,
+}
+
+/// What the selected instrument's ladder reads besides its book, built in one place so the window
+/// and the bridge cannot disagree on which orders it shows or when it reads stale.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DomSource<'a> {
+    pub(crate) overlay: DomOverlay<'a>,
+    pub(crate) feed: FeedStatus,
+    pub(crate) stale_age: Option<DurationUs>,
 }
 
 /// How far a book may trail the engine's own clock before the ladder reads as stale.
@@ -105,7 +116,7 @@ impl UiModel {
         // The catalog crosses the link as a bare microsecond count; this is where it becomes a span.
         let spin_interval = DurationUs::from_micros(catalog.spin_interval_us as i64);
         self.spin_interval = spin_interval;
-        self.resize(catalog.instruments.len());
+        self.ensure_instruments(catalog.instruments.len());
         self.monitor.configure(
             catalog.instruments.len(),
             catalog.feature_names.len(),
@@ -126,7 +137,7 @@ impl UiModel {
     /// Fold one book: latest-per-instrument wins. Seq jump counts dropped full rings; chart breaks on same logic.
     pub fn apply_book(&mut self, snapshot: UiBookSnapshot) {
         let index = snapshot.instrument.0 as usize;
-        self.ensure_capacity(index + 1);
+        self.ensure_instruments(index + 1);
         let lost = self.book_last_seq[index]
             .map_or(0, |previous| snapshot.seq.saturating_sub(previous + 1));
         if lost > 0 {
@@ -177,7 +188,7 @@ impl UiModel {
             return;
         };
         let index = instrument.0 as usize;
-        self.ensure_capacity(index + 1);
+        self.ensure_instruments(index + 1);
         self.latest_quote[index] = Some((quote, event_ts_us));
     }
 
@@ -222,6 +233,29 @@ impl UiModel {
     pub(crate) fn book_staleness(&self, instrument: InstrumentId) -> Option<DurationUs> {
         self.book_lag(instrument)
             .filter(|lag| *lag > BOOK_STALE_AFTER)
+    }
+
+    /// The desired quote shows only while it is live, and a live feed over a stale book reads stale.
+    pub(crate) fn dom_source(&self, feed: FeedStatus) -> DomSource<'_> {
+        let selected = self.selected;
+        let desired = self
+            .is_quote_live(selected)
+            .then(|| self.quote(selected).map(|(quote, _)| quote))
+            .flatten();
+        let stale_age = self.book_staleness(selected);
+        let feed = match (feed, stale_age) {
+            (FeedStatus::Live, Some(_)) => FeedStatus::Stale,
+            (feed, _) => feed,
+        };
+        DomSource {
+            overlay: DomOverlay {
+                desired,
+                bid_orders: self.exec.working(selected, Side::Buy),
+                ask_orders: self.exec.working(selected, Side::Sell),
+            },
+            feed,
+            stale_age,
+        }
     }
 
     pub fn selected(&self) -> InstrumentId {
@@ -348,21 +382,10 @@ impl UiModel {
     }
 
     fn note_feed_stamp(&mut self, at: TsUs) {
-        if self
-            .freshest_feed_ts
-            .is_none_or(|held| at.micros() > held.micros())
-        {
-            self.freshest_feed_ts = Some(at);
-        }
+        self.freshest_feed_ts = self.freshest_feed_ts.max(Some(at));
     }
 
-    fn ensure_capacity(&mut self, len: usize) {
-        if self.latest_book.len() < len {
-            self.resize(len);
-        }
-    }
-
-    fn resize(&mut self, len: usize) {
+    fn ensure_instruments(&mut self, len: usize) {
         if self.latest_book.len() >= len {
             return;
         }

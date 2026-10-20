@@ -478,3 +478,30 @@ fn a_fill_ahead_of_its_bucket_reaches_the_page() {
     );
     assert_eq!(fills[0]["i"], capacity);
 }
+
+/// The engine's own clock decides staleness, so a book that trails the newest stamp on either lane
+/// must turn a feed the socket still calls live into a stale ladder. Otherwise a frozen book reads
+/// as a live one.
+#[test]
+fn a_stale_book_turns_a_live_feed_stale() {
+    let mut model = scene();
+    let ladder_status = |model: &UiModel| {
+        let lines = Encoder::new().lines(&tick_input(model));
+        let tick = parse(lines.last().expect("the scene sends a tick"));
+        section(&tick, "ladder")["status"].clone()
+    };
+    assert_eq!(ladder_status(&model), "live", "the scene's book is fresh");
+
+    model.apply_event(UiEvent::Position {
+        instrument: InstrumentId(0),
+        seq: 0,
+        event_ts_us: at_second(FIRST_SECOND + BUCKETS + 2),
+        exposure_quote: 0.0,
+        pnl_quote: 0.0,
+    });
+    assert_eq!(
+        ladder_status(&model),
+        "stale",
+        "the book now trails the engine by three seconds"
+    );
+}

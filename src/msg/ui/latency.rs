@@ -1,7 +1,7 @@
 //! Engine self-timing distilled for display: the ten-minute stage rollups and the input-ring
 //! backlog, folded to count+sum so a panel can render a mean without carrying every percentile.
 
-use crate::hot::metrics::{Category, MetricsSnapshot, Stage, StageStat};
+use crate::hot::metrics::{Category, MetricsSnapshot, Stage};
 
 /// Count and sum, never a pre-divided mean: folding two categories together has to add before it
 /// divides, and a mean cannot be added.
@@ -15,11 +15,6 @@ impl UiLatencyCell {
     /// `None` when nothing was measured — a stage with no samples is not a stage that ran in zero.
     pub fn mean_us(self) -> Option<f64> {
         (self.count > 0).then(|| self.sum_us as f64 / self.count as f64)
-    }
-
-    fn add(&mut self, stat: StageStat) {
-        self.count += stat.count;
-        self.sum_us = self.sum_us.saturating_add(stat.sum_us);
     }
 }
 
@@ -37,36 +32,35 @@ pub struct UiLatencyRow {
 
 impl UiLatencyRow {
     fn fold(snapshot: &MetricsSnapshot, categories: &[Category]) -> Self {
-        let mut row = Self::default();
-        for &category in categories {
-            row.exchange_to_received
-                .add(snapshot.stage(category, Stage::ExchangeToReceived));
-            row.received_to_queued
-                .add(snapshot.stage(category, Stage::ReceivedToQueued));
-            row.queue_wait
-                .add(snapshot.stage(category, Stage::QueueWait));
-            row.processing
-                .add(snapshot.stage(category, Stage::Processing));
-            row.end_to_end
-                .add(snapshot.stage(category, Stage::EndToEnd));
-            row.order_round_trip
-                .add(snapshot.stage(category, Stage::OrderRoundTrip));
+        Self {
+            exchange_to_received: stage_sum(snapshot, categories, Stage::ExchangeToReceived),
+            received_to_queued: stage_sum(snapshot, categories, Stage::ReceivedToQueued),
+            queue_wait: stage_sum(snapshot, categories, Stage::QueueWait),
+            processing: stage_sum(snapshot, categories, Stage::Processing),
+            end_to_end: stage_sum(snapshot, categories, Stage::EndToEnd),
+            order_round_trip: stage_sum(snapshot, categories, Stage::OrderRoundTrip),
         }
-        row
     }
 
     /// The engine's own two stages across every category. The venue-facing four stay empty: summing
     /// exch->recv over categories the engine never received from venues answers no question.
     fn fold_engine_stages(snapshot: &MetricsSnapshot) -> Self {
-        let mut row = Self::default();
-        for category in Category::ALL {
-            row.queue_wait
-                .add(snapshot.stage(category, Stage::QueueWait));
-            row.processing
-                .add(snapshot.stage(category, Stage::Processing));
+        Self {
+            queue_wait: stage_sum(snapshot, &Category::ALL, Stage::QueueWait),
+            processing: stage_sum(snapshot, &Category::ALL, Stage::Processing),
+            ..Self::default()
         }
-        row
     }
+}
+
+fn stage_sum(snapshot: &MetricsSnapshot, categories: &[Category], stage: Stage) -> UiLatencyCell {
+    let mut cell = UiLatencyCell::default();
+    for &category in categories {
+        let stat = snapshot.stage(category, stage);
+        cell.count += stat.count;
+        cell.sum_us = cell.sum_us.saturating_add(stat.sum_us);
+    }
+    cell
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]

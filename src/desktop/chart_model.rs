@@ -6,7 +6,7 @@
 use std::mem;
 
 use super::dom_view::{snapshot_mid, tick_index};
-use super::history::BoundedHistory;
+use super::history::{BoundedHistory, grow_to};
 use crate::ids::{InstrumentId, Price, Side};
 use crate::msg::ui::{UiBookSnapshot, UiEvent};
 use crate::time::{DurationUs, TsUs};
@@ -113,14 +113,13 @@ pub struct ChartModel {
 
 impl ChartModel {
     pub fn with_capacity(instrument_count: usize, spin_interval: DurationUs) -> Self {
-        let bucket_capacity = bucket_capacity(spin_interval);
-        Self {
-            charts: (0..instrument_count)
-                .map(|_| InstrumentChart::new(None, bucket_capacity))
-                .collect(),
+        let mut model = Self {
+            charts: Vec::new(),
             spin_interval,
-            bucket_capacity,
-        }
+            bucket_capacity: 0,
+        };
+        model.configure(&vec![None; instrument_count], spin_interval);
+        model
     }
 
     pub fn configure(&mut self, tick_sizes: &[Option<Price>], spin_interval: DurationUs) {
@@ -216,10 +215,9 @@ impl ChartModel {
     }
 
     fn ensure_instruments(&mut self, len: usize) {
-        while self.charts.len() < len {
-            self.charts
-                .push(InstrumentChart::new(None, self.bucket_capacity));
-        }
+        grow_to(&mut self.charts, len, || {
+            InstrumentChart::new(None, self.bucket_capacity)
+        });
     }
 }
 

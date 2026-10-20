@@ -1,11 +1,10 @@
 //! The mid chart and the risk chart under it. Both are append-only for the page: a tick carries the
 //! buckets and fills it has not seen, plus the newest bucket again while it is still growing, and
-//! the whole window after a generation bump.
+//! the whole window after a generation bump. That can be hundreds of buckets, so their wire keys are
+//! one or two letters while the field names here stay whole.
 
-use crate::bridge::frame::{
-    AxisTick, Chart, ChartBucketLine, ChartFillLine, Range, Risk, RiskAxis, RiskBounds,
-    RiskBucketLine, Styled, series_word, side_word,
-};
+use serde::Serialize;
+
 use crate::desktop::chart_model::{ChartBucket, ChartFill, bucket_open_ts};
 use crate::desktop::chart_view::{self, ChartBounds, ChartDomain};
 use crate::desktop::format;
@@ -15,10 +14,113 @@ use crate::desktop::position_chart_view::{self, QuoteBounds, RiskSeries};
 use crate::desktop::text::{
     AxisLabels, NO_EVENT_TIME, axis_labels, mid_note, risk_note, sign_tone,
 };
-use crate::ids::Price;
+use crate::ids::{Price, Side};
 use crate::time::DurationUs;
 
-use super::{Cursor, Encoder};
+use super::{Cursor, Encoder, Styled, series_word};
+
+#[derive(Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct Chart {
+    generation: u64,
+    capacity: usize,
+    first: Option<u64>,
+    last: Option<u64>,
+    low: Option<i64>,
+    high: Option<i64>,
+    axis: Vec<AxisTick>,
+    buckets: Vec<ChartBucketLine>,
+    fills: Vec<ChartFillLine>,
+    note: Option<&'static str>,
+    #[serde(rename = "fillsCaption")]
+    has_fills_caption: bool,
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+struct AxisTick {
+    #[serde(rename = "v")]
+    value: i64,
+    label: String,
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+struct ChartBucketLine {
+    #[serde(rename = "i")]
+    index: u64,
+    #[serde(rename = "o")]
+    open_half_ticks: i64,
+    #[serde(rename = "h")]
+    high_half_ticks: i64,
+    #[serde(rename = "l")]
+    low_half_ticks: i64,
+    #[serde(rename = "c")]
+    close_half_ticks: i64,
+    #[serde(rename = "cl")]
+    close_label: String,
+    #[serde(rename = "t")]
+    open_time: String,
+    #[serde(rename = "gap")]
+    has_gap_before: bool,
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+struct ChartFillLine {
+    #[serde(rename = "i")]
+    index: u64,
+    #[serde(rename = "ht")]
+    half_ticks: i64,
+    side: &'static str,
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+pub(super) struct Risk {
+    generation: u64,
+    series: &'static str,
+    latest: Option<Styled>,
+    bounds: RiskBounds,
+    axis: RiskAxis,
+    buckets: Vec<RiskBucketLine>,
+    note: Option<&'static str>,
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+struct RiskBounds {
+    exposure: Option<Range>,
+    pnl: Option<Range>,
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+struct Range {
+    low: i64,
+    high: i64,
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+struct RiskAxis {
+    exposure: Vec<AxisTick>,
+    pnl: Vec<AxisTick>,
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+struct RiskBucketLine {
+    #[serde(rename = "i")]
+    index: u64,
+    #[serde(rename = "e")]
+    exposure_quote: i64,
+    #[serde(rename = "p")]
+    pnl_quote: i64,
+    #[serde(rename = "el")]
+    exposure_label: String,
+    #[serde(rename = "pl")]
+    pnl_label: String,
+}
+
+fn side_word(side: Side) -> &'static str {
+    match side {
+        Side::Buy => "buy",
+        Side::Sell => "sell",
+    }
+}
 
 impl Encoder {
     pub(super) fn chart(&mut self, model: &UiModel, domain: Option<ChartDomain>) -> Option<Chart> {
@@ -131,9 +233,7 @@ impl Encoder {
             series: series_word(series),
             latest: positions.latest(selected).map(|bucket| {
                 let value = series.value(&bucket);
-                let mut text = String::new();
-                format::write_quote_amount(&mut text, value, RiskSeries::READOUT_DECIMALS);
-                Styled::new(text, sign_tone(value))
+                Styled::new(readout(value), sign_tone(value))
             }),
             bounds: RiskBounds {
                 exposure: exposure.map(range),
@@ -209,13 +309,11 @@ fn cursor_delta<B: Copy + PartialEq>(
 }
 
 fn bucket_line(bucket: &ChartBucket, tick: Price, spin: DurationUs) -> ChartBucketLine {
-    let mut close = String::new();
-    format::write_venue_mid(&mut close, bucket.close_half_ticks, tick);
-    let mut time = String::new();
-    match bucket_open_ts(bucket.index, spin) {
-        Some(at) => format::write_time_of_day(&mut time, at),
-        None => time.push_str(NO_EVENT_TIME),
-    }
+    let close = format::render(|out| format::write_venue_mid(out, bucket.close_half_ticks, tick));
+    let time = format::render(|out| match bucket_open_ts(bucket.index, spin) {
+        Some(at) => format::write_time_of_day(out, at),
+        None => out.push_str(NO_EVENT_TIME),
+    });
     ChartBucketLine {
         index: bucket.index,
         open_half_ticks: bucket.open_half_ticks,
@@ -229,11 +327,6 @@ fn bucket_line(bucket: &ChartBucket, tick: Price, spin: DurationUs) -> ChartBuck
 }
 
 fn bucket_line_risk(bucket: &PositionBucket) -> RiskBucketLine {
-    let readout = |value| {
-        let mut text = String::new();
-        format::write_quote_amount(&mut text, value, RiskSeries::READOUT_DECIMALS);
-        text
-    };
     RiskBucketLine {
         index: bucket.index,
         exposure_quote: bucket.exposure_quote,
@@ -241,4 +334,8 @@ fn bucket_line_risk(bucket: &PositionBucket) -> RiskBucketLine {
         exposure_label: readout(bucket.exposure_quote),
         pnl_label: readout(bucket.pnl_quote),
     }
+}
+
+fn readout(quote: i64) -> String {
+    format::render(|out| format::write_quote_amount(out, quote, RiskSeries::READOUT_DECIMALS))
 }

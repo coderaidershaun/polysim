@@ -1,4 +1,5 @@
-//! Link control + discovery frames (subscribe, lifecycle, catalog). Catalog split per-item (no reassembly).
+//! The link's control and discovery frames: subscribe, lifecycle and catalog. The catalog travels
+//! one item per frame, so a receiver never has to reassemble it.
 
 use crate::config::ExecutionMode;
 use crate::ids::{AssetId, InstrumentId, Price, Qty};
@@ -6,10 +7,10 @@ use crate::msg::persist::FeatureId;
 use crate::time::{DurationUs, TsUs};
 
 use super::envelope::{
-    ByteReader, ByteWriter, ENVELOPE_LEN, LINK_MAX_DATAGRAM, LinkDecodeError, NAME_LEN,
-    OPTIONAL_MANTISSA_LEN, TopicId, WireName,
+    ByteReader, ByteWriter, ENVELOPE_LEN, LINK_MAX_DATAGRAM, LinkDecodeError, NAME_LEN, TopicId,
+    WireName,
 };
-use super::wire::{WireField, wire_enum, wire_struct};
+use super::wire::{OPTIONAL_MANTISSA_LEN, WireField, wire_enum, wire_struct};
 
 /// Topics ONE subscription can name (not total topics that exist).
 pub const LINK_MAX_TOPICS: usize = 16;
@@ -121,16 +122,16 @@ pub struct Subscribe {
 impl WireField for Subscribe {
     fn write(&self, writer: &mut ByteWriter<'_>) {
         let wanted = self.topics.topics();
-        writer.write_u8(wanted.len() as u8);
+        self.topics.len.write(writer);
         for index in 0..LINK_MAX_TOPICS {
-            writer.write_u16(wanted.get(index).map_or(0, |topic| topic.0));
+            wanted.get(index).map_or(0, |topic| topic.0).write(writer);
         }
         self.desired_state.write(writer);
         self.desired_epoch.write(writer);
     }
 
     fn read(reader: &mut ByteReader<'_>) -> Result<Self, LinkDecodeError> {
-        let count = reader.read_u8();
+        let count = u8::read(reader)?;
         if count as usize > LINK_MAX_TOPICS {
             return Err(LinkDecodeError::TopicCountExceeded {
                 count,
@@ -139,7 +140,7 @@ impl WireField for Subscribe {
         }
         let mut wanted = [TopicId(0); LINK_MAX_TOPICS];
         for slot in &mut wanted {
-            *slot = TopicId(reader.read_u16());
+            *slot = TopicId::read(reader)?;
         }
         wanted[count as usize..].fill(TopicId(0));
         Ok(Self {
@@ -148,7 +149,7 @@ impl WireField for Subscribe {
                 len: count,
             },
             desired_state: WireField::read(reader)?,
-            desired_epoch: reader.read_u64(),
+            desired_epoch: WireField::read(reader)?,
         })
     }
 }

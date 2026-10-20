@@ -1,11 +1,15 @@
 //! Turns the attached model into protocol lines. It remembers what the page already holds, so a tick
-//! carries only the sections that changed and only the chart buckets the page has not seen.
+//! carries only the sections that changed and only the chart buckets the page has not seen. In the
+//! structs that become those lines, field order is wire order and every name is part of what the
+//! page codes against, so nothing is renamed casually.
 
 mod channels;
 mod chart;
 mod ladder;
 mod link;
 mod monitor;
+
+use serde::Serialize;
 
 use crate::desktop::attachment::Screen;
 use crate::desktop::chart_model::ChartBucket;
@@ -15,13 +19,17 @@ use crate::desktop::link_model::LinkStatus;
 use crate::desktop::model::UiModel;
 use crate::desktop::monitor_view::Channel;
 use crate::desktop::position_chart_model::PositionBucket;
+use crate::desktop::position_chart_view::RiskSeries;
+use crate::desktop::text::Tone;
 use crate::ids::InstrumentId;
 
 use super::command::PageFit;
-use super::frame::{
-    Account, ByeLine, Chart, FeatureLine, Gaps, Ladder, Latency, LifecycleLine, Line, LinkLine,
-    Risk, Summary, TickLine, View,
-};
+
+use channels::Channels;
+use chart::{Chart, Risk};
+use ladder::{Ladder, Summary, View};
+use link::{ByeLine, CatalogLine, Hello, LifecycleLine, LinkLine};
+use monitor::{Account, FeatureLine, Latency};
 
 pub use link::hello_line;
 
@@ -32,6 +40,101 @@ const MAX_AXIS_TICKS: usize = 100;
 /// A page that has not measured its plots yet still gets a usable axis.
 const DEFAULT_MID_TICKS: usize = 9;
 const DEFAULT_RISK_TICKS: usize = 5;
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum Line<'a> {
+    Hello(&'a Hello),
+    Link(&'a LinkLine),
+    Lifecycle(&'a LifecycleLine),
+    Catalog(&'a CatalogLine),
+    Tick(&'a TickLine),
+    Bye(&'a ByeLine),
+}
+
+impl Line<'_> {
+    /// One protocol line, without its newline.
+    fn to_json(&self) -> String {
+        match serde_json::to_string(self) {
+            Ok(line) => line,
+            Err(error) => {
+                unreachable!("protocol lines hold plain data, which always serialises: {error}")
+            }
+        }
+    }
+}
+
+/// A piece of text and the role it wears.
+#[derive(Serialize, Clone, PartialEq)]
+struct Styled {
+    text: String,
+    tone: &'static str,
+}
+
+impl Styled {
+    fn new(text: String, tone: Tone) -> Self {
+        Self {
+            text,
+            tone: tone.as_str(),
+        }
+    }
+}
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct TickLine {
+    session: u64,
+    seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    view: Option<View>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ladder: Option<Ladder>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<Summary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account: Option<Account>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    features: Option<Vec<FeatureLine>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channels: Option<Channels>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latency: Option<Latency>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chart: Option<Chart>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    risk: Option<Risk>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gaps: Option<Gaps>,
+}
+
+impl TickLine {
+    /// True when no section changed, so there is nothing to say.
+    fn is_empty(&self) -> bool {
+        self.view.is_none()
+            && self.ladder.is_none()
+            && self.summary.is_none()
+            && self.account.is_none()
+            && self.features.is_none()
+            && self.channels.is_none()
+            && self.latency.is_none()
+            && self.chart.is_none()
+            && self.risk.is_none()
+            && self.gaps.is_none()
+    }
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+struct Gaps {
+    books: u64,
+    events: u64,
+}
+
+fn series_word(series: RiskSeries) -> &'static str {
+    match series {
+        RiskSeries::Exposure => "exposure",
+        RiskSeries::Pnl => "pnl",
+    }
+}
 
 pub struct TickInput<'a> {
     pub model: &'a UiModel,
@@ -148,23 +251,14 @@ impl Encoder {
     }
 
     pub(crate) fn link_line(&mut self, status: &LinkStatus) -> Option<String> {
-        let line = link::link_dto(status);
-        if self.last_link.as_ref() == Some(&line) {
-            return None;
-        }
-        let json = Line::Link(&line).to_json();
-        self.last_link = Some(line);
-        Some(json)
+        let line = changed(&mut self.last_link, link::link_dto(status))?;
+        Some(Line::Link(&line).to_json())
     }
 
     pub(crate) fn lifecycle_line(&mut self, session: u64, screen: &Screen) -> Option<String> {
-        let line = link::lifecycle_dto(session, screen);
-        if self.last_lifecycle.as_ref() == Some(&line) {
-            return None;
-        }
-        let json = Line::Lifecycle(&line).to_json();
-        self.last_lifecycle = Some(line);
-        Some(json)
+        let next = link::lifecycle_dto(session, screen);
+        let line = changed(&mut self.last_lifecycle, next)?;
+        Some(Line::Lifecycle(&line).to_json())
     }
 
     pub(crate) fn bye_line(reason: &'static str) -> String {

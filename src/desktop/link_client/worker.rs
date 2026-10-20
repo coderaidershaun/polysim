@@ -18,7 +18,8 @@ use crate::time::{EngineClock, TsUs, boot_stamp_us};
 use crate::{info, warn, warn_repeating};
 
 use super::super::link_model::{
-    CatalogAssembly, ConnectionState, Controller, LinkStatus, PEER_SILENCE_LIMIT,
+    CatalogAssembly, ConnectionState, Controller, LinkStatus, PEER_SILENCE_LIMIT, RemoteRunGate,
+    RunObservation,
 };
 use super::{LinkClientConfig, LinkCommand, bind_for};
 
@@ -68,53 +69,6 @@ struct DeliveredCounts {
     events: u64,
     catalog: u64,
     lifecycle: u64,
-}
-
-/// One configured socket serves one trading engine run. The envelope names that run on EVERY
-/// topic, so it is the earliest authoritative reset signal — waiting for the first catalog frame
-/// would let a new run's events fold into the previous run's working-order model in the meantime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RemoteRun {
-    sender_te_hash: LinkHash,
-    boot_ts_us: TsUs,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RunObservation {
-    First,
-    Same,
-    Restarted,
-    Stale,
-}
-
-#[derive(Debug, Default)]
-struct RemoteRunGate {
-    current: Option<RemoteRun>,
-}
-
-impl RemoteRunGate {
-    fn observe(&mut self, envelope: &Envelope) -> RunObservation {
-        let incoming = RemoteRun {
-            sender_te_hash: envelope.sender_te_hash,
-            boot_ts_us: envelope.boot_ts_us,
-        };
-        let Some(current) = self.current else {
-            self.current = Some(incoming);
-            return RunObservation::First;
-        };
-        if incoming.boot_ts_us < current.boot_ts_us {
-            return RunObservation::Stale;
-        }
-        if incoming == current {
-            return RunObservation::Same;
-        }
-        self.current = Some(incoming);
-        RunObservation::Restarted
-    }
-
-    fn clear(&mut self) {
-        self.current = None;
-    }
 }
 
 pub(super) struct Worker {
@@ -290,8 +244,11 @@ impl Worker {
             }),
         };
         let len = datagram.encode(&mut self.outbox);
-        let peer = self.peers[self.active];
-        if self.socket.send_to(&self.outbox[..len], peer).is_err() {
+        if self
+            .socket
+            .send_to(&self.outbox[..len], self.peer())
+            .is_err()
+        {
             self.rejected.send_failed += 1;
         }
     }

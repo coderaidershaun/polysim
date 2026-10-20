@@ -1,13 +1,70 @@
-//! The four channel histories. The page keeps a ring per channel, so a tick sends only the rows
-//! appended since the last one, and a whole ring when the page has none to patch.
+//! The four channel histories, as rows newest first. The page keeps a ring per channel, so a tick
+//! sends only the rows appended since the last one, and a whole ring when the page has none to patch.
 
-use crate::bridge::frame::{ChannelRowLine, ChannelRows, Channels, TagLine};
+use serde::Serialize;
+
 use crate::desktop::model::UiModel;
 use crate::desktop::monitor_model::{FillRow, OrderRow, SystemRow, TradeRow};
 use crate::desktop::monitor_view::{MonitorFrame, instrument_names};
 use crate::desktop::text::{Cell, ChannelRow, record_row};
 
 use super::Encoder;
+
+#[derive(Serialize, Default)]
+pub(super) struct Channels {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<ChannelRows>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    orders: Option<ChannelRows>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trades: Option<ChannelRows>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fills: Option<ChannelRows>,
+}
+
+impl Channels {
+    fn is_empty(&self) -> bool {
+        self.system.is_none()
+            && self.orders.is_none()
+            && self.trades.is_none()
+            && self.fills.is_none()
+    }
+}
+
+#[derive(Serialize)]
+struct ChannelRows {
+    appended: u64,
+    #[serde(rename = "full")]
+    is_full: bool,
+    rows: Vec<ChannelRowLine>,
+}
+
+/// A key a row kind has no cell for is left out, not sent empty.
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ChannelRowLine {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<TagLine>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text_tone: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    price: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qty: Option<String>,
+    detail: String,
+}
+
+#[derive(Serialize)]
+struct TagLine {
+    #[serde(rename = "liq", skip_serializing_if = "Option::is_none")]
+    liquidity: Option<&'static str>,
+    side: &'static str,
+    tone: &'static str,
+}
 
 impl Encoder {
     pub(super) fn channels(&mut self, model: &UiModel) -> Option<Channels> {

@@ -192,11 +192,6 @@ fn side_counts(model: &UiModel, instrument: InstrumentId, side: Side) -> SideCou
     }
 }
 
-/// Rows appended but unseen (appended - watermark, saturating). Basis for unseen badge + resume-follow.
-pub fn unseen(appended_total: u64, seen_watermark: u64) -> u64 {
-    appended_total.saturating_sub(seen_watermark)
-}
-
 fn feature_row(
     feature: FeatureId,
     cell: Option<FeatureCell>,

@@ -1,4 +1,5 @@
-//! Always-visible account band (real money, peripheral vision). Projection-driven, values independently absent.
+//! The account band. It is always visible because it shows real money and must be readable from the
+//! corner of the eye, and each value it projects can be absent on its own.
 
 use eframe::egui;
 
@@ -42,10 +43,8 @@ pub fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &MonitorFrame<'_>) {
 
     // The container separates its own rows; no cell wears a box. The first rule closes the captions,
     // the second closes the asset table so the counts below it read as a separate list.
-    let stroke = theme::hairline(&painter, DARK.border);
-    for y in [header.bottom(), assets_bottom.bottom()] {
-        painter.hline(rect.x_range(), theme::crisp(&painter, y), stroke);
-    }
+    let rules = [header.bottom(), assets_bottom.bottom()];
+    theme::rules_h(&painter, rules, rect.x_range());
 }
 
 /// Hands out fixed-height rows in order (no painter computes y).
@@ -63,10 +62,9 @@ impl RowCursor {
         let top =
             self.rect.top() + METRICS.space_1 + self.index as f32 * METRICS.monitor_row_height;
         self.index += 1;
-        egui::Rect::from_min_max(
-            egui::pos2(self.rect.left(), top),
-            egui::pos2(self.rect.right(), top + METRICS.monitor_row_height),
-        )
+        self.rect
+            .with_min_y(top)
+            .with_max_y(top + METRICS.monitor_row_height)
     }
 }
 
@@ -93,18 +91,13 @@ impl Grid {
     }
 
     fn label(&self, row: egui::Rect) -> egui::Rect {
-        egui::Rect::from_min_max(
-            egui::pos2(self.label_left, row.top()),
-            egui::pos2(self.numbers_left, row.bottom()),
-        )
+        row.with_min_x(self.label_left)
+            .with_max_x(self.numbers_left)
     }
 
     fn column(&self, row: egui::Rect, index: usize) -> egui::Rect {
         let left = self.numbers_left + index as f32 * self.column_width;
-        egui::Rect::from_min_max(
-            egui::pos2(left, row.top()),
-            egui::pos2(left + self.column_width, row.bottom()),
-        )
+        row.with_min_x(left).with_max_x(left + self.column_width)
     }
 }
 
@@ -132,18 +125,15 @@ fn paint_header(painter: &egui::Painter, grid: &Grid, rect: egui::Rect, view: &A
     }
 
     for (index, caption) in account_captions(view).iter().enumerate() {
-        paint_caption(painter, grid.column(rect, index), caption);
+        let cell = grid.column(rect, index);
+        painter.text(
+            egui::pos2(cell.right(), theme::crisp(painter, cell.center().y)),
+            egui::Align2::RIGHT_CENTER,
+            caption,
+            egui::FontId::proportional(METRICS.monitor_micro_font),
+            DARK.text_secondary,
+        );
     }
-}
-
-fn paint_caption(painter: &egui::Painter, cell: egui::Rect, caption: &str) {
-    painter.text(
-        egui::pos2(cell.right(), theme::crisp(painter, cell.center().y)),
-        egui::Align2::RIGHT_CENTER,
-        caption,
-        egui::FontId::proportional(METRICS.monitor_micro_font),
-        DARK.text_secondary,
-    );
 }
 
 /// One row per asset: free, locked and what the whole holding is worth. The label paints FIRST so an
@@ -155,11 +145,9 @@ fn paint_asset(
     asset: AssetRowView<'_>,
     scratch: &mut String,
 ) {
-    painter.text(
-        egui::pos2(
-            grid.label(rect).left(),
-            theme::crisp(painter, rect.center().y),
-        ),
+    theme::text_at(
+        painter,
+        egui::pos2(grid.label(rect).left(), rect.center().y),
         egui::Align2::LEFT_CENTER,
         asset_label(asset),
         egui::FontId::monospace(METRICS.monitor_channel_font),
@@ -244,10 +232,7 @@ fn paint_status(painter: &egui::Painter, grid: &Grid, rect: egui::Rect, view: &A
         // The halt takes the whole row rather than sharing it with the reject: filled, not outlined,
         // so it is findable in peripheral vision, and never colliding with a refusal beside it.
         painter.rect_filled(
-            egui::Rect::from_min_max(
-                egui::pos2(rect.left() + METRICS.space_2, rect.top() + 1.0),
-                egui::pos2(rect.right() - METRICS.space_2, rect.bottom() - 1.0),
-            ),
+            rect.shrink2(egui::vec2(METRICS.space_2, 1.0)),
             METRICS.corner_radius,
             DARK.halt_fill,
         );
@@ -269,10 +254,7 @@ fn paint_status(painter: &egui::Painter, grid: &Grid, rect: egui::Rect, view: &A
         DARK.text_secondary,
     );
     let (reject, tone) = text::reject_display(view.last_reject.map(|reject| reject.origin));
-    let reject_text_rect = egui::Rect::from_min_max(
-        grid.column(rect, 0).min,
-        egui::pos2(grid.column(rect, 1).right(), rect.bottom()),
-    );
+    let reject_text_rect = grid.column(rect, 0).union(grid.column(rect, 1));
     paint_left_ellipsized(
         painter,
         reject_text_rect,

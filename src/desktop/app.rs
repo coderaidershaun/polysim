@@ -11,13 +11,12 @@ use eframe::egui;
 use crate::msg::ui::UiChannels;
 
 use super::attachment::{Attachment, Screen};
-use super::layout::ShellAction;
+use super::layout::{self, ShellAction};
 use super::link_bar::{self, LinkAction};
 use super::link_client::{LinkCommand, LinkFeed};
 use super::monitor::MonitorUiState;
-use super::text;
-use super::theme::{self, DARK};
-use super::{layout, lifecycle};
+use super::text::{self, ScreenText};
+use super::theme::{self, DARK, METRICS};
 
 /// How long the window stays hidden before it is destroyed: several 60 Hz display cycles, so the
 /// pending AppKit flush (see [`DesktopApp::advance_close_handshake`]) has run, yet imperceptible —
@@ -160,7 +159,7 @@ impl eframe::App for DesktopApp {
                                 feed,
                             )
                         }
-                        screen => lifecycle::paint(ui, &text::screen_text(screen)),
+                        screen => paint_screen(ui, &text::screen_text(screen)),
                     }
                 });
                 link_action = link_bar::paint(ui, bar, self.attachment.link_status());
@@ -178,4 +177,32 @@ impl eframe::App for DesktopApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         theme::clear_color()
     }
+}
+
+/// The whole surface while no workstation is live: starting, draining or stopped. Each screen is
+/// honest, with no made-up numbers, and the stopped reason is selectable text so an operator can
+/// copy the cause.
+fn paint_screen(ui: &mut egui::Ui, screen_text: &ScreenText<'_>) {
+    let full = ui.available_rect_before_wrap();
+    ui.painter().rect_filled(full, 0.0, DARK.canvas);
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(full)
+            .layout(egui::Layout::top_down(egui::Align::Center)),
+        |ui| {
+            ui.add_space(full.height() * 0.40);
+            ui.label(
+                egui::RichText::new(screen_text.title)
+                    .color(DARK.tone(screen_text.title_tone))
+                    .monospace()
+                    .size(22.0),
+            );
+            ui.add_space(METRICS.space_2);
+            ui.label(
+                egui::RichText::new(screen_text.detail)
+                    .color(DARK.tone(screen_text.detail_tone))
+                    .monospace(),
+            );
+        },
+    );
 }

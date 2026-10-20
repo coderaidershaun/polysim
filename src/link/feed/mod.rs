@@ -1,4 +1,5 @@
-//! Feed-topic bodies: UiBookSnapshot and UiEvent encoded directly, so no second shape can drift from the one the engine holds.
+//! The feed topics' bodies. `UiBookSnapshot` and `UiEvent` are encoded directly, so no second shape
+//! can drift from the one the engine holds.
 
 mod exec;
 mod latency;
@@ -10,11 +11,10 @@ use crate::msg::ui::{
     DomQuote, UI_BOOK_LEVELS, UI_ORDER_SNAPSHOT_CAPACITY, UI_ORDER_SNAPSHOT_MAX_TOTAL,
     UI_QUOTE_LEVELS, UiBookSnapshot, UiBookState, UiEvent, UiWorkingOrder,
 };
+use crate::time::TsUs;
 
-use super::envelope::{
-    ByteReader, ByteWriter, ENVELOPE_LEN, LINK_MAX_DATAGRAM, LinkDecodeError, OPTIONAL_LEVEL_LEN,
-};
-use super::wire::{WireField, wire_array, wire_enum, wire_struct};
+use super::envelope::{ByteReader, ByteWriter, ENVELOPE_LEN, LINK_MAX_DATAGRAM, LinkDecodeError};
+use super::wire::{OPTIONAL_LEVEL_LEN, WireField, wire_array, wire_enum, wire_struct};
 use exec::{HALT_LEN, REJECT_ORIGIN_LEN};
 use latency::LATENCY_LEN;
 
@@ -65,11 +65,11 @@ const NO_QUOTE_LEVEL: u8 = u8::MAX;
 
 impl WireField for Option<QuoteLevel> {
     fn write(&self, writer: &mut ByteWriter<'_>) {
-        writer.write_u8(self.map_or(NO_QUOTE_LEVEL, QuoteLevel::get));
+        self.map_or(NO_QUOTE_LEVEL, QuoteLevel::get).write(writer);
     }
 
     fn read(reader: &mut ByteReader<'_>) -> Result<Self, LinkDecodeError> {
-        let value = reader.read_u8();
+        let value = u8::read(reader)?;
         if value == NO_QUOTE_LEVEL {
             return Ok(None);
         }
@@ -97,22 +97,11 @@ wire_struct! {
 wire_array! {
     Level; UI_BOOK_LEVELS; Level { price: Price(0), qty: Qty(0) },
     UiWorkingOrder; UI_ORDER_SNAPSHOT_CAPACITY; UiWorkingOrder::EMPTY,
+    Option<(Price, Qty)>; UI_QUOTE_LEVELS; None,
 }
 
-impl WireField for DomQuote {
-    fn write(&self, writer: &mut ByteWriter<'_>) {
-        for level in self.bids.iter().chain(self.asks.iter()) {
-            level.write(writer);
-        }
-    }
-
-    fn read(reader: &mut ByteReader<'_>) -> Result<Self, LinkDecodeError> {
-        let mut quote = Self::default();
-        for level in quote.bids.iter_mut().chain(quote.asks.iter_mut()) {
-            *level = WireField::read(reader)?;
-        }
-        Ok(quote)
-    }
+wire_struct! {
+    DomQuote { bids, asks }
 }
 
 wire_struct! {
@@ -128,15 +117,16 @@ wire_struct! {
     }
 }
 
-/// OOB count = remote abort; refuse once, not at every reader.
+/// A level count past capacity would index out of bounds and let a remote peer crash the reader, so
+/// it is refused here once rather than at every reader.
 fn validate_book_len(count: u16) -> Result<(), LinkDecodeError> {
-    match usize::from(count) <= UI_BOOK_LEVELS {
-        true => Ok(()),
-        false => Err(LinkDecodeError::BookLevelsExceeded {
-            count,
-            capacity: UI_BOOK_LEVELS,
-        }),
+    if usize::from(count) <= UI_BOOK_LEVELS {
+        return Ok(());
     }
+    Err(LinkDecodeError::BookLevelsExceeded {
+        count,
+        capacity: UI_BOOK_LEVELS,
+    })
 }
 
 /// Every kind shares the `seq`/`event_ts_us` head and pads to one width, so a reader can seek the
@@ -149,7 +139,8 @@ macro_rules! ui_events {
                 let end = writer.written() + EVENT_BODY_LEN;
                 match self {
                     $( UiEvent::$variant { seq, event_ts_us, $($field),* } => {
-                        writer.write_u8($tag);
+                        let kind: u8 = $tag;
+                        kind.write(writer);
                         seq.write(writer);
                         event_ts_us.write(writer);
                         $( $field.write(writer); )*
@@ -159,9 +150,9 @@ macro_rules! ui_events {
             }
 
             fn read(reader: &mut ByteReader<'_>) -> Result<Self, LinkDecodeError> {
-                let kind = reader.read_u8();
-                let seq = reader.read_u64();
-                let event_ts_us = reader.read_ts();
+                let kind = u8::read(reader)?;
+                let seq = u64::read(reader)?;
+                let event_ts_us = TsUs::read(reader)?;
                 match kind {
                     $( $tag => {
                         $(

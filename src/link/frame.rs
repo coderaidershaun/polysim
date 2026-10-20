@@ -14,7 +14,7 @@ use super::envelope::{
     LinkHash, TopicId,
 };
 use super::feed::{BOOK_BODY_LEN, EVENT_BODY_LEN};
-use super::wire::WireField;
+use super::wire::{WireField, wire_array};
 
 /// 38 measured maximum (see InboundLink budget assert).
 pub const LINK_MAX_FIELDS: usize = 38;
@@ -64,34 +64,29 @@ impl LinkPayload {
     }
 
     fn write(&self, writer: &mut ByteWriter<'_>) {
-        writer.write_hash(self.schema_hash);
-        writer.write_ts(self.event_ts_us);
-        writer.write_u8(self.count);
-        for value in self.values {
-            writer.write_f64(value);
-        }
+        self.schema_hash.write(writer);
+        self.event_ts_us.write(writer);
+        self.count.write(writer);
+        self.values.write(writer);
     }
 
     fn read(reader: &mut ByteReader<'_>, guard: &FrameGuard) -> Result<Self, LinkDecodeError> {
-        let schema_hash = reader.read_hash();
+        let schema_hash = LinkHash::read(reader)?;
         if schema_hash != guard.schema_hash {
             return Err(LinkDecodeError::SchemaMismatch {
                 found: schema_hash,
                 expected: guard.schema_hash,
             });
         }
-        let event_ts_us = reader.read_ts();
-        let count = reader.read_u8();
+        let event_ts_us = TsUs::read(reader)?;
+        let count = u8::read(reader)?;
         if count as usize > LINK_MAX_FIELDS {
             return Err(LinkDecodeError::FieldCountExceeded {
                 count,
                 capacity: LINK_MAX_FIELDS,
             });
         }
-        let mut values = [0.0; LINK_MAX_FIELDS];
-        for slot in &mut values {
-            *slot = reader.read_f64();
-        }
+        let values = WireField::read(reader)?;
         Ok(Self {
             schema_hash,
             event_ts_us,
@@ -100,6 +95,8 @@ impl LinkPayload {
         })
     }
 }
+
+wire_array! { f64; LINK_MAX_FIELDS; 0.0 }
 
 /// Sender identity + position in stream (envelope residue after FrameGuard::check). Omit magic/version/hashes/mac to save budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -25,11 +25,10 @@ pub(crate) fn axis_labels(
     let decimals = format::quote_axis_decimals(ticks.step());
     ticks
         .map(|value| {
-            let mut label = String::new();
-            match labels {
-                AxisLabels::VenueMid(tick) => format::write_venue_mid(&mut label, value, tick),
-                AxisLabels::QuoteAmount => format::write_quote_amount(&mut label, value, decimals),
-            }
+            let label = format::render(|out| match labels {
+                AxisLabels::VenueMid(tick) => format::write_venue_mid(out, value, tick),
+                AxisLabels::QuoteAmount => format::write_quote_amount(out, value, decimals),
+            });
             (value, label)
         })
         .collect()

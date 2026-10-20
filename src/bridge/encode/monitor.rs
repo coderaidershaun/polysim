@@ -1,10 +1,9 @@
 //! The center panel's fixed bands: the account, the feature list and the latency grid. Each is a
 //! whole snapshot, since they are small and the page keeps nothing of them between ticks.
 
-use crate::bridge::frame::{
-    Account, AccountCaptions, AssetLine, FeatureLine, Latency, LatencyRow, SideCounts, Sides,
-    Styled,
-};
+use serde::Serialize;
+
+use crate::desktop::format;
 use crate::desktop::model::UiModel;
 use crate::desktop::monitor_view::{AssetRowView, SideCountView, account, feature_rows};
 use crate::desktop::text::{
@@ -14,6 +13,74 @@ use crate::desktop::text::{
 };
 use crate::hot::exec::ExecHalt;
 use crate::ids::Price;
+
+use super::Styled;
+
+#[derive(Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct Account {
+    notes: Vec<Styled>,
+    captions: AccountCaptions,
+    base: AssetLine,
+    quote: AssetLine,
+    sides: Sides,
+    gate: Option<&'static str>,
+    halt_reason: Option<&'static str>,
+    reject: Styled,
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+struct AccountCaptions {
+    free: String,
+    locked: String,
+    value: String,
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+struct AssetLine {
+    label: String,
+    free: String,
+    locked: String,
+    value: String,
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+struct Sides {
+    bid: SideCounts,
+    ask: SideCounts,
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+struct SideCounts {
+    open: usize,
+    inflight: usize,
+    lost: usize,
+    leaked: u64,
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+pub(super) struct FeatureLine {
+    name: String,
+    value: String,
+    #[serde(rename = "changed")]
+    has_changed: bool,
+    #[serde(rename = "stale")]
+    is_stale: bool,
+    hover: String,
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+pub(super) struct Latency {
+    header: &'static str,
+    columns: Vec<&'static str>,
+    rows: Vec<LatencyRow>,
+}
+
+#[derive(Serialize, Clone, PartialEq)]
+struct LatencyRow {
+    label: &'static str,
+    cells: Vec<Styled>,
+}
 
 pub(super) fn account_section(model: &UiModel, tick: Price) -> Account {
     let view = account(model, model.selected(), tick);
@@ -47,11 +114,7 @@ pub(super) fn account_section(model: &UiModel, tick: Price) -> Account {
 }
 
 fn asset_line(asset: AssetRowView<'_>) -> AssetLine {
-    let amount = |mantissa, decimals| {
-        let mut text = String::new();
-        write_amount(&mut text, mantissa, decimals);
-        text
-    };
+    let amount = |mantissa, decimals| format::render(|out| write_amount(out, mantissa, decimals));
     AssetLine {
         label: asset_label(asset).to_owned(),
         free: amount(asset.balance.map(|balance| balance.free), BALANCE_DECIMALS),
@@ -77,16 +140,12 @@ pub(super) fn features(model: &UiModel) -> Vec<FeatureLine> {
         .catalog()
         .map_or(&[], |catalog| &catalog.feature_names);
     feature_rows(model, model.selected())
-        .map(|row| {
-            let mut value = String::new();
-            write_feature_cell(&mut value, &row);
-            FeatureLine {
-                name: feature_name(&row, names).to_owned(),
-                value,
-                has_changed: row.changed,
-                is_stale: row.stale,
-                hover: feature_hover(&row, names),
-            }
+        .map(|row| FeatureLine {
+            name: feature_name(&row, names).to_owned(),
+            value: format::render(|out| write_feature_cell(out, &row)),
+            has_changed: row.changed,
+            is_stale: row.stale,
+            hover: feature_hover(&row, names),
         })
         .collect()
 }

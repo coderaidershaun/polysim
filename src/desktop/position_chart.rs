@@ -7,9 +7,9 @@ use eframe::egui;
 
 use crate::ids::InstrumentId;
 
-use super::chart::{self, Plot, paint_note};
+use super::chart::{self, ChartPaint, Plot, paint_note};
 use super::chart_view::ChartDomain;
-use super::position_chart_model::{PositionBucket, PositionModel};
+use super::position_chart_model::PositionModel;
 use super::position_chart_view::{self, QuoteBounds, RiskSeries};
 use super::text::{self, AxisLabels};
 use super::theme::{self, DARK, METRICS};
@@ -25,31 +25,14 @@ pub struct PositionFrame<'a> {
 /// Pixel transform on the quote axis; the unit newtype keeps it distinct from the mid chart's plot.
 pub type PositionPlot = Plot<QuoteBounds>;
 
-impl PositionPlot {
-    fn point(&self, bucket: &PositionBucket, series: RiskSeries) -> egui::Pos2 {
-        egui::pos2(self.x(bucket.index), self.y(series.value(bucket)))
-    }
-}
-
-/// Paint result; geometry = None when no series plotted (crosshair can't read missing value).
-#[must_use]
-pub struct PositionPaint {
-    pub response: egui::Response,
-    pub geometry: Option<PositionPlot>,
-}
-
-pub fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &PositionFrame<'_>) -> PositionPaint {
-    let response = ui.interact(
-        rect,
-        egui::Id::new("polysim-position-chart"),
-        egui::Sense::hover(),
-    );
-    let painter = ui.painter().with_clip_rect(rect);
-
-    painter.rect_filled(rect, 0.0, DARK.panel);
-    // Same inset as mid chart via shared fn -> equal x extents -> aligned stacked axes by construction.
-    let geometry = chart::plot_rect(rect).and_then(|plot| paint_plot(&painter, plot, frame));
-    PositionPaint { response, geometry }
+pub fn paint(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    frame: &PositionFrame<'_>,
+) -> ChartPaint<QuoteBounds> {
+    chart::paint_frame(ui, rect, "polysim-position-chart", |painter, plot| {
+        paint_plot(painter, plot, frame)
+    })
 }
 
 fn paint_plot(
@@ -102,7 +85,7 @@ fn paint_line(painter: &egui::Painter, plot: &PositionPlot, frame: &PositionFram
             chart::flush_run(painter, &mut run, stroke);
         }
         previous = Some(bucket.index);
-        run.push(plot.point(bucket, frame.series));
+        run.push(plot.point(bucket.index, frame.series.value(bucket)));
     }
     chart::flush_run(painter, &mut run, stroke);
 }

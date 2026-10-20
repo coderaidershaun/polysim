@@ -1,4 +1,6 @@
-//! Center panel: five bands (account/quote/features/tabs/channel). Account fixed+visible. Caller-owned state.
+//! The center panel's five bands: account, quote summary, features, channel tabs and the active
+//! channel. The account band has a fixed height so it is always in view, and the caller owns the tab
+//! and scroll state.
 
 use eframe::egui;
 
@@ -11,11 +13,12 @@ use super::theme::{self, DARK, METRICS};
 
 pub use super::monitor_view::{Channel, MonitorFrame};
 
-/// Scroll state: following=pinned (seen tracks appended), away=freeze (pending offset forces scroll).
+/// While following, a channel stays pinned to its newest row and `seen` tracks every row appended.
+/// Scrolled away, it holds still, and a pending offset forces one scroll on the next frame.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ChannelSeen {
-    following: bool,
-    seen: u64,
+    pub(super) following: bool,
+    pub(super) seen: u64,
     pending_offset: Option<f32>,
 }
 
@@ -26,25 +29,9 @@ impl ChannelSeen {
         pending_offset: None,
     };
 
-    pub(super) fn following(self) -> bool {
-        self.following
-    }
-
-    pub(super) fn seen(self) -> u64 {
-        self.seen
-    }
-
     /// Take one-frame forced scroll offset (applies once).
     pub(super) fn take_pending_offset(&mut self) -> Option<f32> {
         self.pending_offset.take()
-    }
-
-    pub(super) fn mark_seen(&mut self, appended: u64) {
-        self.seen = appended;
-    }
-
-    pub(super) fn set_following(&mut self, following: bool) {
-        self.following = following;
     }
 
     /// Jump to newest: follow again + force viewport top next frame.
@@ -143,16 +130,13 @@ pub fn paint(
     monitor_channels::paint_tabs(ui, bands.tabs, state);
     monitor_channels::paint_channel(ui, bands.channel, frame, state);
 
-    let painter = ui.painter_at(rect);
-    let stroke = theme::hairline(&painter, DARK.border);
-    for y in [
+    let seams = [
         bands.account.bottom(),
         bands.summary.bottom(),
         bands.features.bottom(),
         bands.tabs.bottom(),
-    ] {
-        painter.hline(rect.x_range(), theme::crisp(&painter, y), stroke);
-    }
+    ];
+    theme::rules_h(&ui.painter_at(rect), seams, rect.x_range());
 }
 
 /// One scrollable row band: honest empty note, independent scroll, per-row paint + hover record.
@@ -264,10 +248,9 @@ fn paint_feature_row(
     // Reserve width for widest value (full-width negative, 4 decimals) to prevent name/value collision.
     let value_col_w = METRICS.monitor_value_col_w;
     let pad = METRICS.space_2;
-    let name_rect = egui::Rect::from_min_max(
-        egui::pos2(rect.left() + pad, rect.top()),
-        egui::pos2(rect.right() - value_col_w - pad, rect.bottom()),
-    );
+    let name_rect = rect
+        .with_min_x(rect.left() + pad)
+        .with_max_x(rect.right() - value_col_w - pad);
     paint_left_ellipsized(
         painter,
         name_rect,

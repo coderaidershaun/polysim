@@ -1,7 +1,7 @@
-//! Universal envelope, validation order, little-endian primitives. Version skew caught before book misdecode.
+//! The envelope every datagram opens with, checked in a fixed order so version skew is caught before
+//! a book body is misread, and the byte cursors every record is written and read through.
 
-use crate::ids::{Price, Qty};
-use crate::time::{DurationUs, TsUs};
+use crate::time::TsUs;
 
 use super::wire::{WireField, wire_struct};
 
@@ -21,13 +21,7 @@ pub const LINK_MAX_DATAGRAM: usize = 1200;
 const LINK_MAC_LEN: usize = 32;
 
 pub(super) const ENVELOPE_LEN: usize = 4 + 2 + 2 + 8 + 8 + 8 + 8 + 8 + LINK_MAC_LEN;
-pub(super) const OPTIONAL_MANTISSA_LEN: usize = 1 + 8;
-pub(super) const OPTIONAL_F64_LEN: usize = 1 + 8;
-pub(super) const OPTIONAL_LEVEL_LEN: usize = 1 + 8 + 8;
 pub(super) const NAME_LEN: usize = 1 + LINK_NAME_LEN;
-
-const ABSENT: u8 = 0;
-const PRESENT: u8 = 1;
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -233,6 +227,26 @@ impl WireName {
     }
 }
 
+impl WireField for WireName {
+    fn write(&self, writer: &mut ByteWriter<'_>) {
+        self.len.write(writer);
+        writer.write_bytes(&self.bytes);
+    }
+
+    fn read(reader: &mut ByteReader<'_>) -> Result<Self, LinkDecodeError> {
+        let len = u8::read(reader)?;
+        let mut bytes: [u8; LINK_NAME_LEN] = reader.take();
+        if len as usize > LINK_NAME_LEN {
+            return Err(LinkDecodeError::NameTooLong { found: len });
+        }
+        // Zero every byte past `len`. A garbage tail would display the same name yet compare unequal,
+        // so a catalog upsert would miss the entry it should replace.
+        bytes[len as usize..].fill(0);
+        str::from_utf8(&bytes[..len as usize]).map_err(|_| LinkDecodeError::NameNotUtf8)?;
+        Ok(Self { bytes, len })
+    }
+}
+
 #[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkDecodeError {
     #[error("datagram is {found} bytes, shorter than the {ENVELOPE_LEN}-byte envelope")]
@@ -304,70 +318,9 @@ impl<'a> ByteWriter<'a> {
         self.at
     }
 
-    pub(super) fn write_u8(&mut self, value: u8) {
-        self.bytes[self.at] = value;
-        self.at += 1;
-    }
-
     pub(super) fn write_bytes(&mut self, value: &[u8]) {
         self.bytes[self.at..self.at + value.len()].copy_from_slice(value);
         self.at += value.len();
-    }
-
-    pub(super) fn write_u16(&mut self, value: u16) {
-        self.write_bytes(&value.to_le_bytes());
-    }
-
-    pub(super) fn write_u32(&mut self, value: u32) {
-        self.write_bytes(&value.to_le_bytes());
-    }
-
-    pub(super) fn write_i32(&mut self, value: i32) {
-        self.write_bytes(&value.to_le_bytes());
-    }
-
-    pub(super) fn write_u64(&mut self, value: u64) {
-        self.write_bytes(&value.to_le_bytes());
-    }
-
-    pub(super) fn write_i64(&mut self, value: i64) {
-        self.write_bytes(&value.to_le_bytes());
-    }
-
-    pub(super) fn write_f64(&mut self, value: f64) {
-        self.write_bytes(&value.to_le_bytes());
-    }
-
-    pub(super) fn write_ts(&mut self, value: TsUs) {
-        self.write_i64(value.micros());
-    }
-
-    pub(super) fn write_duration(&mut self, value: DurationUs) {
-        self.write_i64(value.micros());
-    }
-
-    pub(super) fn write_hash(&mut self, value: LinkHash) {
-        self.write_u64(value.0);
-    }
-
-    pub(super) fn write_name(&mut self, value: WireName) {
-        self.write_u8(value.len);
-        self.write_bytes(&value.bytes);
-    }
-
-    pub(super) fn write_optional_mantissa(&mut self, value: Option<i64>) {
-        self.write_u8(if value.is_some() { PRESENT } else { ABSENT });
-        self.write_i64(value.unwrap_or(0));
-    }
-
-    pub(super) fn write_optional_f64(&mut self, value: Option<f64>) {
-        self.write_u8(if value.is_some() { PRESENT } else { ABSENT });
-        self.write_f64(value.unwrap_or(0.0));
-    }
-
-    pub(super) fn write_optional_level(&mut self, value: Option<(Price, Qty)>) {
-        self.write_optional_mantissa(value.map(|(price, _)| price.0));
-        self.write_i64(value.map_or(0, |(_, qty)| qty.0));
     }
 
     /// Reused buffer must not leak previous datagram; future MAC covers these bytes.
@@ -393,83 +346,5 @@ impl<'a> ByteReader<'a> {
         out.copy_from_slice(&self.bytes[self.at..self.at + N]);
         self.at += N;
         out
-    }
-
-    pub(super) fn read_u8(&mut self) -> u8 {
-        self.take::<1>()[0]
-    }
-
-    pub(super) fn read_u16(&mut self) -> u16 {
-        u16::from_le_bytes(self.take())
-    }
-
-    pub(super) fn read_u32(&mut self) -> u32 {
-        u32::from_le_bytes(self.take())
-    }
-
-    pub(super) fn read_i32(&mut self) -> i32 {
-        i32::from_le_bytes(self.take())
-    }
-
-    pub(super) fn read_u64(&mut self) -> u64 {
-        u64::from_le_bytes(self.take())
-    }
-
-    pub(super) fn read_i64(&mut self) -> i64 {
-        i64::from_le_bytes(self.take())
-    }
-
-    pub(super) fn read_f64(&mut self) -> f64 {
-        f64::from_le_bytes(self.take())
-    }
-
-    pub(super) fn read_ts(&mut self) -> TsUs {
-        TsUs::from_micros(self.read_i64())
-    }
-
-    pub(super) fn read_duration(&mut self) -> DurationUs {
-        DurationUs::from_micros(self.read_i64())
-    }
-
-    pub(super) fn read_hash(&mut self) -> LinkHash {
-        LinkHash(self.read_u64())
-    }
-
-    pub(super) fn read_name(&mut self) -> Result<WireName, LinkDecodeError> {
-        let len = self.read_u8();
-        let mut bytes: [u8; LINK_NAME_LEN] = self.take();
-        if len as usize > LINK_NAME_LEN {
-            return Err(LinkDecodeError::NameTooLong { found: len });
-        }
-        // Zero past len: garbage tail -> identical display, unequal compare, catalog upsert key mismatch
-        bytes[len as usize..].fill(0);
-        str::from_utf8(&bytes[..len as usize]).map_err(|_| LinkDecodeError::NameNotUtf8)?;
-        Ok(WireName { bytes, len })
-    }
-
-    pub(super) fn read_optional_mantissa(&mut self) -> Result<Option<i64>, LinkDecodeError> {
-        let tag = self.read_u8();
-        let mantissa = self.read_i64();
-        match tag {
-            ABSENT => Ok(None),
-            PRESENT => Ok(Some(mantissa)),
-            _ => Err(LinkDecodeError::unknown("optional mantissa", tag)),
-        }
-    }
-
-    pub(super) fn read_optional_f64(&mut self) -> Result<Option<f64>, LinkDecodeError> {
-        let tag = self.read_u8();
-        let value = self.read_f64();
-        match tag {
-            ABSENT => Ok(None),
-            PRESENT => Ok(Some(value)),
-            _ => Err(LinkDecodeError::unknown("optional f64", tag)),
-        }
-    }
-
-    pub(super) fn read_optional_level(&mut self) -> Result<Option<(Price, Qty)>, LinkDecodeError> {
-        let price = self.read_optional_mantissa()?;
-        let qty = self.read_i64();
-        Ok(price.map(|price| (Price(price), Qty(qty))))
     }
 }
