@@ -361,9 +361,8 @@ fn role_at(window: WindowInfo, now: TsUs) -> Option<Role> {
     (now < window.open_ts_us).then_some(Role::Next)
 }
 
-/// A stale fit is a previous one re-dated: publishing it would date a dead market's liquidity to now.
 fn write_side((a, k): (&mut f64, &mut f64), side: Option<SideEstimate>) {
-    let Some(estimate) = side.filter(|estimate| !estimate.is_stale) else {
+    let Some(estimate) = common::fresh(side) else {
         return;
     };
     *a = estimate.a_per_sec;

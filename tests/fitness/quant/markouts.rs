@@ -7,17 +7,15 @@ use polysim::hot::quant::toxicity::{
 };
 use polysim::ids::{FIXED_SCALE, InstrumentId, Price, Qty, Side};
 use polysim::msg::inbound::TradeEvent;
-use polysim::time::{DurationUs, TsUs};
+use polysim::time::DurationUs;
+
+use crate::engine_support::ts as at;
 
 fn tracker(spin_us: i64) -> MarkoutTracker {
     MarkoutTracker::new(MarkoutSpec {
         spin_interval: DurationUs::from_micros(spin_us),
         max_mids_per_sec: 10,
     })
-}
-
-fn at(us: i64) -> TsUs {
-    TsUs::from_micros(us)
 }
 
 fn secs(count: i64) -> i64 {

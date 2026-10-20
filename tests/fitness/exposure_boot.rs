@@ -33,18 +33,17 @@ use polysim::msg::exec::{ExecCommand, ExecEvent, ExecKind, ExecLaneItem, OrderSt
 use polysim::msg::inbound::{InboundMessage, SpinTick};
 use polysim::registry::InstrumentRow;
 use polysim::sink::{ExecSink, ExposureSink};
-use polysim::time::DurationUs;
 use rtrb::{Consumer, RingBuffer};
 
 use crate::engine_support::{
-    FillPen, ONE, book_reset, exec_event, exposure_ring, instrument_row, metrics_ring,
-    persist_ring, pop, snapshot_pair, strategy_log_ring,
+    FillPen, ONE, book_reset, detached_setup, exec_event, exposure_ring, instrument_row,
+    persist_ring, pop, snapshot_pair,
 };
+use crate::exec_support::{drain_commands, exec_settings, make_ready, spin_at};
 use crate::exposure_state::{
     BINANCE_SOURCE, drain_writer, load_live, registry_for, spawn_live_writer,
 };
 use crate::parquet_readback::TempDir;
-use crate::risk_gate::{drain_commands, exec_settings, make_ready, spin_at};
 
 const INSTRUMENT: InstrumentId = InstrumentId(0);
 
@@ -106,21 +105,9 @@ fn engine_with_exposure(
     exposure: ExposureWiring<'_>,
 ) -> (HotEngine, Consumer<ExecLaneItem>) {
     let (persistence, _persist) = persist_ring(1_024);
-    let (log_sink, _logs) = strategy_log_ring(64);
-    let (metrics, _metrics) = metrics_ring(64);
     let (commands_producer, commands) = RingBuffer::<ExecLaneItem>::new(256);
-    let (ui_book_sink, _ui_books) = crate::engine_support::ui_book_ring(64);
-    let (ui_event_sink, _ui_events) = crate::engine_support::ui_event_ring(256);
     let engine = HotEngine::new(HotEngineSetup {
-        instruments,
-        strategy: Box::new(TwoSidedQuoter),
         persistence: Some(persistence),
-        strategy_log_sink: log_sink,
-        metrics_sink: metrics,
-        ui_book_sink,
-        ui_event_sink,
-        link: None,
-        warmup: DurationUs::ZERO,
         exec: Some(ExecWiring {
             sink: ExecSink::new(commands_producer),
             // Wide band and a long book age: these tests are about the LOSS gate, and a quote
@@ -132,6 +119,7 @@ fn engine_with_exposure(
             run_nonce: 0,
         }),
         exposure,
+        ..detached_setup(instruments, Box::new(TwoSidedQuoter))
     });
     (engine, commands)
 }

@@ -31,10 +31,10 @@ use polysim::sink::ExecSink;
 use rtrb::{Consumer, RingBuffer};
 
 use crate::engine_support::{
-    ONE, detached_exposure, drain_orders_and_fills, exec_event, instrument_row, metrics_ring,
-    persist_ring_for, pop, spin, strategy_log_ring, ui_book_ring, ui_event_ring,
+    ONE, detached_setup, drain_orders_and_fills, exec_event, instrument_row, metrics_ring,
+    persist_ring_for, pop, spin,
 };
-use crate::risk_gate::drain_commands;
+use crate::exec_support::drain_commands;
 
 const INSTRUMENT: InstrumentId = InstrumentId(0);
 
@@ -90,29 +90,20 @@ fn fixture_with_lane(lane_capacity: usize) -> Fixture {
         1_024,
         RecordedTables::new(&[TableKind::Orders, TableKind::Fills]),
     );
-    let (strategy_log_sink, _logs) = strategy_log_ring(64);
     let (metrics_sink, metrics) = metrics_ring(64);
-    let (ui_book_sink, _ui_books) = ui_book_ring(64);
-    let (ui_event_sink, _ui_events) = ui_event_ring(256);
     let (commands_producer, commands) = RingBuffer::<ExecLaneItem>::new(lane_capacity);
+    let strategy = Box::new(LedgerProbe {
+        latest: Arc::clone(&latest),
+    });
     let engine = HotEngine::new(HotEngineSetup {
-        instruments: &instruments,
-        strategy: Box::new(LedgerProbe {
-            latest: Arc::clone(&latest),
-        }),
         persistence: Some(persistence),
-        strategy_log_sink,
         metrics_sink,
-        ui_book_sink,
-        ui_event_sink,
-        link: None,
-        warmup: polysim::time::DurationUs::ZERO,
         exec: Some(ExecWiring {
             sink: ExecSink::new(commands_producer),
             settings: ExecSettings::disabled(),
             run_nonce: 0,
         }),
-        exposure: detached_exposure(),
+        ..detached_setup(&instruments, strategy)
     });
     Fixture {
         engine,

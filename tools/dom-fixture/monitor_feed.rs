@@ -7,16 +7,15 @@ use polysim::hot::exec::{CloseReason, OrderState, RejectOrigin};
 use polysim::ids::{AssetId, ClientOrderId};
 use polysim::ids::{FIXED_SCALE, InstrumentId, Price, Qty, Side};
 use polysim::msg::exec::Liquidity;
-use polysim::msg::inbound::Level;
 use polysim::msg::persist::FeatureId;
-use polysim::msg::ui::{DomQuote, UI_BOOK_LEVELS, UiBookSnapshot, UiBookState, UiEvent};
+use polysim::msg::ui::{DomQuote, UiBookState, UiEvent};
 use polysim::time::DurationUs;
 use polysim::time::TsUs;
 
+use crate::fixture::{BASE_TS, book, levels, px, qm};
+
 pub const SPIN: DurationUs = DurationUs::from_micros(100_000);
-const MILLI: i64 = FIXED_SCALE / 1000;
 pub const QUOTE_QTY_MILLI: i64 = 9_000;
-const BASE_TS: i64 = 1_753_300_000_000_000;
 
 pub struct MonitorScene {
     pub name: &'static str,
@@ -55,8 +54,13 @@ impl Feed {
 
     pub fn book(&mut self, state: UiBookState, ts: i64, bids: &[(i64, i64)], asks: &[(i64, i64)]) {
         self.book_seq += 1;
-        self.model
-            .apply_book(snapshot(self.book_seq, ts, state, bids, asks));
+        self.model.apply_book(book(
+            self.book_seq,
+            BASE_TS + ts,
+            state,
+            &levels(bids),
+            &levels(asks),
+        ));
     }
 
     pub fn quote(&mut self, ts: i64, bid: Option<i64>, ask: Option<i64>) {
@@ -185,51 +189,6 @@ impl Feed {
 
 const TICK: Price = Price(FIXED_SCALE);
 
-fn snapshot(
-    seq: u64,
-    ts: i64,
-    state: UiBookState,
-    bids: &[(i64, i64)],
-    asks: &[(i64, i64)],
-) -> UiBookSnapshot {
-    let empty = Level {
-        price: Price(0),
-        qty: Qty(0),
-    };
-    let mut bid_levels = [empty; UI_BOOK_LEVELS];
-    let mut ask_levels = [empty; UI_BOOK_LEVELS];
-    for (slot, &(tick, milli)) in bid_levels.iter_mut().zip(bids) {
-        *slot = Level {
-            price: px(tick),
-            qty: qm(milli),
-        };
-    }
-    for (slot, &(tick, milli)) in ask_levels.iter_mut().zip(asks) {
-        *slot = Level {
-            price: px(tick),
-            qty: qm(milli),
-        };
-    }
-    UiBookSnapshot {
-        instrument: InstrumentId(0),
-        seq,
-        event_ts_us: ts_at(ts),
-        state,
-        bid_len: bids.len().min(UI_BOOK_LEVELS) as u16,
-        ask_len: asks.len().min(UI_BOOK_LEVELS) as u16,
-        bids: bid_levels,
-        asks: ask_levels,
-    }
-}
-
 fn ts_at(relative: i64) -> TsUs {
     TsUs::from_micros(BASE_TS + relative)
-}
-
-fn px(tick_index: i64) -> Price {
-    Price(tick_index * FIXED_SCALE)
-}
-
-fn qm(milli: i64) -> Qty {
-    Qty(milli * MILLI)
 }

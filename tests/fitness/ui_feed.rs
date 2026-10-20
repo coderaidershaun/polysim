@@ -27,10 +27,10 @@ use polysim::time::{DurationUs, TsUs};
 use rtrb::Consumer;
 
 use crate::engine_support::{
-    FillPen, Idle, ONE, book_reset, delta_chunk, detached_exposure, engine_with_ui,
+    FillPen, Idle, ONE, book_reset, delta_chunk, detached_setup, engine_with_ui,
     engine_with_ui_and_exec, exec_event, idle_at, instrument_row, level, metrics_ring,
     persist_ring, persist_ring_for, pop, rotation, run_control, snapshot_pair, spin, spin_pop,
-    strategy_log_ring, tracker_spec_all, trade, ts, ui_book_ring, ui_event_ring,
+    strategy_log_ring, tracker_spec_all, trade, ts, ui_event_ring,
 };
 
 /// Counts strategy callbacks independently of the UI projection. A fill may tee two UI facts, but
@@ -489,22 +489,10 @@ fn feed_events_tee_ahead_of_the_warmup_gate() {
 fn features_tee_to_the_ui_even_when_they_are_not_recorded() {
     let instruments = [instrument_row(0, tracker_spec_all(1), 64)];
 
-    let (log_sink, _logs) = strategy_log_ring(64);
-    let (metrics, _metrics) = metrics_ring(64);
-    let (ui_book_sink, _books) = ui_book_ring(64);
     let (ui_event_sink, mut events) = ui_event_ring(64);
     let mut engine = HotEngine::new(HotEngineSetup {
-        exec: None,
-        exposure: detached_exposure(),
-        instruments: &instruments,
-        strategy: Box::new(FeatureProbe { ids: Vec::new() }),
-        persistence: None,
-        strategy_log_sink: log_sink,
-        metrics_sink: metrics,
-        ui_book_sink,
         ui_event_sink,
-        link: None,
-        warmup: DurationUs::ZERO,
+        ..detached_setup(&instruments, Box::new(FeatureProbe { ids: Vec::new() }))
     });
     engine.dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(0, 500)));
     assert_eq!(
@@ -1176,22 +1164,11 @@ fn event_kind(event: &UiEvent) -> &'static str {
 fn saturated_event_ring_drops_then_heals() {
     let instruments = [instrument_row(0, tracker_spec_all(1), 64)];
     let (sink, _persist) = persist_ring(256);
-    let (log_sink, _logs) = strategy_log_ring(64);
-    let (metrics, _metrics) = metrics_ring(64);
-    let (ui_book_sink, _books) = ui_book_ring(64);
     let (ui_event_sink, mut events) = ui_event_ring(4);
     let mut engine = HotEngine::new(HotEngineSetup {
-        exec: None,
-        exposure: detached_exposure(),
-        instruments: &instruments,
-        strategy: Box::new(Idle),
         persistence: Some(sink),
-        strategy_log_sink: log_sink,
-        metrics_sink: metrics,
-        ui_book_sink,
         ui_event_sink,
-        link: None,
-        warmup: DurationUs::ZERO,
+        ..detached_setup(&instruments, Box::new(Idle))
     });
 
     for i in 0..20i64 {

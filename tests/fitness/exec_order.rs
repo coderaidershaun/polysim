@@ -12,11 +12,13 @@ use polysim::hot::exec::{
 };
 use polysim::ids::{AssetId, ClientOrderId, InstrumentId, Price, Qty, Side, VenueOrderId};
 use polysim::msg::exec::{
-    ACCOUNT_CHUNK_ASSETS, AccountChunk, AccountChunkKind, AssetBalance, ExecEvent, ExecKind,
-    OrderStyle, Provenance, RejectClass, VenueOrderStatus,
+    AccountChunk, AccountChunkKind, ExecEvent, ExecKind, OrderStyle, Provenance, RejectClass,
+    VenueOrderStatus,
 };
 use polysim::time::{DurationUs, TsUs};
 use proptest::prelude::*;
+
+use crate::engine_support::account_chunk;
 
 const RUN_NONCE: u32 = 0x5EED_1234;
 const TICK: i64 = 1_000_000;
@@ -483,24 +485,12 @@ fn balances(
     venue_update_ts_ms: u64,
     kind: AccountChunkKind,
 ) -> AccountChunk {
-    let mut chunk = AccountChunk {
+    AccountChunk {
         kind,
-        balances: [AssetBalance {
-            asset: AssetId::UNKNOWN,
-            free: 0,
-            locked: 0,
-        }; ACCOUNT_CHUNK_ASSETS],
-        len: 1,
-        is_last_chunk: true,
         venue_update_ts_ms,
         exchange_ts_us: TsUs::from_micros(1),
         received_ts_us: TsUs::from_micros(2),
         queued_ts_us: TsUs::from_micros(3),
-    };
-    chunk.balances[0] = AssetBalance {
-        asset,
-        free,
-        locked: 0,
-    };
-    chunk
+        ..account_chunk(&[(asset, free)], 0)
+    }
 }

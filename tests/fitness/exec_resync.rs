@@ -25,8 +25,8 @@ use polysim::time::TsUs;
 
 use proptest::prelude::*;
 
-use crate::engine_support::{local_refusals, pop};
-use crate::risk_gate::{
+use crate::engine_support::{local_refusals, pop, ts as at};
+use crate::exec_support::{
     ASK, BID, CEILING, INSTRUMENT, drain_commands, is_placing, open_orders_snapshot,
     quoting_engine, quoting_engine_with_ui, reseat_book, spin_at, stream_and_balances,
 };
@@ -37,10 +37,6 @@ const RETRY_DELAY: i64 = 250_000;
 /// Later than any instant a test schedules, so `due` at this reads as "is anything scheduled at
 /// all" rather than "is it due yet".
 const FOREVER: TsUs = TsUs::from_micros(i64::MAX / 2);
-
-fn at(micros: i64) -> TsUs {
-    TsUs::from_micros(micros)
-}
 
 /// FITNESS: the undecodable-open-order policy carried all the way to completion, and retries bounded
 /// to a finite count.

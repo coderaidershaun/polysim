@@ -21,19 +21,15 @@ use polysim::adapters::polymarket::exec::correlate::{
 use polysim::adapters::polymarket::rotation::{OutcomeLeg, TokenId, WindowAssignment};
 use polysim::ids::{ClientOrderId, InstrumentId, Price, Qty, Side};
 use polysim::msg::exec::{ExecCommand, ExecEvent, ExecKind, Provenance, VenueOrderStatus};
-use polysim::time::{DurationUs, TsUs};
+use polysim::time::DurationUs;
 
-use crate::engine_support::exec_event;
+use crate::engine_support::{exec_event, ts as at};
 
 const UP: InstrumentId = InstrumentId(0);
 const DOWN: InstrumentId = InstrumentId(1);
 const CONDITION: &str = "0xcondition";
 const UP_TOKEN: &str = "111";
 const DOWN_TOKEN: &str = "222";
-
-fn at(micros: i64) -> TsUs {
-    TsUs::from_micros(micros)
-}
 
 fn assignment(open: i64, close: i64) -> WindowAssignment {
     WindowAssignment {

@@ -17,6 +17,7 @@ use polysim::ids::{FIXED_SCALE, InstrumentId, Price, Qty, Side};
 use polysim::msg::inbound::Level;
 use polysim::time::{DurationUs, TsUs};
 
+use super::common::fresh;
 use super::features::{
     Features, GueantSideColumns, HawkesColumns, IntensityColumns, MarkoutColumns, QuoteSide,
 };
@@ -259,13 +260,6 @@ impl InstrumentState {
             max_exposure_quote: row.max_exposure_quote,
         }
     }
-
-    /// The position is neither reset nor held here: the engine owns the ledger, and carries it
-    /// through a park on purpose — parking sells nothing. A copy on this side would be a second
-    /// truth free to drift from the one the quote leans on.
-    pub(crate) fn reset(&mut self) {
-        self.binance.reset();
-    }
 }
 
 /// How many spins of `spin_interval` fit in `horizon` — the count-sizing shared by every rolling
@@ -368,9 +362,10 @@ impl GueantScale {
     }
 
     /// One side's flat-inventory half-spread, its inventory skew and the resulting quote, or nothing.
-    /// The stale filter is [`emit_side_intensity`]'s. The QUOTE prices live inventory — δᵇ(q) = h + jq,
-    /// δᵃ(q) = h − jq — so a long book quotes to sell it down; the two depth columns stay h and j, the
-    /// inventory-free pair, and with `inventory_quote` recorded alongside, any other q rebuilds offline.
+    /// The quote prices the live inventory, δᵇ(q) = h + jq and δᵃ(q) = h − jq, so a long book
+    /// quotes to sell it down. The two depth columns stay h and j, the inventory-free pair, and
+    /// because `inventory_quote` is recorded beside them, the quote for any other q can be rebuilt
+    /// offline.
     /// Returns the snapped level exactly when the price column was emitted, so the markout arm and the
     /// recorded quote can never disagree.
     pub(crate) fn emit_side(
@@ -380,7 +375,7 @@ impl GueantScale {
         side: QuoteSide,
         estimate: Option<SideEstimate>,
     ) -> Option<Price> {
-        let estimate = estimate.filter(|estimate| !estimate.is_stale)?;
+        let estimate = fresh(estimate)?;
         let half_spread_ticks = self.half_spread_bps * self.ticks_per_bp;
         let a_mid_per_sec = estimate.a_mid_per_sec(half_spread_ticks);
         let k_per_bp = estimate.k_per_tick * self.ticks_per_bp;
@@ -422,7 +417,6 @@ impl GueantScale {
     }
 }
 
-/// (A,k) pair or nothing. Stale = previous fit re-dated when too few decayed touches remain.
 pub(crate) fn emit_side_intensity(
     ctx: &mut StrategyCtx<'_>,
     columns: IntensityColumns,
@@ -431,7 +425,7 @@ pub(crate) fn emit_side_intensity(
     ticks_per_bp: Option<f64>,
 ) {
     let IntensityColumns { a, k } = columns;
-    let Some(estimate) = side.filter(|estimate| !estimate.is_stale) else {
+    let Some(estimate) = fresh(side) else {
         return;
     };
     ctx.emit(a, instrument, estimate.a_per_sec);

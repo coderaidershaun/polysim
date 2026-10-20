@@ -21,7 +21,8 @@ use polysim::ids::{AssetId, ClientOrderId, FIXED_SCALE, InstrumentId, Price, Qty
 use polysim::link::{OutboundLink, RunState};
 use polysim::log::LogRecord;
 use polysim::msg::exec::{
-    ExecEvent, ExecKind, ExecLaneItem, Liquidity, Provenance, VenueOrderStatus,
+    ACCOUNT_CHUNK_ASSETS, AccountChunk, AccountChunkKind, AssetBalance, ExecEvent, ExecKind,
+    ExecLaneItem, Liquidity, Provenance, VenueOrderStatus,
 };
 use polysim::msg::inbound::{
     BOOK_CHUNK_LEVELS, BookChunk, BookChunkKind, BookReset, InboundMessage, KlineEvent, Level,
@@ -358,9 +359,7 @@ pub const NOMINAL_SPIN: DurationUs = DurationUs::from_micros(100_000);
 
 /// These tests assert on what the strategy sees from the very first message, so they opt out of
 /// warmup rather than inherit the config default and silently assert on a suppressed prefix.
-/// `warmup_suppresses_callbacks_by_message_time` covers the suppressing engine. The UI sinks are
-/// wired to internal rings whose consumers are dropped: a caller that ignores the UI feed still
-/// exercises the emission path, which fills then drops-and-counts (never a hot-thread stall).
+/// `warmup_suppresses_callbacks_by_message_time` covers the suppressing engine.
 pub fn engine_without_warmup(
     instruments: &[InstrumentRow],
     strategy: Box<dyn Strategy>,
@@ -368,21 +367,16 @@ pub fn engine_without_warmup(
     strategy_log_sink: StrategyLogSink,
     metrics_sink: MetricsSink,
 ) -> HotEngine {
-    let (ui_book_sink, _ui_books) = ui_book_ring(UI_BOOK_RING_CAPACITY);
-    let (ui_event_sink, _ui_events) = ui_event_ring(UI_EVENT_RING_CAPACITY);
-    HotEngine::new(HotEngineSetup {
-        exec: None,
-        exposure: detached_exposure(),
+    ui_engine(
         instruments,
         strategy,
-        persistence: Some(persistence),
+        Some(persistence),
         strategy_log_sink,
         metrics_sink,
-        ui_book_sink,
-        ui_event_sink,
-        link: None,
-        warmup: DurationUs::ZERO,
-    })
+        DurationUs::ZERO,
+        None,
+    )
+    .0
 }
 
 /// The persistence-off configuration: no output ring exists at all, so a caller has nothing to
@@ -393,21 +387,16 @@ pub fn engine_without_persistence(
     strategy_log_sink: StrategyLogSink,
     metrics_sink: MetricsSink,
 ) -> HotEngine {
-    let (ui_book_sink, _ui_books) = ui_book_ring(UI_BOOK_RING_CAPACITY);
-    let (ui_event_sink, _ui_events) = ui_event_ring(UI_EVENT_RING_CAPACITY);
-    HotEngine::new(HotEngineSetup {
-        exec: None,
-        exposure: detached_exposure(),
+    ui_engine(
         instruments,
         strategy,
-        persistence: None,
+        None,
         strategy_log_sink,
         metrics_sink,
-        ui_book_sink,
-        ui_event_sink,
-        link: None,
-        warmup: DurationUs::ZERO,
-    })
+        DurationUs::ZERO,
+        None,
+    )
+    .0
 }
 
 /// Like [`engine_without_warmup`] but keeps the UI feed consumers so a test can reconstruct the
@@ -424,7 +413,7 @@ pub fn engine_with_ui(
     ui_engine(
         instruments,
         strategy,
-        persistence,
+        Some(persistence),
         strategy_log_sink,
         metrics_sink,
         warmup,
@@ -457,7 +446,7 @@ pub fn engine_with_ui_and_exec(
     let (engine, ui_books, ui_events) = ui_engine(
         instruments,
         strategy,
-        persistence,
+        Some(persistence),
         strategy_log_sink,
         metrics_sink,
         DurationUs::ZERO,
@@ -469,7 +458,7 @@ pub fn engine_with_ui_and_exec(
 fn ui_engine(
     instruments: &[InstrumentRow],
     strategy: Box<dyn Strategy>,
-    persistence: PersistWiring,
+    persistence: Option<PersistWiring>,
     strategy_log_sink: StrategyLogSink,
     metrics_sink: MetricsSink,
     warmup: DurationUs,
@@ -479,16 +468,13 @@ fn ui_engine(
     let (ui_event_sink, ui_events) = ui_event_ring(UI_EVENT_RING_CAPACITY);
     let engine = HotEngine::new(HotEngineSetup {
         exec,
-        exposure: detached_exposure(),
-        instruments,
-        strategy,
-        persistence: Some(persistence),
+        persistence,
         strategy_log_sink,
         metrics_sink,
         ui_book_sink,
         ui_event_sink,
-        link: None,
         warmup,
+        ..detached_setup(instruments, strategy)
     });
     (engine, ui_books, ui_events)
 }
@@ -520,27 +506,18 @@ pub fn engine_with_link(setup: LinkedSetup<'_>) -> LinkedEngine {
         warmup,
     } = setup;
     let (persistence, persist) = persist_ring_for(1024, tables);
-    let (strategy_log_sink, _logs) = strategy_log_ring(64);
-    let (metrics_sink, _metrics) = metrics_ring(64);
-    let (ui_book_sink, _ui_books) = ui_book_ring(UI_BOOK_RING_CAPACITY);
-    let (ui_event_sink, _ui_events) = ui_event_ring(UI_EVENT_RING_CAPACITY);
     let (link_producer, outbound) = RingBuffer::<OutboundLink>::new(256);
     let control = RunControlGate::new();
     let engine = HotEngine::new(HotEngineSetup {
-        exec: None,
-        exposure: detached_exposure(),
-        instruments,
-        strategy,
         persistence: Some(persistence),
-        strategy_log_sink,
-        metrics_sink,
-        ui_book_sink,
-        ui_event_sink,
+        ui_book_sink: ui_book_ring(UI_BOOK_RING_CAPACITY).0,
+        ui_event_sink: ui_event_ring(UI_EVENT_RING_CAPACITY).0,
         link: Some(LinkWiring {
             sink: LinkSink::new(link_producer),
             acknowledged: control.acknowledged().clone(),
         }),
         warmup,
+        ..detached_setup(instruments, strategy)
     });
     LinkedEngine {
         engine,
@@ -625,20 +602,37 @@ pub fn ui_event_ring(capacity: usize) -> (UiEventSink, Consumer<UiEvent>) {
 }
 
 /// The exposure ring, mirroring [`metrics_ring`]. Keep the consumer to read the cost basis the
-/// engine publishes; [`detached_exposure`] is the shape for a test that does not.
+/// engine publishes; [`detached_setup`] is the shape for a test that does not.
 pub fn exposure_ring(capacity: usize) -> (ExposureSink, Consumer<ExposureSnapshot>) {
     let (producer, consumer) = RingBuffer::<ExposureSnapshot>::new(capacity);
     (ExposureSink::new(producer), consumer)
 }
 
-/// Exposure wiring for a test that is about something else: no restored position, and a ring whose
-/// consumer is dropped here. The sink's destructor sees an abandoned ring and returns at once rather
-/// than waiting out its flush budget, so ignoring exposure costs a test nothing.
-pub fn detached_exposure() -> ExposureWiring<'static> {
-    let (sink, _snapshots) = exposure_ring(16);
-    ExposureWiring {
-        restored: &[],
-        sink,
+/// An engine wired to nothing: no venue, persistence, link or warmup, no restored position, and
+/// every output ring's consumer dropped. A caller that ignores an output still exercises the code
+/// that writes it, which fills the ring and then drops and counts, never stalling the hot thread.
+/// The exposure sink's destructor sees its abandoned ring and returns at once rather than waiting
+/// out its flush budget, so ignoring exposure costs a test nothing. A test overrides only the
+/// fields it is about.
+pub fn detached_setup(
+    instruments: &[InstrumentRow],
+    strategy: Box<dyn Strategy>,
+) -> HotEngineSetup<'_> {
+    HotEngineSetup {
+        instruments,
+        strategy,
+        persistence: None,
+        strategy_log_sink: strategy_log_ring(64).0,
+        metrics_sink: metrics_ring(64).0,
+        ui_book_sink: ui_book_ring(64).0,
+        ui_event_sink: ui_event_ring(256).0,
+        link: None,
+        warmup: DurationUs::ZERO,
+        exec: None,
+        exposure: ExposureWiring {
+            restored: &[],
+            sink: exposure_ring(16).0,
+        },
     }
 }
 
@@ -770,6 +764,39 @@ pub fn exec_event(
         recon_seq: 0,
         exchange_ts_us: ts(when),
         request_sent_ts_us: None,
+        received_ts_us: ts(when),
+        queued_ts_us: ts(when),
+    }
+}
+
+pub fn stream_ready(instrument: InstrumentId, when: i64) -> InboundMessage {
+    InboundMessage::Exec(ExecEvent {
+        kind: ExecKind::StreamReady,
+        ..exec_event(instrument, ClientOrderId(0), Side::Buy, 0, when)
+    })
+}
+
+/// A whole-account snapshot in one chunk with nothing locked, all three stamps at `when`.
+pub fn account_chunk(balances: &[(AssetId, i64)], when: i64) -> AccountChunk {
+    let mut slots = [AssetBalance {
+        asset: AssetId::UNKNOWN,
+        free: 0,
+        locked: 0,
+    }; ACCOUNT_CHUNK_ASSETS];
+    for (slot, &(asset, free)) in balances.iter().enumerate() {
+        slots[slot] = AssetBalance {
+            asset,
+            free,
+            locked: 0,
+        };
+    }
+    AccountChunk {
+        kind: AccountChunkKind::Snapshot,
+        balances: slots,
+        len: u8::try_from(balances.len()).expect("a chunk holds a handful of balances"),
+        is_last_chunk: true,
+        venue_update_ts_ms: 1,
+        exchange_ts_us: ts(when),
         received_ts_us: ts(when),
         queued_ts_us: ts(when),
     }

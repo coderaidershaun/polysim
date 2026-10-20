@@ -18,9 +18,10 @@ use polysim::hot::exec::{ExecSettings, LossVerdict, SessionPnl, assess_loss};
 use polysim::ids::{InstrumentId, Qty, Side};
 use polysim::msg::inbound::InboundMessage;
 
-use crate::engine_support::{FillPen, Idle, ONE, instrument_row, pop, rotation, spin};
-use crate::risk_gate::{
+use crate::engine_support::{FillPen, Idle, ONE, instrument_row, pop, rotation};
+use crate::exec_support::{
     QuotingEngine, QuotingSetup, built_quoting_engine, exec_settings, has_halted, reseat_book,
+    spin_at,
 };
 
 /// The shipped config's budget, at the shipped scale.
@@ -203,12 +204,6 @@ fn dispatch_all(fixture: &mut QuotingEngine, messages: &[InboundMessage]) {
     }
 }
 
-fn spin_at(fixture: &mut QuotingEngine, seq: u64, when: i64) {
-    fixture
-        .engine
-        .dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(seq, when)));
-}
-
 /// FITNESS: a round trip that loses more than the budget and leaves one mantissa behind HALTS. The
 /// risk is a gate that tests `signum() == 0`: the residue would read as an open position, the
 /// verdict would downgrade to a side restriction, and the budget would stop being a kill switch for
@@ -217,7 +212,7 @@ fn spin_at(fixture: &mut QuotingEngine, seq: u64, when: i64) {
 fn a_round_trip_that_breaches_the_budget_halts_even_holding_dust() {
     let mut fixture = fixture(BUDGET);
     dispatch_all(&mut fixture, &reseat_book(99 * ONE, 101 * ONE, 0));
-    spin_at(&mut fixture, 0, 10);
+    spin_at(&mut fixture.engine, 0, 10);
     assert!(
         !has_halted(&mut fixture.commands),
         "nothing has traded yet, so nothing may have tripped"
@@ -229,7 +224,7 @@ fn a_round_trip_that_breaches_the_budget_halts_even_holding_dust() {
     dispatch_all(&mut fixture, &pen.fill(Side::Buy, 100 * ONE, ONE, 20));
     dispatch_all(&mut fixture, &reseat_book(89 * ONE, 91 * ONE, 30));
     dispatch_all(&mut fixture, &pen.fill(Side::Sell, 90 * ONE, ONE - 1, 40));
-    spin_at(&mut fixture, 1, 50);
+    spin_at(&mut fixture.engine, 1, 50);
 
     assert!(
         has_halted(&mut fixture.commands),
@@ -246,13 +241,13 @@ fn a_round_trip_that_breaches_the_budget_halts_even_holding_dust() {
 fn an_unrealised_loss_of_the_same_size_does_not_halt() {
     let mut fixture = fixture(BUDGET);
     dispatch_all(&mut fixture, &reseat_book(99 * ONE, 101 * ONE, 0));
-    spin_at(&mut fixture, 0, 10);
+    spin_at(&mut fixture.engine, 0, 10);
 
     let mut pen = FillPen::new(0);
     dispatch_all(&mut fixture, &pen.fill(Side::Buy, 100 * ONE, ONE, 20));
     // The mark alone falls to 90 — no second fill, so nothing is closed and nothing is banked.
     dispatch_all(&mut fixture, &reseat_book(89 * ONE, 91 * ONE, 30));
-    spin_at(&mut fixture, 1, 40);
+    spin_at(&mut fixture.engine, 1, 40);
 
     assert!(
         !has_halted(&mut fixture.commands),
@@ -281,7 +276,7 @@ fn halts_after_restoring(
             when += 10;
         }
     }
-    spin_at(&mut fixture, 0, when);
+    spin_at(&mut fixture.engine, 0, when);
     has_halted(&mut fixture.commands)
 }
 
@@ -430,7 +425,7 @@ fn losses_realised_before_a_rotation_still_count_against_the_budget() {
     // realised leg.
     dispatch_all(&mut fixture, &pen.fill(Side::Buy, 100 * ONE, ONE, 10));
     dispatch_all(&mut fixture, &pen.fill(Side::Sell, 97 * ONE, ONE, 20));
-    spin_at(&mut fixture, 0, 30);
+    spin_at(&mut fixture.engine, 0, 30);
     assert!(
         !has_halted(&mut fixture.commands),
         "three units lost against a budget of five is inside it"
@@ -439,7 +434,7 @@ fn losses_realised_before_a_rotation_still_count_against_the_budget() {
     rotate(&mut fixture, 40);
     dispatch_all(&mut fixture, &pen.fill(Side::Buy, 100 * ONE, ONE, 50));
     dispatch_all(&mut fixture, &pen.fill(Side::Sell, 97 * ONE, ONE, 60));
-    spin_at(&mut fixture, 1, 70);
+    spin_at(&mut fixture.engine, 1, 70);
 
     assert!(
         has_halted(&mut fixture.commands),
@@ -463,14 +458,14 @@ fn a_rotation_does_not_leave_a_stale_baseline_reading_as_a_loss() {
     // cannot be taken until the position is already held: the baseline is +10, not zero.
     dispatch_all(&mut fixture, &pen.fill(Side::Buy, 90 * ONE, ONE, 10));
     dispatch_all(&mut fixture, &reseat_book(99 * ONE, 101 * ONE, 20));
-    spin_at(&mut fixture, 0, 30);
+    spin_at(&mut fixture.engine, 0, 30);
     assert!(
         !has_halted(&mut fixture.commands),
         "a position ten units in profit has breached nothing"
     );
 
     rotate(&mut fixture, 40);
-    spin_at(&mut fixture, 1, 50);
+    spin_at(&mut fixture.engine, 1, 50);
     assert!(
         !has_halted(&mut fixture.commands),
         "the position and its profit were erased together, so the difference between them is not a \
@@ -480,7 +475,7 @@ fn a_rotation_does_not_leave_a_stale_baseline_reading_as_a_loss() {
     // And the gate is silenced, not disarmed: a real loss on the new window still kills the run.
     dispatch_all(&mut fixture, &pen.fill(Side::Buy, 100 * ONE, ONE, 60));
     dispatch_all(&mut fixture, &pen.fill(Side::Sell, 94 * ONE, ONE, 70));
-    spin_at(&mut fixture, 2, 80);
+    spin_at(&mut fixture.engine, 2, 80);
     assert!(
         has_halted(&mut fixture.commands),
         "six units realised on the new window is past the budget however clean the slate was"

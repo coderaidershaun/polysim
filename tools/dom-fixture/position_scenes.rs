@@ -2,12 +2,12 @@
 
 use polysim::desktop::chart_model::{BookContinuity, ChartModel};
 use polysim::desktop::position_chart_model::PositionModel;
-use polysim::ids::{AssetId, FIXED_SCALE, InstrumentId, Price, Qty, Side};
-use polysim::msg::exec::Liquidity;
-use polysim::msg::inbound::Level;
-use polysim::msg::ui::{UI_BOOK_LEVELS, UiBookSnapshot, UiBookState, UiEvent};
+use polysim::ids::{FIXED_SCALE, InstrumentId, Price, Qty, Side};
+use polysim::msg::ui::{UiBookState, UiEvent};
 use polysim::time::DurationUs;
 use polysim::time::TsUs;
+
+use crate::fixture::{self, BASE_TS, INSTRUMENT, book, px, unit};
 
 const SPIN: DurationUs = DurationUs::from_micros(1_000_000);
 const WINDOW_BUCKETS: i64 = 300;
@@ -15,10 +15,6 @@ const WINDOW_BUCKETS: i64 = 300;
 const COMMITS_PER_BUCKET: i64 = 2;
 
 const TICK: Price = Price(FIXED_SCALE);
-const INSTRUMENT: InstrumentId = InstrumentId(0);
-
-/// Realistic epoch -> f64 norm before f32.
-const BASE_TS: i64 = 1_753_300_000_000_000;
 
 /// BTC scale: $1 = 1 tick.
 const BASE_BID: i64 = 65_990;
@@ -239,18 +235,13 @@ impl Feed {
             }
         }
         self.seq += 1;
-        self.chart.apply_event(&UiEvent::Fill {
-            instrument: INSTRUMENT,
-            seq: self.seq,
-            event_ts_us: TsUs::from_micros(self.at(step, 0)),
+        self.chart.apply_event(&fixture::fill(
+            self.seq,
+            self.at(step, 0),
             side,
             price,
-            qty: ORDER_QTY,
-            commission: 0,
-            commission_asset: AssetId(1),
-            liquidity: Some(Liquidity::Maker),
-            quote_level: None,
-        });
+            ORDER_QTY,
+        ));
     }
 
     /// Window handover resets position, no emit until re-mark.
@@ -274,8 +265,11 @@ impl Feed {
 
     fn commit(&mut self, micros: i64, bid: i64) {
         self.seq += 1;
-        self.chart
-            .apply_book(&snapshot(self.seq, micros, bid), BookContinuity::Continuous);
+        let (bids, asks) = ([unit(bid)], [unit(bid + 2)]);
+        self.chart.apply_book(
+            &book(self.seq, micros, UiBookState::Valid, &bids, &asks),
+            BookContinuity::Continuous,
+        );
     }
 
     fn finish(self, name: &'static str, check: &'static str) -> PositionScene {
@@ -304,35 +298,4 @@ fn wave(step: i64, period: i64, amplitude: i64) -> i64 {
     let phase = step.rem_euclid(period);
     let rise = phase.min(period - phase);
     rise * amplitude * 4 / period - amplitude
-}
-
-fn snapshot(seq: u64, micros: i64, bid: i64) -> UiBookSnapshot {
-    let empty = Level {
-        price: Price(0),
-        qty: Qty(0),
-    };
-    let mut bids = [empty; UI_BOOK_LEVELS];
-    let mut asks = [empty; UI_BOOK_LEVELS];
-    bids[0] = Level {
-        price: px(bid),
-        qty: Qty(FIXED_SCALE),
-    };
-    asks[0] = Level {
-        price: px(bid + 2),
-        qty: Qty(FIXED_SCALE),
-    };
-    UiBookSnapshot {
-        instrument: INSTRUMENT,
-        seq,
-        event_ts_us: TsUs::from_micros(micros),
-        state: UiBookState::Valid,
-        bid_len: 1,
-        ask_len: 1,
-        bids,
-        asks,
-    }
-}
-
-fn px(tick_index: i64) -> Price {
-    Price(tick_index * FIXED_SCALE)
 }

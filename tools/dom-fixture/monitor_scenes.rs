@@ -21,12 +21,7 @@ fn full() -> MonitorScene {
     feed.lifecycle(SystemNote::Ready);
 
     // Reset -> System carries transitions.
-    feed.book(
-        UiBookState::Valid,
-        1_000_000,
-        &[(65990, 640)],
-        &[(65994, 512)],
-    );
+    restate_touch(&mut feed, UiBookState::Valid, 1_000_000);
 
     feed.feature(2, 1_000_000, 2.0000);
     feed.feature(3, 1_000_000, 0.7431);
@@ -42,12 +37,7 @@ fn full() -> MonitorScene {
     feed.feature(1, 600_000, 42.0000);
 
     feed.trade(1_100_000, Side::Buy, 65994, 512);
-    feed.book(
-        UiBookState::AwaitingSnapshot,
-        1_100_000,
-        &[(65990, 640)],
-        &[(65994, 512)],
-    );
+    restate_touch(&mut feed, UiBookState::AwaitingSnapshot, 1_100_000);
     // Confirmed bid + in-flight ask: two distinguishable states on screen together.
     feed.order(1_200_000, 1, Side::Buy, 65990, OrderState::Live);
     feed.order(1_200_000, 2, Side::Sell, 65995, OrderState::PendingNew);
@@ -56,12 +46,7 @@ fn full() -> MonitorScene {
     // Changed feature: re-emitted with different value at freshest time.
     feed.feature(0, 1_290_000, -0.5000);
     feed.feature(0, 1_300_000, -0.8000);
-    feed.book(
-        UiBookState::Valid,
-        1_300_000,
-        &[(65990, 640)],
-        &[(65994, 512)],
-    );
+    restate_touch(&mut feed, UiBookState::Valid, 1_300_000);
     feed.quote(1_300_000, Some(65990), Some(65995));
 
     feed.fill(1_260_000, Side::Buy, 65990, QUOTE_QTY_MILLI);
@@ -91,16 +76,15 @@ fn full() -> MonitorScene {
     feed.finish("full live monitor", FULL_FEATURES, MonitorUiState::new())
 }
 
+fn restate_touch(feed: &mut Feed, state: UiBookState, ts: i64) {
+    feed.book(state, ts, &[(65990, 640)], &[(65994, 512)]);
+}
+
 /// Warmup: all values —.
 fn warmup() -> MonitorScene {
     let mut feed = Feed::new(1, FULL_FEATURES.len());
     feed.lifecycle(SystemNote::Starting);
-    feed.book(
-        UiBookState::AwaitingSnapshot,
-        1_000_000,
-        &[(65990, 640)],
-        &[(65994, 512)],
-    );
+    restate_touch(&mut feed, UiBookState::AwaitingSnapshot, 1_000_000);
     feed.finish(
         "warmup — all cells --",
         FULL_FEATURES,
@@ -112,12 +96,7 @@ fn warmup() -> MonitorScene {
 fn long_values() -> MonitorScene {
     let mut feed = Feed::new(1, LONG_FEATURES.len());
     feed.lifecycle(SystemNote::Ready);
-    feed.book(
-        UiBookState::Valid,
-        1_000_000,
-        &[(65990, 640)],
-        &[(65994, 512)],
-    );
+    restate_touch(&mut feed, UiBookState::Valid, 1_000_000);
     feed.feature(0, 1_000_000, 99999999.9999);
     feed.feature(1, 1_000_000, -12345678.5000);
     feed.feature(2, 1_000_000, f64::INFINITY);

@@ -15,11 +15,12 @@ use polysim::link::{
     CatalogFeature, CatalogInstrument, Envelope, FrameGuard, GateVerdict, Lifecycle, LinkBody,
     LinkDatagram, LinkHash, LinkIdentity, RunPhase, RunState, SequenceGate, TopicId, WireName,
 };
-use polysim::msg::inbound::Level;
 use polysim::msg::persist::FeatureId;
-use polysim::msg::ui::{UI_BOOK_LEVELS, UiBookSnapshot, UiBookState, UiEvent};
+use polysim::msg::ui::{UiBookSnapshot, UiBookState, UiEvent};
 use polysim::time::{DurationUs, TsUs};
 use proptest::prelude::*;
+
+use crate::desktop_support::BookFixture;
 
 const CATALOG_EPOCH: TsUs = TsUs::from_micros(1_700_000_000_000_000);
 const SPIN_INTERVAL: DurationUs = DurationUs::from_micros(1_000_000);
@@ -292,27 +293,14 @@ fn totals_validation_cases() {
 }
 
 fn book_snapshot(seq: u64, best_bid: i64) -> UiBookSnapshot {
-    let mut bids = [Level {
-        price: Price(0),
-        qty: Qty(0),
-    }; UI_BOOK_LEVELS];
-    bids[0] = Level {
-        price: Price(best_bid),
-        qty: Qty(1_000),
-    };
-    UiBookSnapshot {
-        instrument: InstrumentId(0),
+    crate::desktop_support::book_snapshot(BookFixture {
+        instrument: 0,
         seq,
-        event_ts_us: TsUs::from_micros(seq as i64 * 1_000),
+        event_ts: seq as i64 * 1_000,
         state: UiBookState::Valid,
-        bid_len: 1,
-        ask_len: 0,
-        bids,
-        asks: [Level {
-            price: Price(0),
-            qty: Qty(0),
-        }; UI_BOOK_LEVELS],
-    }
+        bids: &[(best_bid, 1_000)],
+        asks: &[],
+    })
 }
 
 fn trade_event(seq: u64) -> UiEvent {

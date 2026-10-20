@@ -92,34 +92,16 @@ pub fn chart_book(
     bids: &[i64],
     asks: &[i64],
 ) -> UiBookSnapshot {
-    let empty = Level {
-        price: Price(0),
-        qty: Qty(0),
-    };
-    let mut bid_levels = [empty; UI_BOOK_LEVELS];
-    let mut ask_levels = [empty; UI_BOOK_LEVELS];
-    for (slot, &price) in bid_levels.iter_mut().zip(bids) {
-        *slot = Level {
-            price: Price(price),
-            qty: Qty(1),
-        };
-    }
-    for (slot, &price) in ask_levels.iter_mut().zip(asks) {
-        *slot = Level {
-            price: Price(price),
-            qty: Qty(1),
-        };
-    }
-    UiBookSnapshot {
-        instrument: InstrumentId(instrument),
+    let unit_qty =
+        |prices: &[i64]| -> Vec<(i64, i64)> { prices.iter().map(|&price| (price, 1)).collect() };
+    book_snapshot(BookFixture {
+        instrument,
         seq: 0,
-        event_ts_us: at(bucket),
+        event_ts: at(bucket).micros(),
         state,
-        bid_len: bids.len() as u16,
-        ask_len: asks.len() as u16,
-        bids: bid_levels,
-        asks: ask_levels,
-    }
+        bids: &unit_qty(bids),
+        asks: &unit_qty(asks),
+    })
 }
 
 pub fn valid_book(instrument: u16, bucket: u64, bid: i64, ask: i64) -> UiBookSnapshot {

@@ -1,4 +1,5 @@
-//! Link schema both trading engines must agree on. #[path]-included from both strategy.rs.
+//! What both trading engines must agree on: the link schema, and which intensity fits are fresh
+//! enough to record or publish. Each engine's strategy.rs includes this file by path.
 //! The LINK_FIELDS digest is the schema_hash carried on every frame, so any drift between the two
 //! sides makes the receiver reject every frame.
 //!
@@ -12,6 +13,8 @@
 //!
 //! `_bid`/`_ask` on the intensity fields follow the engine's convention — a sell aggressor hits the
 //! bid, so bid intensity is fitted from sells.
+
+use polysim::hot::quant::intensity::SideEstimate;
 
 polysim::link_schema! {
     /// One up leg's published slots, in the order they ride the wire within their block.
@@ -63,3 +66,9 @@ polysim::link_schema! {
 
 /// Topic names in id-assignment order.
 pub(crate) const LINK_TOPICS: &[&str] = &["poly_up"];
+
+/// A stale fit is a previous one re-dated: recording or publishing it would date a dead market's
+/// liquidity to now.
+pub(crate) fn fresh(fit: Option<SideEstimate>) -> Option<SideEstimate> {
+    fit.filter(|estimate| !estimate.is_stale)
+}

@@ -16,15 +16,12 @@ use polysim::hot::quant::intensity::{IntensityFit, PacedIntensity};
 use polysim::hot::tracker::MicroTracker;
 use polysim::ids::{InstrumentId, Price, Qty, Side};
 use polysim::msg::inbound::{BOOK_CHUNK_LEVELS, BookChunk, BookChunkKind, Level, TradeEvent};
-use polysim::time::TsUs;
+
+use crate::engine_support::ts;
 
 const TICK: Price = Price(10);
 const ASK: Price = Price(100_000);
 const BID: Price = Price(ASK.0 - TICK.0);
-
-fn ts(us: i64) -> TsUs {
-    TsUs::from_micros(us)
-}
 
 fn snapshot_chunk(side: Side, price: Price, is_last_chunk: bool) -> BookChunk {
     let mut levels = [Level {

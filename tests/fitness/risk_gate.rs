@@ -6,43 +6,27 @@
 //! the fills can see that. The engine's own ceiling and its consecutive-reject kill switch live here
 //! too, because they are the controls a strategy bug cannot bypass.
 
-use polysim::adapters::exec::open_orders_snapshot_end;
-use polysim::config::{RecordedTables, TrackerSpec};
+use polysim::config::RecordedTables;
 use polysim::exposure::InstrumentExposure;
-use polysim::hot::dispatch::{ExecWiring, ExposureWiring, HotEngine, HotEngineSetup};
+use polysim::hot::dispatch::HotEngine;
 use polysim::hot::exec::{
-    ClientIdLayout, DesiredQuote, ExecHalt, ExecLimits, ExecSettings, ExposureCheck, FeeModel,
-    HaltReason, OrderBudget, QuoteLevel, QuotePermission, assess_exposure, side_base,
+    ClientIdLayout, ExecHalt, ExposureCheck, HaltReason, QuotePermission, assess_exposure,
+    side_base,
 };
-use polysim::hot::strategy::{Strategy, StrategyCtx};
-use polysim::ids::{AssetId, ClientOrderId, InstrumentId, Price, Qty, Side};
-use polysim::msg::exec::{
-    AccountChunk, AccountChunkKind, AssetBalance, CancelReason, ExecCommand, ExecEvent, ExecKind,
-    ExecLaneItem, OrderStyle, RejectClass, VenueOrderStatus,
-};
-use polysim::msg::inbound::{InboundMessage, SpinTick};
+use polysim::ids::{Price, Qty, Side};
+use polysim::msg::exec::{ExecCommand, ExecEvent, ExecKind, RejectClass, VenueOrderStatus};
+use polysim::msg::inbound::InboundMessage;
 use polysim::msg::ui::UiEvent;
-use polysim::registry::InstrumentRow;
-use polysim::sink::ExecSink;
-use polysim::time::DurationUs;
 use proptest::prelude::*;
-use rtrb::{Consumer, RingBuffer};
+use rtrb::Consumer;
 
-use crate::engine_support::{
-    ALL_TABLES, ONE, book_reset, exec_event, exposure_ring, instrument_row, metrics_ring,
-    persist_ring_for, pop, snapshot_pair, spin, strategy_log_ring, ts, ui_book_ring, ui_event_ring,
+use crate::engine_support::{ALL_TABLES, ONE, exec_event, pop};
+use crate::exec_support::{
+    ASK, BID, CEILING, INSTRUMENT, QUOTE_QTY, QuotingEngine, QuotingSetup, TwoSidedQuoter,
+    built_quoting_engine, drain_commands, exec_settings, has_halted, is_placing, make_ready,
+    quoting_engine, reseat_book, row_with_ceiling, spin_at,
 };
 use crate::micro_strategy::models::{RiskBudget, signed};
-
-/// Drop the book and restate it whole, so the mark moves with no transient crossing to reason about.
-pub(crate) fn reseat_book(bid: i64, ask: i64, when: i64) -> [InboundMessage; 3] {
-    let (bids, asks) = snapshot_pair(0, &[(bid, ONE)], &[(ask, ONE)], when);
-    [
-        InboundMessage::BookReset(book_reset(0, when)),
-        InboundMessage::Book(bids),
-        InboundMessage::Book(asks),
-    ]
-}
 
 proptest! {
     /// FITNESS: whatever the exposure, at least one side is always quotable. This is the deadlock
@@ -99,20 +83,7 @@ proptest! {
     }
 }
 
-pub(crate) const INSTRUMENT: InstrumentId = InstrumentId(0);
-const BASE_ASSET: AssetId = AssetId(0);
-const QUOTE_ASSET: AssetId = AssetId(1);
-
-/// Small enough that ONE whole base unit marked at the prices below sits exactly on it, so every
-/// scenario reaches the boundary rather than a comfortable interior.
-pub(crate) const CEILING: i64 = 100 * ONE;
-
-/// The declared size, and the number the "real notional, not a fixed step" pin turns on.
-pub(crate) const QUOTE_QTY: Qty = Qty(ONE / 10);
-
-pub(crate) const BID: i64 = 99 * ONE;
-pub(crate) const ASK: i64 = 101 * ONE;
-/// The mid of the book above, which is what the ledger marks against.
+/// The mid of `BID` and `ASK`, which is what the ledger marks against.
 const MARK: i64 = 100 * ONE;
 
 fn ceiling_check(side: Side, position_base: i64, has_mark: bool) -> ExposureCheck {
@@ -350,212 +321,6 @@ proptest! {
     }
 }
 
-/// Declares a resting quote on both sides at the touch, every spin — the level-triggered contract
-/// `ctx.quote` asks for. What the ENGINE does with those declarations is what the tests below read,
-/// and this strategy knows nothing about any ceiling: that is the point, since the gate under test
-/// is the one a strategy cannot opt out of.
-pub(crate) struct TwoSidedQuoter;
-
-impl Strategy for TwoSidedQuoter {
-    fn on_spin(&mut self, ctx: &mut StrategyCtx<'_>, _tick: &SpinTick) {
-        let book = ctx.book(INSTRUMENT);
-        let (Some(bid), Some(ask)) = (book.best_bid(), book.best_ask()) else {
-            return;
-        };
-        for (side, price) in [(Side::Buy, bid.price), (Side::Sell, ask.price)] {
-            ctx.quote(
-                INSTRUMENT,
-                side,
-                QuoteLevel::ZERO,
-                Some(DesiredQuote {
-                    price,
-                    qty: QUOTE_QTY,
-                    style: OrderStyle::PostOnly,
-                }),
-            );
-        }
-    }
-}
-
-pub(crate) fn row_with_ceiling(ceiling_quote: i64) -> InstrumentRow {
-    InstrumentRow {
-        max_exposure_quote: ceiling_quote,
-        ..instrument_row(0, TrackerSpec::default(), 64)
-    }
-}
-
-/// Every limit except the ceiling set so wide it cannot be what refuses a quote — a band, a stale
-/// book or a funds floor biting instead would read exactly like the gate under test working.
-pub(crate) fn exec_settings() -> ExecSettings {
-    ExecSettings {
-        limits: ExecLimits {
-            requote_threshold_ticks: 1,
-            max_quote_distance_centi_bps: 100_000_000,
-            max_book_age: DurationUs::from_secs(3_600),
-            max_order_notional_quote: 1_000_000 * ONE,
-        },
-        max_orders_per_side: 1,
-        min_base_balance: 0,
-        min_quote_balance: 0,
-        max_consecutive_rejects: 5,
-        max_session_loss_quote: 1_000_000 * ONE,
-        inflight_timeout: DurationUs::from_secs(3_600),
-        // No silence sweep: a reconciliation request in the command stream would be noise to filter
-        // rather than a behaviour these tests are about.
-        exec_silence_spins: u32::MAX,
-        order_reap_window: DurationUs::from_secs(3_600),
-        quote_stop_margin: DurationUs::ZERO,
-        flatten_slack_ticks: 0,
-        order_budget: OrderBudget::NONE,
-        fee_model: FeeModel::None,
-        taker_fee_rate: 0,
-        holds_reservations_until_settled: true,
-    }
-}
-
-/// What the engine builders below vary. A struct because the wrappers differ only in two of these
-/// and a positional list of four says nothing at the call site.
-pub(crate) struct QuotingSetup<'a> {
-    pub(crate) row: InstrumentRow,
-    /// What declares. Most callers want [`TwoSidedQuoter`]; the ones testing a declaration this
-    /// strategy cannot make bring their own.
-    pub(crate) strategy: Box<dyn Strategy>,
-    pub(crate) restored: &'a [InstrumentExposure],
-    pub(crate) settings: ExecSettings,
-    /// Which audit tables are banked. `Orders` is what makes an engine-driven transition — a sweep,
-    /// a timeout — observable at all: nothing else in the process records one.
-    pub(crate) tables: RecordedTables,
-    /// Run nonce encoded in client order IDs.
-    pub(crate) run_nonce: u32,
-}
-
-/// Every consumer the engine writes into. Handed back whole, and a wrapper that does not read one
-/// drops it — which is what a run with no workstation and no persistence does anyway.
-pub(crate) struct QuotingEngine {
-    pub(crate) engine: HotEngine,
-    pub(crate) commands: Consumer<ExecLaneItem>,
-    pub(crate) ui_events: Consumer<UiEvent>,
-}
-
-pub(crate) fn built_quoting_engine(setup: QuotingSetup<'_>) -> QuotingEngine {
-    let instruments = [setup.row];
-    let (persistence, _records) = persist_ring_for(1_024, setup.tables);
-    let (log_sink, _logs) = strategy_log_ring(64);
-    let (metrics, _metrics) = metrics_ring(64);
-    let (ui_book_sink, _ui_books) = ui_book_ring(64);
-    let (ui_event_sink, ui_events) = ui_event_ring(256);
-    let (commands_producer, commands) = RingBuffer::<ExecLaneItem>::new(256);
-    let (exposure_sink, _exposure) = exposure_ring(64);
-    let engine = HotEngine::new(HotEngineSetup {
-        instruments: &instruments,
-        strategy: setup.strategy,
-        persistence: Some(persistence),
-        strategy_log_sink: log_sink,
-        metrics_sink: metrics,
-        ui_book_sink,
-        ui_event_sink,
-        link: None,
-        warmup: DurationUs::ZERO,
-        exec: Some(ExecWiring {
-            sink: ExecSink::new(commands_producer),
-            settings: setup.settings,
-            run_nonce: setup.run_nonce,
-        }),
-        exposure: ExposureWiring {
-            restored: setup.restored,
-            sink: exposure_sink,
-        },
-    });
-    QuotingEngine {
-        engine,
-        commands,
-        ui_events,
-    }
-}
-
-pub(crate) fn quoting_engine_with_ui(
-    ceiling_quote: i64,
-    restored: &[InstrumentExposure],
-) -> (HotEngine, Consumer<ExecLaneItem>, Consumer<UiEvent>) {
-    let built = built_quoting_engine(QuotingSetup {
-        row: row_with_ceiling(ceiling_quote),
-        strategy: Box::new(TwoSidedQuoter),
-        restored,
-        settings: exec_settings(),
-        tables: RecordedTables::new(&ALL_TABLES),
-        run_nonce: 0,
-    });
-    (built.engine, built.commands, built.ui_events)
-}
-
-/// The same engine for a caller that reads only the command stream. Dropping the UI consumer is
-/// what a run with no workstation attached does anyway — the tee then fails and is counted.
-pub(crate) fn quoting_engine(
-    ceiling_quote: i64,
-    restored: &[InstrumentExposure],
-) -> (HotEngine, Consumer<ExecLaneItem>) {
-    let (engine, commands, _ui_events) = quoting_engine_with_ui(ceiling_quote, restored);
-    (engine, commands)
-}
-
-/// The three facts that must hold before ONE order may be sent: the stream is up, the open-order
-/// snapshot has landed, and balances are known. Without them nothing quotes and every assertion
-/// below would pass for the wrong reason.
-pub(crate) fn make_ready(engine: &mut HotEngine, when: i64) {
-    stream_and_balances(engine, when);
-    open_orders_snapshot(engine, when);
-}
-
-/// Two of the three legs. Split out so the resync test that withholds the third leg can prove
-/// it is load bearing: an engine that quotes without it would make the marker's absence
-/// undetectable.
-pub(crate) fn stream_and_balances(engine: &mut HotEngine, when: i64) {
-    engine.dispatch(
-        pop(0, 0),
-        &InboundMessage::Exec(ExecEvent {
-            kind: ExecKind::StreamReady,
-            ..exec_event(INSTRUMENT, ClientOrderId(0), Side::Buy, 0, when)
-        }),
-    );
-    let mut balances = [AssetBalance {
-        asset: AssetId::UNKNOWN,
-        free: 0,
-        locked: 0,
-    }; polysim::msg::exec::ACCOUNT_CHUNK_ASSETS];
-    balances[0] = AssetBalance {
-        asset: BASE_ASSET,
-        free: 10 * ONE,
-        locked: 0,
-    };
-    balances[1] = AssetBalance {
-        asset: QUOTE_ASSET,
-        free: 1_000_000 * ONE,
-        locked: 0,
-    };
-    engine.dispatch(
-        pop(0, 0),
-        &InboundMessage::Account(AccountChunk {
-            kind: AccountChunkKind::Snapshot,
-            balances,
-            len: 2,
-            is_last_chunk: true,
-            venue_update_ts_ms: 1,
-            exchange_ts_us: ts(when),
-            received_ts_us: ts(when),
-            queued_ts_us: ts(when),
-        }),
-    );
-}
-
-/// The third leg, built by the SAME constructor the Binance actor sends it with. A hand-built marker
-/// would let every readiness-dependent test stay green while production sent none.
-pub(crate) fn open_orders_snapshot(engine: &mut HotEngine, when: i64) {
-    engine.dispatch(
-        pop(0, 0),
-        &InboundMessage::Exec(open_orders_snapshot_end(INSTRUMENT, ts(when))),
-    );
-}
-
 /// One real fill through the inbound path: adopt the order from a reconciliation snapshot, then
 /// report it FULLY filled. Closing it matters — a side still holding a working order is blocked by
 /// the in-flight rule, and a test reading "no order placed" there would be reading that rule rather
@@ -585,29 +350,6 @@ fn fill_and_close(engine: &mut HotEngine, side: Side, price: i64, qty: i64, when
             ..base
         }),
     );
-}
-
-pub(crate) fn spin_at(engine: &mut HotEngine, seq: u64, when: i64) {
-    engine.dispatch(pop(0, 0), &InboundMessage::SpinTick(spin(seq, when)));
-}
-
-pub(crate) fn drain_commands(commands: &mut Consumer<ExecLaneItem>) -> Vec<ExecCommand> {
-    let mut drained = Vec::new();
-    while let Ok(item) = commands.pop() {
-        if let ExecLaneItem::Command(stamped) = item {
-            drained.push(stamped.command);
-        }
-    }
-    drained
-}
-
-/// Whether the engine asked the venue for a NEW order on this side — a placement either on its own
-/// or as the second leg of a replace, since both put a quote on the book.
-pub(crate) fn is_placing(commands: &[ExecCommand], wanted: Side) -> bool {
-    commands.iter().any(|command| match command {
-        ExecCommand::Place { side, .. } => *side == wanted,
-        _ => false,
-    })
 }
 
 /// The message sequence both engine-driven tests below share: come ready, take a long position by
@@ -840,20 +582,6 @@ fn refused_reject(when: i64) -> ExecEvent {
 
 fn dispatch_exec(engine: &mut HotEngine, event: ExecEvent) {
     engine.dispatch(pop(0, 0), &InboundMessage::Exec(event));
-}
-
-/// Whether the engine pulled every order it owns because a kill switch tripped. That command is what
-/// a halt DOES, so it is the honest way to observe one from outside.
-pub(crate) fn has_halted(commands: &mut Consumer<ExecLaneItem>) -> bool {
-    drain_commands(commands).iter().any(|command| {
-        matches!(
-            command,
-            ExecCommand::CancelOurs {
-                reason: CancelReason::Halt,
-                ..
-            }
-        )
-    })
 }
 
 /// The kill switch as the workstation was last told it. The engine restates it every spin, so the

@@ -1,14 +1,11 @@
 //! The engine, tape and readers the shipped recorder's seam tests share. Each test file owns its
 //! price level and lot step, because those are what its claim is about.
 
-use polysim::adapters::exec::open_orders_snapshot_end;
 use polysim::config::{IntensitySpec, KlineInterval, TableKind};
 use polysim::hot::dispatch::{ExecWiring, HotEngine, HotEngineSetup};
 use polysim::hot::strategy::StrategyConfig;
-use polysim::ids::{AssetId, ClientOrderId, InstrumentId, Price, Qty, Side};
-use polysim::msg::exec::{
-    AccountChunk, AccountChunkKind, AssetBalance, ExecCommand, ExecEvent, ExecKind, ExecLaneItem,
-};
+use polysim::ids::{AssetId, InstrumentId, Price, Qty, Side};
+use polysim::msg::exec::{ExecCommand, ExecLaneItem};
 use polysim::msg::inbound::InboundMessage;
 use polysim::msg::persist::PersistRecord;
 use polysim::registry::InstrumentRow;
@@ -17,13 +14,13 @@ use polysim::time::DurationUs;
 use rtrb::{Consumer, RingBuffer};
 
 use crate::engine_support::{
-    ONE, book_reset, delta_chunk, detached_exposure, engine_view, exec_event, instrument_row,
-    kline, metrics_ring, persist_ring, pop, recorder_spec, snapshot_pair, spin, strategy_log_ring,
-    tracker_spec_all, trade, ts, ui_book_ring, ui_event_ring,
+    ONE, account_chunk, book_reset, delta_chunk, detached_setup, engine_view, instrument_row,
+    kline, persist_ring, pop, recorder_spec, snapshot_pair, spin, stream_ready, tracker_spec_all,
+    trade, ui_event_ring,
 };
+use crate::exec_support::{drain_commands, exec_settings, open_orders_snapshot};
 use crate::micro_strategy::features::FEATURE_NAMES;
 use crate::micro_strategy::{MicroRecorder, MicroRecorderParams};
-use crate::risk_gate::exec_settings;
 
 const INSTRUMENT: InstrumentId = InstrumentId(0);
 const BASE_ASSET: AssetId = AssetId(0);
@@ -47,20 +44,15 @@ pub(crate) struct PlacedOrder {
 }
 
 pub(crate) fn drain_places(commands: &mut Consumer<ExecLaneItem>) -> Vec<PlacedOrder> {
-    let mut placed = Vec::new();
-    while let Ok(item) = commands.pop() {
-        let ExecLaneItem::Command(stamped) = item else {
-            continue;
-        };
-        let ExecCommand::Place {
-            side, price, qty, ..
-        } = stamped.command
-        else {
-            continue;
-        };
-        placed.push(PlacedOrder { side, price, qty });
-    }
-    placed
+    drain_commands(commands)
+        .into_iter()
+        .filter_map(|command| match command {
+            ExecCommand::Place {
+                side, price, qty, ..
+            } => Some(PlacedOrder { side, price, qty }),
+            _ => None,
+        })
+        .collect()
 }
 
 pub(crate) fn spin_columns(persist: &mut Consumer<PersistRecord>) -> Vec<(&'static str, f64)> {
@@ -84,75 +76,33 @@ pub(crate) fn recorder_engine(
     instruments: &[InstrumentRow],
 ) -> (HotEngine, Consumer<PersistRecord>, Consumer<ExecLaneItem>) {
     let (persistence, persist) = persist_ring(8_192);
-    let (log_sink, _logs) = strategy_log_ring(64);
-    let (metrics, _metrics) = metrics_ring(64);
-    let (ui_book_sink, _ui_books) = ui_book_ring(64);
-    let (ui_event_sink, _ui_events) = ui_event_ring(1_024);
     let (commands_producer, commands) = RingBuffer::<ExecLaneItem>::new(256);
     let spec = recorder_spec::<MicroRecorderParams>(vec![TableKind::Features]);
+    let strategy = Box::new(MicroRecorder::from_spec(&spec, engine_view(SPIN_INTERVAL)));
     let engine = HotEngine::new(HotEngineSetup {
-        instruments,
-        strategy: Box::new(MicroRecorder::from_spec(&spec, engine_view(SPIN_INTERVAL))),
         persistence: Some(persistence),
-        strategy_log_sink: log_sink,
-        metrics_sink: metrics,
-        ui_book_sink,
-        ui_event_sink,
-        link: None,
-        warmup: DurationUs::ZERO,
+        ui_event_sink: ui_event_ring(1_024).0,
         exec: Some(ExecWiring {
             sink: ExecSink::new(commands_producer),
             settings: exec_settings(),
             run_nonce: 0,
         }),
-        exposure: detached_exposure(),
+        ..detached_setup(instruments, strategy)
     });
     (engine, persist, commands)
 }
 
-/// Stream up, open orders known, balances known — without all three nothing is ever placed and every
-/// assertion below would pass for the wrong reason.
+/// The stream is up and the open orders and balances are known. Without all three nothing is ever
+/// placed, and every assertion after this call would pass for the wrong reason.
 pub(crate) fn make_ready(engine: &mut HotEngine, when: i64) {
+    engine.dispatch(pop(0, 0), &stream_ready(INSTRUMENT, when));
+    open_orders_snapshot(engine, when);
     engine.dispatch(
         pop(0, 0),
-        &InboundMessage::Exec(ExecEvent {
-            kind: ExecKind::StreamReady,
-            ..exec_event(INSTRUMENT, ClientOrderId(0), Side::Buy, 0, when)
-        }),
-    );
-    // The open-order marker comes from the constructor the Binance actor sends it with, never
-    // synthesised here: a hand-built one keeps these tests green while production emits nothing.
-    engine.dispatch(
-        pop(0, 0),
-        &InboundMessage::Exec(open_orders_snapshot_end(INSTRUMENT, ts(when))),
-    );
-    let mut balances = [AssetBalance {
-        asset: AssetId::UNKNOWN,
-        free: 0,
-        locked: 0,
-    }; polysim::msg::exec::ACCOUNT_CHUNK_ASSETS];
-    balances[0] = AssetBalance {
-        asset: BASE_ASSET,
-        free: 1_000 * ONE,
-        locked: 0,
-    };
-    balances[1] = AssetBalance {
-        asset: QUOTE_ASSET,
-        free: 1_000_000 * ONE,
-        locked: 0,
-    };
-    engine.dispatch(
-        pop(0, 0),
-        &InboundMessage::Account(AccountChunk {
-            kind: AccountChunkKind::Snapshot,
-            balances,
-            len: 2,
-            is_last_chunk: true,
-            venue_update_ts_ms: 1,
-            exchange_ts_us: ts(when),
-            received_ts_us: ts(when),
-            queued_ts_us: ts(when),
-        }),
+        &InboundMessage::Account(account_chunk(
+            &[(BASE_ASSET, 1_000 * ONE), (QUOTE_ASSET, 1_000_000 * ONE)],
+            when,
+        )),
     );
 }
 

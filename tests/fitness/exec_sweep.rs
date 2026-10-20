@@ -17,7 +17,7 @@ use polysim::time::TsUs;
 use rtrb::Consumer;
 
 use crate::engine_support::{ONE, exec_event, pop};
-use crate::risk_gate::{
+use crate::exec_support::{
     BID, CEILING, INSTRUMENT, QuotingEngine, QuotingSetup, TwoSidedQuoter, built_quoting_engine,
     drain_commands, exec_settings, make_ready, reseat_book, row_with_ceiling, spin_at,
 };
@@ -205,7 +205,7 @@ fn conservative_occupancy_above_the_cap_halts_and_sweeps() {
         ..
     } = sweeping_engine_with(exec_settings());
     make_ready(&mut engine, 0);
-    for message in reseat_book(BID, crate::risk_gate::ASK, 10) {
+    for message in reseat_book(BID, crate::exec_support::ASK, 10) {
         engine.dispatch(pop(0, 0), &message);
     }
 

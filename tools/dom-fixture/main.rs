@@ -1,6 +1,7 @@
 //! GUI harness: 50/25/25 split. Keys: 1-9 scene, arrows/sides, shortcut keys.
 
 mod chart_scenes;
+mod fixture;
 mod hud;
 mod monitor_feed;
 mod monitor_scenes;
@@ -34,7 +35,6 @@ fn main() -> eframe::Result {
         position_dump::dump();
         return Ok(());
     }
-    let selection = initial_selection();
     // Maximised + focused for screencapture -x.
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -49,7 +49,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "dom-fixture",
         options,
-        Box::new(move |_creation| Ok(Box::new(DomFixture::new(selection)))),
+        Box::new(|_creation| Ok(Box::new(DomFixture::new()))),
     )
 }
 
@@ -61,55 +61,87 @@ enum LeftPanel {
 }
 
 struct DomFixture {
-    scenes: Vec<Scene>,
-    scene: usize,
+    scenes: Panel<Scene>,
     variant: usize,
-    monitor_scenes: Vec<MonitorScene>,
-    monitor_scene: usize,
-    chart_scenes: Vec<ChartScene>,
-    chart_scene: usize,
+    monitors: Panel<MonitorScene>,
+    charts: Panel<ChartScene>,
     chart_mode: ChartMode,
-    position_scenes: Vec<PositionScene>,
-    position_scene: usize,
+    positions: Panel<PositionScene>,
     risk_series: RiskSeries,
     left_panel: LeftPanel,
 }
 
+/// The scenes of one panel and the one on show.
+struct Panel<T> {
+    items: Vec<T>,
+    index: usize,
+}
+
+impl<T> Panel<T> {
+    /// `number` is the operator's pick, counted from one. With no pick the panel starts on the
+    /// first scene, and a pick past the end shows the last.
+    fn new(items: Vec<T>, number: Option<usize>) -> Self {
+        let index = number
+            .map_or(0, |number| number.saturating_sub(1))
+            .min(items.len() - 1);
+        Self { items, index }
+    }
+
+    fn step(&mut self, delta: i32) {
+        self.index = wrapped(self.index, delta, self.items.len());
+    }
+
+    fn current(&self) -> &T {
+        &self.items[self.index]
+    }
+
+    fn current_mut(&mut self) -> &mut T {
+        &mut self.items[self.index]
+    }
+}
+
 impl DomFixture {
-    fn new(selection: Selection) -> Self {
-        let scenes = scenes();
-        let scene = selection.scene.min(scenes.len() - 1);
-        let variant = selection.variant.min(scenes[scene].variants.len() - 1);
-        let mut monitor_scenes = monitor_scenes();
-        let monitor_scene = selection.monitor_scene.min(monitor_scenes.len() - 1);
-        if let Some(tab) = Channel::ALL.get(selection.monitor_tab) {
-            monitor_scenes[monitor_scene].state.active_tab = *tab;
+    /// Reads the starting selection from the arguments (scene, variant) and the environment.
+    fn new() -> Self {
+        let mut args = std::env::args().skip(1);
+        let scenes = Panel::new(scenes(), number(args.next(), "DOM_SCENE"));
+        let variant = number(args.next(), "DOM_VARIANT")
+            .unwrap_or(0)
+            .min(scenes.current().variants.len() - 1);
+        let mut monitors = Panel::new(monitor_scenes(), number(None, "MON_SCENE"));
+        if let Some(tab) = Channel::ALL.get(number(None, "MON_TAB").unwrap_or(0)) {
+            monitors.current_mut().state.active_tab = *tab;
         }
-        let chart_scenes = chart_scenes();
-        let chart_scene = selection.chart_scene.min(chart_scenes.len() - 1);
-        let position_scenes = position_scenes();
-        let position_scene = selection.position_scene.min(position_scenes.len() - 1);
+        // Choosing a risk scene also puts the stacked chart and positions view on the left.
+        let risk_scene = number(None, "RISK_SCENE");
         Self {
             scenes,
-            scene,
             variant,
-            monitor_scenes,
-            monitor_scene,
-            chart_scenes,
-            chart_scene,
-            chart_mode: selection.chart_mode,
-            position_scenes,
-            position_scene,
-            risk_series: selection.risk_series,
-            left_panel: selection.left_panel,
+            monitors,
+            charts: Panel::new(chart_scenes(), number(None, "CHART_SCENE")),
+            // The environment can start in either chart mode, so each one can be captured without a
+            // key press.
+            chart_mode: match std::env::var("CHART_MODE").as_deref() {
+                Ok("candles") => ChartMode::Candles,
+                _ => ChartMode::Line,
+            },
+            positions: Panel::new(position_scenes(), risk_scene),
+            risk_series: match std::env::var("RISK_SERIES").as_deref() {
+                Ok("pnl") => RiskSeries::Pnl,
+                _ => RiskSeries::Exposure,
+            },
+            left_panel: match risk_scene {
+                Some(_) => LeftPanel::Positions,
+                None => LeftPanel::Chart,
+            },
         }
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
         ctx.input(|input| {
             for (offset, key) in DIGIT_KEYS.iter().enumerate() {
-                if input.key_pressed(*key) && offset < self.scenes.len() {
-                    self.scene = offset;
+                if input.key_pressed(*key) && offset < self.scenes.items.len() {
+                    self.scenes.index = offset;
                     self.variant = 0;
                 }
             }
@@ -126,20 +158,20 @@ impl DomFixture {
                 self.step_variant(-1);
             }
             if input.key_pressed(egui::Key::M) {
-                self.step_monitor_scene(1);
+                self.monitors.step(1);
             }
             if input.key_pressed(egui::Key::T) {
                 self.cycle_tab();
             }
             if input.key_pressed(egui::Key::C) {
-                self.step_chart_scene(1);
+                self.charts.step(1);
                 self.left_panel = LeftPanel::Chart;
             }
             if input.key_pressed(egui::Key::V) {
                 self.flip_chart_mode();
             }
             if input.key_pressed(egui::Key::P) {
-                self.step_position_scene(1);
+                self.positions.step(1);
                 self.left_panel = LeftPanel::Positions;
             }
             if input.key_pressed(egui::Key::X) {
@@ -149,29 +181,12 @@ impl DomFixture {
     }
 
     fn step_scene(&mut self, delta: i32) {
-        let count = self.scenes.len() as i32;
-        self.scene = (self.scene as i32 + delta).rem_euclid(count) as usize;
+        self.scenes.step(delta);
         self.variant = 0;
     }
 
     fn step_variant(&mut self, delta: i32) {
-        let count = self.scenes[self.scene].variants.len() as i32;
-        self.variant = (self.variant as i32 + delta).rem_euclid(count) as usize;
-    }
-
-    fn step_monitor_scene(&mut self, delta: i32) {
-        let count = self.monitor_scenes.len() as i32;
-        self.monitor_scene = (self.monitor_scene as i32 + delta).rem_euclid(count) as usize;
-    }
-
-    fn step_chart_scene(&mut self, delta: i32) {
-        let count = self.chart_scenes.len() as i32;
-        self.chart_scene = (self.chart_scene as i32 + delta).rem_euclid(count) as usize;
-    }
-
-    fn step_position_scene(&mut self, delta: i32) {
-        let count = self.position_scenes.len() as i32;
-        self.position_scene = (self.position_scene as i32 + delta).rem_euclid(count) as usize;
+        self.variant = wrapped(self.variant, delta, self.scenes.current().variants.len());
     }
 
     fn flip_chart_mode(&mut self) {
@@ -190,7 +205,7 @@ impl DomFixture {
 
     /// Stacked via shipped composer (all real). Returns operator's pick.
     fn paint_stack(&self, ui: &mut egui::Ui, body: egui::Rect) -> Option<RiskSeries> {
-        let scene = &self.position_scenes[self.position_scene];
+        let scene = self.positions.current();
         chart_stack::paint(
             ui,
             body,
@@ -206,7 +221,7 @@ impl DomFixture {
     }
 
     fn cycle_tab(&mut self) {
-        let state = &mut self.monitor_scenes[self.monitor_scene].state;
+        let state = &mut self.monitors.current_mut().state;
         let index = Channel::ALL
             .iter()
             .position(|channel| *channel == state.active_tab)
@@ -225,7 +240,7 @@ impl eframe::App for DomFixture {
         let (left, center, right) = panels(full);
         painter.rect_filled(left, 0.0, PANEL);
 
-        let dom_scene = &self.scenes[self.scene];
+        let dom_scene = self.scenes.current();
         let variant = &dom_scene.variants[self.variant];
         let dom_frame = DomFrame {
             snapshot: variant.snapshot.as_ref(),
@@ -245,7 +260,7 @@ impl eframe::App for DomFixture {
         };
         dom::paint(ui, right, &dom_frame);
 
-        let monitor = &mut self.monitor_scenes[self.monitor_scene];
+        let monitor = self.monitors.current_mut();
         let monitor_name = monitor.name;
         let tab = monitor.state.active_tab;
         let monitor_frame = MonitorFrame {
@@ -261,8 +276,8 @@ impl eframe::App for DomFixture {
         };
         monitor::paint(ui, center, &monitor_frame, &mut monitor.state);
 
-        let chart_scene = &self.chart_scenes[self.chart_scene];
-        let position_scene = &self.position_scenes[self.position_scene];
+        let chart_scene = self.charts.current();
+        let position_scene = self.positions.current();
         // Scene carries its mid -> never pair.
         let body = hud::below(left);
         match self.left_panel {
@@ -294,8 +309,8 @@ impl eframe::App for DomFixture {
             &overlay,
             &hud::Hud {
                 left,
-                dom_index: self.scene,
-                dom_count: self.scenes.len(),
+                dom_index: self.scenes.index,
+                dom_count: self.scenes.items.len(),
                 dom: dom_scene,
                 variant: variant.label,
                 monitor: monitor_name,
@@ -325,81 +340,22 @@ fn panels(full: egui::Rect) -> (egui::Rect, egui::Rect, egui::Rect) {
     (left, center, right)
 }
 
-struct Selection {
-    scene: usize,
-    variant: usize,
-    monitor_scene: usize,
-    monitor_tab: usize,
-    chart_scene: usize,
-    chart_mode: ChartMode,
-    position_scene: usize,
-    risk_series: RiskSeries,
-    left_panel: LeftPanel,
-}
-
 /// `DOM_LEVELS` reproduces any position of the header's level stepper, which the fixture does not
 /// paint — the point is to eyeball the ladder at the dense end without a live engine.
 fn dom_levels() -> usize {
-    std::env::var("DOM_LEVELS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_ROWS_PER_SIDE)
+    number(None, "DOM_LEVELS").unwrap_or(DEFAULT_ROWS_PER_SIDE)
 }
 
-fn initial_selection() -> Selection {
-    let mut args = std::env::args().skip(1);
-    let scene = args
-        .next()
-        .or_else(|| std::env::var("DOM_SCENE").ok())
-        .and_then(|value| value.parse::<usize>().ok())
-        .map(|number| number.saturating_sub(1))
-        .unwrap_or(0);
-    let variant = args
-        .next()
-        .or_else(|| std::env::var("DOM_VARIANT").ok())
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let monitor_scene = std::env::var("MON_SCENE")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .map(|number| number.saturating_sub(1))
-        .unwrap_or(0);
-    let monitor_tab = std::env::var("MON_TAB")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let chart_scene = std::env::var("CHART_SCENE")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .map(|number| number.saturating_sub(1))
-        .unwrap_or(0);
-    // Signed both modes -> env var picks.
-    let chart_mode = match std::env::var("CHART_MODE").as_deref() {
-        Ok("candles") => ChartMode::Candles,
-        _ => ChartMode::Line,
-    };
-    // RISK_SCENE selects left panel -> stacked pair.
-    let position = std::env::var("RISK_SCENE")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok());
-    let risk_series = match std::env::var("RISK_SERIES").as_deref() {
-        Ok("pnl") => RiskSeries::Pnl,
-        _ => RiskSeries::Exposure,
-    };
-    Selection {
-        scene,
-        variant,
-        monitor_scene,
-        monitor_tab,
-        chart_scene,
-        chart_mode,
-        position_scene: position.map_or(0, |number| number.saturating_sub(1)),
-        risk_series,
-        left_panel: match position {
-            Some(_) => LeftPanel::Positions,
-            None => LeftPanel::Chart,
-        },
-    }
+/// The argument when one was given, otherwise the environment variable. A value that is not a
+/// number gives no pick, and a bad argument does not fall back to the environment.
+fn number(argument: Option<String>, name: &str) -> Option<usize> {
+    argument
+        .or_else(|| std::env::var(name).ok())
+        .and_then(|value| value.parse().ok())
+}
+
+fn wrapped(index: usize, delta: i32, count: usize) -> usize {
+    (index as i32 + delta).rem_euclid(count as i32) as usize
 }
 
 const DIGIT_KEYS: [egui::Key; 9] = [

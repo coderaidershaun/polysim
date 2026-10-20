@@ -31,8 +31,7 @@ use polysim::link::{
     LinkHash, LinkIdentity, LinkOrigin, OutboundLink, schema_hash_of_fields,
 };
 use polysim::msg::exec::{
-    AccountChunk, AccountChunkKind, AssetBalance, ExecCommand, ExecEvent, ExecKind, ExecLaneItem,
-    OrderStyle, VenueOrderStatus,
+    ExecCommand, ExecEvent, ExecKind, ExecLaneItem, OrderStyle, VenueOrderStatus,
 };
 use polysim::msg::inbound::{BookChunk, InboundMessage};
 use polysim::msg::persist::{FeatureId, PersistRecord};
@@ -44,9 +43,9 @@ use proptest::prelude::*;
 use rtrb::{Consumer, RingBuffer};
 
 use crate::engine_support::{
-    FillPen, LinkedSetup, detached_exposure, engine_view, engine_with_link, exec_event,
-    instrument_row, metrics_ring, persist_ring, pop, recorder_spec, rotation, snapshot_pair, spin,
-    strategy_log_ring, tracker_spec_all, trade, ts, ui_book_ring, ui_event_ring,
+    FillPen, LinkedSetup, account_chunk, detached_setup, engine_view, engine_with_link, exec_event,
+    instrument_row, persist_ring, pop, recorder_spec, rotation, snapshot_pair, spin, stream_ready,
+    tracker_spec_all, trade, ts, ui_event_ring,
 };
 use crate::micro_strategy::{MicroRecorder, MicroRecorderParams};
 /// The publisher's own copy of the shared schema — the same file the peer includes, so the frame
@@ -918,9 +917,6 @@ impl Maker {
             engine_view(DurationUs::from_millis(100)),
         );
         let (persistence, _persist) = persist_ring(1_024);
-        let (strategy_log_sink, _logs) = strategy_log_ring(64);
-        let (metrics_sink, _metrics) = metrics_ring(64);
-        let (ui_book_sink, _ui_books) = ui_book_ring(64);
         let (ui_event_sink, events) = ui_event_ring(4_096);
         let (commands_producer, commands) = RingBuffer::<ExecLaneItem>::new(1_024);
         let engine = HotEngine::new(HotEngineSetup {
@@ -930,16 +926,9 @@ impl Maker {
                 // Zero because [`FillPen`] addresses this engine's slots with that constant.
                 run_nonce: 0,
             }),
-            exposure: detached_exposure(),
-            instruments: &rows,
-            strategy: Box::new(strategy),
             persistence: Some(persistence),
-            strategy_log_sink,
-            metrics_sink,
-            ui_book_sink,
             ui_event_sink,
-            link: None,
-            warmup: DurationUs::ZERO,
+            ..detached_setup(&rows, Box::new(strategy))
         });
         Self {
             engine,
@@ -990,40 +979,19 @@ impl Maker {
     /// Stream up, open orders known, balances known. Without all three nothing is ever placed and
     /// every order-level assertion below would pass for the wrong reason.
     fn make_ready(&mut self, when: i64) {
-        self.dispatch(InboundMessage::Exec(ExecEvent {
-            kind: ExecKind::StreamReady,
-            ..exec_event(InstrumentId(A_UP), ClientOrderId(0), Side::Buy, 0, when)
-        }));
+        self.dispatch(stream_ready(InstrumentId(A_UP), when));
         self.dispatch(InboundMessage::Exec(open_orders_snapshot_end(
             InstrumentId(A_UP),
             ts(when),
         )));
-        let mut balances = [AssetBalance {
-            asset: AssetId::UNKNOWN,
-            free: 0,
-            locked: 0,
-        }; polysim::msg::exec::ACCOUNT_CHUNK_ASSETS];
         // One base and one quote asset across all four slots, as `poly_rows` declares them.
-        balances[0] = AssetBalance {
-            asset: AssetId(0),
-            free: 1_000 * FIXED_SCALE,
-            locked: 0,
-        };
-        balances[1] = AssetBalance {
-            asset: AssetId(1),
-            free: 1_000 * FIXED_SCALE,
-            locked: 0,
-        };
-        self.dispatch(InboundMessage::Account(AccountChunk {
-            kind: AccountChunkKind::Snapshot,
-            balances,
-            len: 2,
-            is_last_chunk: true,
-            venue_update_ts_ms: 1,
-            exchange_ts_us: ts(when),
-            received_ts_us: ts(when),
-            queued_ts_us: ts(when),
-        }));
+        self.dispatch(InboundMessage::Account(account_chunk(
+            &[
+                (AssetId(0), 1_000 * FIXED_SCALE),
+                (AssetId(1), 1_000 * FIXED_SCALE),
+            ],
+            when,
+        )));
     }
 
     /// The venue's half of a placement, so the order the engine banked becomes one it believes is

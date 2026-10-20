@@ -13,20 +13,18 @@ use polysim::hot::exec::{
     FundsView, QuoteLevel, RejectReason, TickGrid, plan_flatten,
 };
 use polysim::hot::strategy::{Strategy, StrategyCtx};
-use polysim::ids::{ClientOrderId, FIXED_SCALE, Price, Qty, Side};
-use polysim::msg::exec::{
-    AccountChunk, AccountChunkKind, AssetBalance, ExecCommand, ExecKind, ExecLaneItem, OrderStyle,
-    VenueOrderStatus,
-};
+use polysim::ids::{AssetId, ClientOrderId, FIXED_SCALE, Price, Qty, Side};
+use polysim::msg::exec::{ExecCommand, ExecKind, ExecLaneItem, OrderStyle, VenueOrderStatus};
 use polysim::msg::inbound::{InboundMessage, SpinTick};
 use polysim::registry::InstrumentRow;
-use polysim::time::{DurationUs, TsUs};
+use polysim::time::DurationUs;
 use rtrb::Consumer;
 
 use crate::engine_support::{
-    ALL_TABLES, FillPen, exec_event, instrument_row, pop, rich, snapshot_pair, top,
+    ALL_TABLES, FillPen, account_chunk, exec_event, instrument_row, pop, rich, snapshot_pair,
+    stream_ready, top,
 };
-use crate::risk_gate::{
+use crate::exec_support::{
     CEILING, INSTRUMENT, QuotingSetup, built_quoting_engine, drain_commands, exec_settings,
     open_orders_snapshot, spin_at,
 };
@@ -381,40 +379,16 @@ fn flattening_engine(strategy: Box<dyn Strategy>) -> (HotEngine, Consumer<ExecLa
 /// An account holding exactly the position is starved for its second flatten until the edge
 /// restates balances. That gate is `exec_order`'s to pin; here it would silently stop re-fire.
 fn make_ready_with_inventory(engine: &mut HotEngine, when: i64) {
+    engine.dispatch(pop(0, 0), &stream_ready(INSTRUMENT, when));
     engine.dispatch(
         pop(0, 0),
-        &InboundMessage::Exec(polysim::msg::exec::ExecEvent {
-            kind: ExecKind::StreamReady,
-            ..exec_event(INSTRUMENT, ClientOrderId(0), Side::Buy, 0, when)
-        }),
-    );
-    let mut balances = [AssetBalance {
-        asset: polysim::ids::AssetId::UNKNOWN,
-        free: 0,
-        locked: 0,
-    }; polysim::msg::exec::ACCOUNT_CHUNK_ASSETS];
-    balances[0] = AssetBalance {
-        asset: polysim::ids::AssetId(0),
-        free: 10_000 * FIXED_SCALE,
-        locked: 0,
-    };
-    balances[1] = AssetBalance {
-        asset: polysim::ids::AssetId(1),
-        free: 10_000 * FIXED_SCALE,
-        locked: 0,
-    };
-    engine.dispatch(
-        pop(0, 0),
-        &InboundMessage::Account(AccountChunk {
-            kind: AccountChunkKind::Snapshot,
-            balances,
-            len: 2,
-            is_last_chunk: true,
-            venue_update_ts_ms: 1,
-            exchange_ts_us: TsUs::from_micros(when),
-            received_ts_us: TsUs::from_micros(when),
-            queued_ts_us: TsUs::from_micros(when),
-        }),
+        &InboundMessage::Account(account_chunk(
+            &[
+                (AssetId(0), 10_000 * FIXED_SCALE),
+                (AssetId(1), 10_000 * FIXED_SCALE),
+            ],
+            when,
+        )),
     );
     open_orders_snapshot(engine, when);
 }

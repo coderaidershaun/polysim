@@ -14,19 +14,18 @@ use polysim::hot::exec::{ClientIdLayout, DesiredQuote, ExecSettings, QuoteLevel,
 use polysim::hot::strategy::{Strategy, StrategyCtx};
 use polysim::ids::{AssetId, ClientOrderId, InstrumentId, Price, Qty, Side};
 use polysim::msg::exec::{
-    ACCOUNT_CHUNK_ASSETS, AccountChunk, AccountChunkKind, AssetBalance, ExecCommand, ExecEvent,
-    ExecKind, ExecLaneItem, OrderStyle, VenueOrderStatus,
+    AccountChunk, AccountChunkKind, AssetBalance, ExecCommand, ExecEvent, ExecKind, ExecLaneItem,
+    OrderStyle, VenueOrderStatus,
 };
 use polysim::msg::inbound::{InboundMessage, SpinTick};
 use polysim::sink::ExecSink;
-use polysim::time::{DurationUs, TsUs};
+use polysim::time::TsUs;
 use rtrb::{Consumer, RingBuffer};
 
-use crate::engine_support::{
-    ONE, detached_exposure, exec_event, instrument_row, metrics_ring, pop, strategy_log_ring,
-    ui_book_ring, ui_event_ring,
+use crate::engine_support::{ONE, account_chunk, detached_setup, exec_event, instrument_row, pop};
+use crate::exec_support::{
+    ASK, BID, drain_commands, exec_settings, make_ready, reseat_book, spin_at,
 };
-use crate::risk_gate::{ASK, BID, drain_commands, exec_settings, make_ready, reseat_book, spin_at};
 
 const INSTRUMENT: InstrumentId = InstrumentId(0);
 const LEVEL_ONE_PRICE: i64 = BID - 2 * ONE;
@@ -79,27 +78,14 @@ fn engine_with_settings(
     row.lot_size = Some(Qty(1));
     row.max_exposure_quote = 1_000_000 * ONE;
     let instruments = [row];
-    let (log_sink, _logs) = strategy_log_ring(64);
-    let (metrics_sink, _metrics) = metrics_ring(64);
-    let (ui_book_sink, _ui_books) = ui_book_ring(64);
-    let (ui_event_sink, _ui_events) = ui_event_ring(256);
     let (producer, commands) = RingBuffer::new(256);
     let engine = HotEngine::new(HotEngineSetup {
-        instruments: &instruments,
-        strategy,
-        persistence: None,
-        strategy_log_sink: log_sink,
-        metrics_sink,
-        ui_book_sink,
-        ui_event_sink,
-        link: None,
-        warmup: DurationUs::ZERO,
         exec: Some(ExecWiring {
             sink: ExecSink::new(producer),
             settings,
             run_nonce: 0,
         }),
-        exposure: detached_exposure(),
+        ..detached_setup(&instruments, strategy)
     });
     (engine, commands)
 }
@@ -167,27 +153,12 @@ fn place_and_ack(engine: &mut HotEngine, commands: &mut Consumer<ExecLaneItem>) 
 }
 
 fn restate_free_balance(engine: &mut HotEngine, venue_update_ts_ms: u64, when: i64) {
-    let mut balances = [AssetBalance {
-        asset: AssetId::UNKNOWN,
-        free: 0,
-        locked: 0,
-    }; ACCOUNT_CHUNK_ASSETS];
-    balances[0] = AssetBalance {
-        asset: AssetId(1),
-        free: 1_000_000 * ONE,
-        locked: 0,
-    };
     engine.dispatch(
         pop(0, 0),
         &InboundMessage::Account(AccountChunk {
             kind: AccountChunkKind::Update,
-            balances,
-            len: 1,
-            is_last_chunk: true,
             venue_update_ts_ms,
-            exchange_ts_us: TsUs::from_micros(when),
-            received_ts_us: TsUs::from_micros(when),
-            queued_ts_us: TsUs::from_micros(when),
+            ..account_chunk(&[(AssetId(1), 1_000_000 * ONE)], when)
         }),
     );
 }

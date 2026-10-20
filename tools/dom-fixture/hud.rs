@@ -45,53 +45,44 @@ pub fn paint(painter: &egui::Painter, hud: &Hud<'_>) {
         egui::FontId::monospace(13.0),
         TEXT,
     );
+    let line = |row: f32, color: egui::Color32, text: String| {
+        painter.text(
+            origin + egui::vec2(0.0, row),
+            egui::Align2::LEFT_TOP,
+            text,
+            egui::FontId::monospace(11.0),
+            color,
+        );
+    };
     if !hud.variant.is_empty() {
-        painter.text(
-            origin + egui::vec2(0.0, 18.0),
-            egui::Align2::LEFT_TOP,
-            format!("variant: {}", hud.variant),
-            egui::FontId::monospace(11.0),
-            TEXT_DIM,
-        );
+        line(18.0, TEXT_DIM, format!("variant: {}", hud.variant));
     }
-    painter.text(
-        origin + egui::vec2(0.0, 36.0),
-        egui::Align2::LEFT_TOP,
-        format!("monitor: {}  |  tab {}", hud.monitor, hud.tab.label()),
-        egui::FontId::monospace(11.0),
+    line(
+        36.0,
         TEXT,
+        format!("monitor: {}  |  tab {}", hud.monitor, hud.tab.label()),
     );
-    // Dimmed -> reviewer sees change.
-    painter.text(
-        origin + egui::vec2(0.0, 54.0),
-        egui::Align2::LEFT_TOP,
-        format!("chart: {}  |  {}", hud.chart, mode_label(hud.mode)),
-        egui::FontId::monospace(11.0),
+    // The line for the left panel that is not on screen is dimmed, so a reviewer sees at a glance
+    // which panel a key press switched to.
+    line(
+        54.0,
         active_text(hud.left_panel, LeftPanel::Chart),
+        format!("chart: {}  |  {}", hud.chart, mode_label(hud.mode)),
     );
-    painter.text(
-        origin + egui::vec2(0.0, 72.0),
-        egui::Align2::LEFT_TOP,
-        format!("risk: {}  |  {}", hud.position, series_label(hud.series)),
-        egui::FontId::monospace(11.0),
+    line(
+        72.0,
         active_text(hud.left_panel, LeftPanel::Positions),
+        format!("risk: {}  |  {}", hud.position, series_label(hud.series)),
     );
-    // Check when risk active, no hunting.
+    // While the positions panel is on screen, show what its scene asks the reviewer to verify, so
+    // they do not have to look it up.
     if hud.left_panel == LeftPanel::Positions {
-        painter.text(
-            origin + egui::vec2(0.0, 90.0),
-            egui::Align2::LEFT_TOP,
-            format!("check: {}", hud.check),
-            egui::FontId::monospace(11.0),
-            TEXT,
-        );
+        line(90.0, TEXT, format!("check: {}", hud.check));
     }
-    painter.text(
-        origin + egui::vec2(0.0, 108.0),
-        egui::Align2::LEFT_TOP,
-        "1-9 dom | left/right var | up/down step | M mon | T tab | C chart | V line/candles | P risk | X series",
-        egui::FontId::monospace(11.0),
+    line(
+        108.0,
         TEXT_DIM,
+        "1-9 dom | left/right var | up/down step | M mon | T tab | C chart | V line/candles | P risk | X series".to_string(),
     );
 }
 

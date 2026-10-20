@@ -31,7 +31,7 @@ use polysim::time::{DurationUs, TsUs};
 use rtrb::Consumer;
 
 use crate::engine_support::{ALL_TABLES, ONE, exec_event, local_refusals, pop, rotation};
-use crate::risk_gate::{
+use crate::exec_support::{
     ASK, BID, CEILING, INSTRUMENT, QUOTE_QTY, QuotingSetup, TwoSidedQuoter, built_quoting_engine,
     drain_commands, exec_settings, make_ready, reseat_book, row_with_ceiling, spin_at,
 };

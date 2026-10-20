@@ -1,12 +1,12 @@
 //! Deterministic chart scenes: ONLY place fabricated data lives. No RNG -> reproducible.
 
 use polysim::desktop::chart_model::{BookContinuity, ChartModel};
-use polysim::ids::{AssetId, FIXED_SCALE, InstrumentId, Price, Qty, Side};
-use polysim::msg::exec::Liquidity;
+use polysim::ids::{FIXED_SCALE, InstrumentId, Price, Qty, Side};
 use polysim::msg::inbound::Level;
-use polysim::msg::ui::{UI_BOOK_LEVELS, UiBookSnapshot, UiBookState, UiEvent};
+use polysim::msg::ui::UiBookState;
 use polysim::time::DurationUs;
-use polysim::time::TsUs;
+
+use crate::fixture::{self, BASE_TS, INSTRUMENT, book, px, unit};
 
 const SPIN: DurationUs = DurationUs::from_micros(1_000_000);
 const WINDOW_BUCKETS: i64 = 300;
@@ -17,8 +17,6 @@ const COARSE_WINDOW_BUCKETS: i64 = 20;
 const COMMITS_PER_BUCKET: i64 = 4;
 
 const TICK: Price = Price(FIXED_SCALE);
-const INSTRUMENT: InstrumentId = InstrumentId(0);
-const BASE_TS: i64 = 1_753_300_000_000_000;
 const BASE_BID: i64 = 65_990;
 
 /// Scene: model, instrument, grid. tick = Price(0) if no venue grid.
@@ -165,19 +163,24 @@ impl Feed {
         for sub in 0..COMMITS_PER_BUCKET {
             let continuity = self.take_continuity();
             let bid = bid + wobble(step * COMMITS_PER_BUCKET + sub);
-            self.commit(self.at(step, sub), &[bid], &[bid + 2], continuity);
+            self.commit(
+                self.at(step, sub),
+                &[unit(bid)],
+                &[unit(bid + 2)],
+                continuity,
+            );
         }
     }
 
     /// Degenerate candle: open == high == low == close, tests bounds guard on zero-span series.
     fn still(&mut self, step: i64, bid: i64) {
         let continuity = self.take_continuity();
-        self.commit(self.at(step, 0), &[bid], &[bid + 2], continuity);
+        self.commit(self.at(step, 0), &[unit(bid)], &[unit(bid + 2)], continuity);
     }
 
     fn bid_only(&mut self, step: i64) {
         let continuity = self.take_continuity();
-        self.commit(self.at(step, 0), &[mid_bid(step)], &[], continuity);
+        self.commit(self.at(step, 0), &[unit(mid_bid(step))], &[], continuity);
     }
 
     fn at(&self, step: i64, sub: i64) -> i64 {
@@ -196,25 +199,22 @@ impl Feed {
         }
     }
 
-    fn commit(&mut self, micros: i64, bids: &[i64], asks: &[i64], continuity: BookContinuity) {
+    fn commit(&mut self, micros: i64, bids: &[Level], asks: &[Level], continuity: BookContinuity) {
         self.seq += 1;
-        self.chart
-            .apply_book(&snapshot(self.seq, micros, bids, asks), continuity);
+        self.chart.apply_book(
+            &book(self.seq, micros, UiBookState::Valid, bids, asks),
+            continuity,
+        );
     }
 
     fn fill(&mut self, step: i64, side: Side, tick: i64) {
-        self.chart.apply_event(&UiEvent::Fill {
-            instrument: INSTRUMENT,
-            seq: self.seq,
-            event_ts_us: TsUs::from_micros(self.at(step, 1)),
+        self.chart.apply_event(&fixture::fill(
+            self.seq,
+            self.at(step, 1),
             side,
-            price: px(tick),
-            qty: Qty(FIXED_SCALE),
-            commission: 0,
-            commission_asset: AssetId(1),
-            liquidity: Some(Liquidity::Maker),
-            quote_level: None,
-        });
+            px(tick),
+            Qty(FIXED_SCALE),
+        ));
     }
 
     fn finish(self, name: &'static str) -> ChartScene {
@@ -243,39 +243,4 @@ fn triangle(step: i64, period: i64, amplitude: i64) -> i64 {
 
 fn side_for(step: i64) -> Side {
     if step % 180 < 90 { Side::Buy } else { Side::Sell }
-}
-
-fn snapshot(seq: u64, micros: i64, bids: &[i64], asks: &[i64]) -> UiBookSnapshot {
-    let empty = Level {
-        price: Price(0),
-        qty: Qty(0),
-    };
-    let mut bid_levels = [empty; UI_BOOK_LEVELS];
-    let mut ask_levels = [empty; UI_BOOK_LEVELS];
-    for (slot, &tick) in bid_levels.iter_mut().zip(bids) {
-        *slot = Level {
-            price: px(tick),
-            qty: Qty(FIXED_SCALE),
-        };
-    }
-    for (slot, &tick) in ask_levels.iter_mut().zip(asks) {
-        *slot = Level {
-            price: px(tick),
-            qty: Qty(FIXED_SCALE),
-        };
-    }
-    UiBookSnapshot {
-        instrument: INSTRUMENT,
-        seq,
-        event_ts_us: TsUs::from_micros(micros),
-        state: UiBookState::Valid,
-        bid_len: bids.len() as u16,
-        ask_len: asks.len() as u16,
-        bids: bid_levels,
-        asks: ask_levels,
-    }
-}
-
-fn px(tick_index: i64) -> Price {
-    Price(tick_index * FIXED_SCALE)
 }

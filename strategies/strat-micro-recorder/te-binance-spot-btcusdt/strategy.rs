@@ -26,9 +26,9 @@ mod params;
 
 use features::{FEATURE_NAMES, Features, QuoteSide};
 use models::{
-    BPS, GueantInputs, GueantScale, InstrumentSetup, InstrumentState, MIN_QUOTE_DISTANCE_BPS,
-    RiskBudget, effective_log_vol, emit_side_hawkes, emit_side_intensity, emit_side_markouts,
-    gated_realised_vol, level_qty_at, qty_at, ticks_per_bp,
+    BPS, BinanceVol, GueantInputs, GueantScale, InstrumentSetup, InstrumentState,
+    MIN_QUOTE_DISTANCE_BPS, RiskBudget, effective_log_vol, emit_side_hawkes, emit_side_intensity,
+    emit_side_markouts, gated_realised_vol, level_qty_at, qty_at, ticks_per_bp,
 };
 pub use params::MicroRecorderParams;
 
@@ -75,6 +75,15 @@ pub struct MicroRecorder {
     poly_features: Option<[FeatureId; common::LINK_FIELDS.len()]>,
 }
 
+impl MicroRecorder {
+    fn recorded_mut(&mut self, instrument: InstrumentId) -> Option<&mut BinanceVol> {
+        self.by_instrument
+            .get_mut(usize::from(instrument.0))
+            .filter(|state| state.is_recorded)
+            .map(|state| &mut state.binance)
+    }
+}
+
 impl StrategyConfig for MicroRecorder {
     type Params = MicroRecorderParams;
 
@@ -109,7 +118,9 @@ impl Strategy for MicroRecorder {
 
     fn register(&mut self, registration: Registration<'_>) {
         self.poly_features = Some(registration.feature_ids_of(&common::LINK_FIELDS));
-        self.features = Some(Features::from_ids(registration.features));
+        self.features = self
+            .has_features_table
+            .then(|| Features::from_ids(registration.features));
         let instruments = registration.instruments;
         let recorded = resolve_filter(&self.filter, instruments);
         self.link_target = instruments
@@ -141,17 +152,18 @@ impl Strategy for MicroRecorder {
         }
     }
 
-    /// Park breaks time series models (EGARCH, Hawkes, intensity, resilience, markouts, Kyle window). Engine keeps position ledger. Reset in-place: no alloc.
+    /// A park breaks the time series models (EGARCH, Hawkes, intensity, resilience, markouts, Kyle
+    /// window), so each restarts in place without allocating. The position is neither reset nor held
+    /// here: the engine owns the ledger and carries it through a park on purpose, since parking sells
+    /// nothing. A copy on this side would be a second truth free to drift from the one the quote
+    /// leans on.
     fn on_resume(&mut self, _ctx: &mut StrategyCtx<'_>) {
         for state in &mut self.by_instrument {
-            state.reset();
+            state.binance.reset();
         }
     }
 
     fn on_spin(&mut self, ctx: &mut StrategyCtx<'_>, _tick: &SpinTick) {
-        if !self.has_features_table {
-            return;
-        }
         let Some(features) = self.features else {
             return;
         };
@@ -175,13 +187,9 @@ impl Strategy for MicroRecorder {
         if !event.is_closed {
             return;
         }
-        let Some(state) = self.by_instrument.get_mut(usize::from(event.instrument.0)) else {
+        let Some(model) = self.recorded_mut(event.instrument) else {
             return;
         };
-        if !state.is_recorded {
-            return;
-        }
-        let model = &mut state.binance;
         if event.interval != model.interval {
             return;
         }
@@ -190,13 +198,9 @@ impl Strategy for MicroRecorder {
     }
 
     fn on_trade(&mut self, _ctx: &mut StrategyCtx<'_>, event: &TradeEvent) {
-        let Some(state) = self.by_instrument.get_mut(usize::from(event.instrument.0)) else {
+        let Some(model) = self.recorded_mut(event.instrument) else {
             return;
         };
-        if !state.is_recorded {
-            return;
-        }
-        let model = &mut state.binance;
         model.markouts.on_trade(event);
         let hawkes = match event.side {
             Side::Buy => &mut model.hawkes_ask,
@@ -209,13 +213,9 @@ impl Strategy for MicroRecorder {
         if !chunk.is_last_chunk {
             return;
         }
-        let Some(state) = self.by_instrument.get_mut(usize::from(chunk.instrument.0)) else {
+        let Some(model) = self.recorded_mut(chunk.instrument) else {
             return;
         };
-        if !state.is_recorded {
-            return;
-        }
-        let model = &mut state.binance;
         if ctx.book(chunk.instrument).state() != BookState::Valid {
             return;
         }
@@ -230,18 +230,12 @@ impl Strategy for MicroRecorder {
     }
 
     fn on_volume(&mut self, ctx: &mut StrategyCtx<'_>, instrument: InstrumentId, bar: &VolumeBar) {
-        if !self.has_features_table {
-            return;
-        }
         let Some(features) = self.features else {
             return;
         };
-        let Some(state) = self.by_instrument.get_mut(usize::from(instrument.0)) else {
+        let Some(model) = self.recorded_mut(instrument) else {
             return;
         };
-        if !state.is_recorded {
-            return;
-        }
         let imbalance = (bar.buy_notional - bar.sell_notional) as f64 / bar.target as f64;
         ctx.emit(features.volume_bar_imbalance, instrument, imbalance);
         ctx.emit(
@@ -274,7 +268,7 @@ impl Strategy for MicroRecorder {
             );
         }
 
-        let Some(feed) = state.binance.kyle.as_mut() else {
+        let Some(feed) = model.kyle.as_mut() else {
             return;
         };
         let flow = (bar.buy_notional - bar.sell_notional) as f64 / FIXED_SCALE as f64;

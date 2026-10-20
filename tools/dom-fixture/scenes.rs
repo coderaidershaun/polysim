@@ -3,15 +3,16 @@
 use polysim::desktop::dom_view::{DomGrouping, FeedStatus};
 use polysim::desktop::exec_model::{OrderCell, OrderStatus};
 use polysim::desktop::format::price_decimals;
-use polysim::ids::{ClientOrderId, FIXED_SCALE, InstrumentId, Price, Qty};
+use polysim::ids::{ClientOrderId, FIXED_SCALE, Price, Qty};
 use polysim::msg::inbound::Level;
-use polysim::msg::ui::{DomQuote, UI_BOOK_LEVELS, UiBookSnapshot, UiBookState};
+use polysim::msg::ui::{DomQuote, UiBookSnapshot, UiBookState};
 use polysim::time::DurationUs;
 use polysim::time::TsUs;
 
+use crate::fixture::{book, levels, px, qm};
+
 const TICK: Price = Price(FIXED_SCALE);
 const QTY_SCALE: i64 = FIXED_SCALE;
-const MILLI: i64 = FIXED_SCALE / 1000;
 const QUOTE_QTY_MILLI: i64 = 9_000;
 
 /// Grouped: 0.01 tick, 1 bps = 1180 ticks (11.80/row).
@@ -69,72 +70,52 @@ pub fn scenes() -> Vec<Scene> {
                     "ticks x100 (1.00/row)",
                     DomGrouping::Ticks { per_bucket: 100 },
                 ),
-                grouped(
-                    "bps 1 (11.80/row)",
-                    DomGrouping::Bps {
-                        numerator: 1,
-                        denominator: 1,
-                    },
-                ),
-                grouped(
-                    "bps 0.25 (2.95/row)",
-                    DomGrouping::Bps {
-                        numerator: 1,
-                        denominator: 4,
-                    },
-                ),
-                grouped(
-                    "bps 0.05 (0.59/row)",
-                    DomGrouping::Bps {
-                        numerator: 1,
-                        denominator: 20,
-                    },
-                ),
-                grouped(
-                    "bps 0.01 (0.11/row)",
-                    DomGrouping::Bps {
-                        numerator: 1,
-                        denominator: 100,
-                    },
-                ),
+                grouped("bps 1 (11.80/row)", bps(1)),
+                grouped("bps 0.25 (2.95/row)", bps(4)),
+                grouped("bps 0.05 (0.59/row)", bps(20)),
+                grouped("bps 0.01 (0.11/row)", bps(100)),
             ],
         ),
     ]
 }
 
+const DENSE_ASKS: [(i64, i64); 12] = [
+    (65992, 512),
+    (65993, 1_240),
+    (65994, 905),
+    (65995, 2_100),
+    (65996, 333),
+    (65997, 1_010),
+    (65998, 4_567),
+    (65999, 88),
+    (66000, 12_345),
+    (66001, 750),
+    (66002, 3_200),
+    (66003, 410),
+];
+
+const DENSE_BIDS: [(i64, i64); 12] = [
+    (65990, 640),
+    (65989, 1_115),
+    (65988, 900),
+    (65987, 2_480),
+    (65986, 170),
+    (65985, 5_005),
+    (65984, 260),
+    (65983, 1_900),
+    (65982, 55),
+    (65981, 8_800),
+    (65980, 330),
+    (65979, 1_450),
+];
+
+const MID_ASKS: [(i64, i64); 4] = [(65992, 700), (65993, 1_400), (65995, 300), (65998, 2_600)];
+
 fn dense() -> Variant {
-    let asks = [
-        (65992, 512),
-        (65993, 1_240),
-        (65994, 905),
-        (65995, 2_100),
-        (65996, 333),
-        (65997, 1_010),
-        (65998, 4_567),
-        (65999, 88),
-        (66000, 12_345),
-        (66001, 750),
-        (66002, 3_200),
-        (66003, 410),
-    ];
-    let bids = [
-        (65990, 640),
-        (65989, 1_115),
-        (65988, 900),
-        (65987, 2_480),
-        (65986, 170),
-        (65985, 5_005),
-        (65984, 260),
-        (65983, 1_900),
-        (65982, 55),
-        (65981, 8_800),
-        (65980, 330),
-        (65979, 1_450),
-    ];
     Variant {
         label: "bid delta 2 | ask delta 3 | qty 9",
         quote: Some(both_quotes(65989, 65994)),
-        ..valid(&levels(&bids), &levels(&asks))
+        ..valid(&levels(&DENSE_BIDS), &levels(&DENSE_ASKS))
     }
 }
 
@@ -161,7 +142,7 @@ fn sparse_grouped() -> Variant {
 }
 
 fn half_tick_mid() -> Variant {
-    let asks = levels(&[(65992, 700), (65993, 1_400), (65995, 300), (65998, 2_600)]);
+    let asks = levels(&MID_ASKS);
     let bids = levels(&[(65991, 800), (65990, 1_200), (65988, 500), (65985, 3_100)]);
     Variant {
         label: "mid ...991.5",
@@ -171,7 +152,7 @@ fn half_tick_mid() -> Variant {
 }
 
 fn integer_mid() -> Variant {
-    let asks = levels(&[(65992, 700), (65993, 1_400), (65995, 300), (65998, 2_600)]);
+    let asks = levels(&MID_ASKS);
     let bids = levels(&[(65990, 800), (65989, 1_200), (65987, 500), (65984, 3_100)]);
     Variant {
         label: "mid 65991",
@@ -181,22 +162,8 @@ fn integer_mid() -> Variant {
 }
 
 fn off_screen() -> Variant {
-    let asks = levels(&[
-        (65992, 512),
-        (65993, 1_240),
-        (65994, 905),
-        (65995, 2_100),
-        (65996, 333),
-        (65997, 1_010),
-    ]);
-    let bids = levels(&[
-        (65990, 640),
-        (65989, 1_115),
-        (65988, 900),
-        (65987, 2_480),
-        (65986, 170),
-        (65985, 5_005),
-    ]);
+    let asks = levels(&DENSE_ASKS[..6]);
+    let bids = levels(&DENSE_BIDS[..6]);
     Variant {
         label: "ask above / bid below the window",
         quote: Some(DomQuote::top(
@@ -222,7 +189,13 @@ fn awaiting() -> Variant {
     Variant {
         label: "book building — no mid",
         quote: None,
-        ..variant(Some(book(&bids, &asks, UiBookState::AwaitingSnapshot)))
+        ..variant(Some(book(
+            1,
+            0,
+            UiBookState::AwaitingSnapshot,
+            &bids,
+            &asks,
+        )))
     }
 }
 
@@ -329,6 +302,13 @@ fn grouped(label: &'static str, grouping: DomGrouping) -> Variant {
     }
 }
 
+fn bps(denominator: i64) -> DomGrouping {
+    DomGrouping::Bps {
+        numerator: 1,
+        denominator,
+    }
+}
+
 fn scene(name: &'static str, variants: Vec<Variant>) -> Scene {
     Scene { name, variants }
 }
@@ -378,9 +358,8 @@ fn both_quotes(bid_tick: i64, ask_tick: i64) -> DomQuote {
     )
 }
 
-/// Valid book, 3-decimal qty.
 fn valid(bids: &[Level], asks: &[Level]) -> Variant {
-    variant(Some(book(bids, asks, UiBookState::Valid)))
+    variant(Some(book(1, 0, UiBookState::Valid, bids, asks)))
 }
 
 fn variant(snapshot: Option<UiBookSnapshot>) -> Variant {
@@ -400,46 +379,6 @@ fn variant(snapshot: Option<UiBookSnapshot>) -> Variant {
     }
 }
 
-fn book(bids: &[Level], asks: &[Level], state: UiBookState) -> UiBookSnapshot {
-    let empty = Level {
-        price: Price(0),
-        qty: Qty(0),
-    };
-    let mut bid_levels = [empty; UI_BOOK_LEVELS];
-    let mut ask_levels = [empty; UI_BOOK_LEVELS];
-    for (slot, level) in bid_levels.iter_mut().zip(bids) {
-        *slot = *level;
-    }
-    for (slot, level) in ask_levels.iter_mut().zip(asks) {
-        *slot = *level;
-    }
-    UiBookSnapshot {
-        instrument: InstrumentId(0),
-        seq: 1,
-        event_ts_us: TsUs::from_micros(0),
-        state,
-        bid_len: bids.len().min(UI_BOOK_LEVELS) as u16,
-        ask_len: asks.len().min(UI_BOOK_LEVELS) as u16,
-        bids: bid_levels,
-        asks: ask_levels,
-    }
-}
-
-fn levels(rows: &[(i64, i64)]) -> Vec<Level> {
-    rows.iter().map(|&(tick, milli)| lvl(tick, milli)).collect()
-}
-
-fn lvl(tick_index: i64, milli: i64) -> Level {
-    Level {
-        price: px(tick_index),
-        qty: qm(milli),
-    }
-}
-
-fn px(tick_index: i64) -> Price {
-    Price(tick_index * FIXED_SCALE)
-}
-
 /// Levels on the grouped scene's 0.01 grid, written as signed tick offsets from its mid so a row
 /// reads as its distance from the touch rather than as an eight-digit tick index.
 fn grouped_levels(offsets: &[(i64, i64)]) -> Vec<Level> {
@@ -454,8 +393,4 @@ fn grouped_levels(offsets: &[(i64, i64)]) -> Vec<Level> {
 
 fn grouped_px(offset_ticks: i64) -> Price {
     Price((GROUPED_MID_TICK + offset_ticks) * GROUPED_TICK.0)
-}
-
-fn qm(milli: i64) -> Qty {
-    Qty(milli * MILLI)
 }

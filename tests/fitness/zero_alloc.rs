@@ -29,10 +29,10 @@ use polysim::time::{DurationUs, TsUs};
 use rtrb::Consumer;
 
 use crate::engine_support::{
-    FillPen, NOMINAL_SPIN, ONE, delta_chunk, detached_exposure, engine_view, engine_with_ui,
+    FillPen, NOMINAL_SPIN, ONE, delta_chunk, detached_setup, engine_view, engine_with_ui,
     engine_with_ui_and_exec, engine_without_persistence, engine_without_warmup, instrument_row,
     kline, metrics_ring, persist_ring, persist_ring_for, pop, recorder_feature_id, recorder_spec,
-    rotation, snapshot_pair, spin, strategy_log_ring, tracker_spec_all, trade,
+    rotation, snapshot_pair, spin, strategy_log_ring, tracker_spec_all, trade, ui_event_ring,
 };
 
 /// Drains both UI feed consumers so the emission path exercises the ring's success push, not just
@@ -1066,24 +1066,18 @@ fn link_dispatch_does_not_allocate() {
     );
     let (link_producer, link_consumer) = rtrb::RingBuffer::<OutboundLink>::new(1024);
     let control = RunControlGate::new();
+    let strategy = Box::new(LinkPump {
+        received: None,
+        topic: None,
+    });
     let mut engine = HotEngine::new(HotEngineSetup {
-        exec: None,
-        exposure: detached_exposure(),
-        instruments: &instruments,
-        strategy: Box::new(LinkPump {
-            received: None,
-            topic: None,
-        }),
         persistence: Some(persistence),
-        strategy_log_sink: strategy_log_ring(64).0,
-        metrics_sink: metrics_ring(64).0,
-        ui_book_sink: crate::engine_support::ui_book_ring(64).0,
-        ui_event_sink: crate::engine_support::ui_event_ring(64).0,
+        ui_event_sink: ui_event_ring(64).0,
         link: Some(LinkWiring {
             sink: LinkSink::new(link_producer),
             acknowledged: control.acknowledged().clone(),
         }),
-        warmup: DurationUs::ZERO,
+        ..detached_setup(&instruments, strategy)
     });
     let mut persist_consumer = persist_consumer;
     let mut link_consumer = link_consumer;
