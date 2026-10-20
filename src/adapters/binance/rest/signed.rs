@@ -1,6 +1,9 @@
-//! Signed REST (GET/DELETE). DELETE survives dead WS → blocks orders left resting on crash.
+//! Signed REST reads and cancels. A cancel over REST still works when the WebSocket is dead, so a
+//! crash cannot leave orders resting with no way to pull them.
 
 use std::time::Instant;
+
+use serde::de::DeserializeOwned;
 
 use crate::adapters::backoff::BackoffCaps;
 use crate::adapters::binance::exec::{ClockOffset, RecvWindow, RequestParams, RequestSigner};
@@ -15,7 +18,8 @@ use super::{
     RestClient, RestError, RestRequest, decode,
 };
 
-// One resync per retry max — more = clock loop.
+// The venue's code for a stale timestamp. Each retry resyncs the clock at most once, because more
+// resyncs than that become a loop.
 const STALE_TIMESTAMP_CODE: i64 = -1021;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +81,8 @@ impl SignedRestClient {
     /// [`RestError`] if venue unreachable.
     pub async fn sync_clock(&mut self) -> Result<ClockOffset, RestError> {
         let server_time = self.rest.server_time().await?;
-        // Read after await: response-receipt instant → late bias (not early, which venue rejects).
+        // Read the clock after the await, at receipt, so the offset errs late rather than early:
+        // the venue rejects an early stamp.
         self.clock_offset = ClockOffset::learn(server_time, self.clock.now());
         Ok(self.clock_offset)
     }
@@ -86,36 +91,35 @@ impl SignedRestClient {
         self.clock_offset
     }
 
+    /// # Errors
+    /// [`RestError`].
     pub async fn account(&mut self) -> Result<AccountInfo, RestError> {
-        let fetched = self.send_signed(&RestRequest::AccountInfo).await?;
-        decode(&fetched)
+        self.signed(RestRequest::AccountInfo).await
     }
 
+    /// # Errors
+    /// [`RestError`].
     pub async fn my_trades(
         &mut self,
         symbol: &str,
         from_id: Option<i64>,
         limit: u32,
     ) -> Result<Vec<AccountTrade>, RestError> {
-        let fetched = self
-            .send_signed(&RestRequest::MyTrades {
-                symbol: symbol.to_owned(),
-                from_id,
-                limit,
-            })
-            .await?;
-        decode(&fetched)
+        self.signed(RestRequest::MyTrades {
+            symbol: symbol.to_owned(),
+            from_id,
+            limit,
+        })
+        .await
     }
 
     /// # Errors
     /// [`RestError`].
     pub async fn open_orders(&mut self, symbol: &str) -> Result<Vec<OrderRecord>, RestError> {
-        let fetched = self
-            .send_signed(&RestRequest::OpenOrders {
-                symbol: symbol.to_owned(),
-            })
-            .await?;
-        decode(&fetched)
+        self.signed(RestRequest::OpenOrders {
+            symbol: symbol.to_owned(),
+        })
+        .await
     }
 
     /// # Errors
@@ -125,13 +129,11 @@ impl SignedRestClient {
         symbol: &str,
         orig_client_order_id: &str,
     ) -> Result<OrderRecord, RestError> {
-        let fetched = self
-            .send_signed(&RestRequest::OrderStatus {
-                symbol: symbol.to_owned(),
-                orig_client_order_id: orig_client_order_id.to_owned(),
-            })
-            .await?;
-        decode(&fetched)
+        self.signed(RestRequest::OrderStatus {
+            symbol: symbol.to_owned(),
+            orig_client_order_id: orig_client_order_id.to_owned(),
+        })
+        .await
     }
 
     /// The same read keyed by the venue's own id, for the one caller that has no client id to use:
@@ -144,13 +146,11 @@ impl SignedRestClient {
         symbol: &str,
         venue_order_id: i64,
     ) -> Result<OrderRecord, RestError> {
-        let fetched = self
-            .send_signed(&RestRequest::OrderStatusByVenueId {
-                symbol: symbol.to_owned(),
-                venue_order_id,
-            })
-            .await?;
-        decode(&fetched)
+        self.signed(RestRequest::OrderStatusByVenueId {
+            symbol: symbol.to_owned(),
+            venue_order_id,
+        })
+        .await
     }
 
     /// Cancels one order BY CLIENT ID. There is deliberately no cancel-all: it would reach orders
@@ -164,12 +164,15 @@ impl SignedRestClient {
         symbol: &str,
         orig_client_order_id: &str,
     ) -> Result<OrderRecord, RestError> {
-        let fetched = self
-            .send_signed(&RestRequest::CancelOrder {
-                symbol: symbol.to_owned(),
-                orig_client_order_id: orig_client_order_id.to_owned(),
-            })
-            .await?;
+        self.signed(RestRequest::CancelOrder {
+            symbol: symbol.to_owned(),
+            orig_client_order_id: orig_client_order_id.to_owned(),
+        })
+        .await
+    }
+
+    async fn signed<T: DeserializeOwned>(&mut self, request: RestRequest) -> Result<T, RestError> {
+        let fetched = self.send_signed(&request).await?;
         decode(&fetched)
     }
 

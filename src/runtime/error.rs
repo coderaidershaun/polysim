@@ -4,7 +4,7 @@
 use crate::adapters::binance::exec::{ProbeError, SignError};
 use crate::adapters::binance::rest::RestError;
 use crate::adapters::exchange_sim::SimVenueError;
-use crate::adapters::polymarket::exec::handle::{PolymarketExecError, PolymarketPreflightError};
+use crate::adapters::polymarket::exec::handle::PolymarketPreflightError;
 use crate::adapters::polymarket::rest::GammaError;
 use crate::config::ConfigError;
 use crate::exposure::ExposureError;
@@ -26,8 +26,6 @@ pub enum EngineError {
         "the polymarket execution startup gate failed — refusing to trade without proof the wallet can"
     )]
     PolymarketExecutionPreflight(#[source] PolymarketPreflightError),
-    #[error("the polymarket execution edge cannot be driven")]
-    PolymarketExecutionUnavailable(#[source] PolymarketExecError),
     #[error(
         "execution.mode is {mode} but {detail} — refusing to start, because a run that reports itself armed and places nothing is worse than one that does not start"
     )]

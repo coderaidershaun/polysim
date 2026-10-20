@@ -767,6 +767,50 @@ fn account_and_edge_case_decodes() {
             "BNB and the dust asset are counted, not misattributed"
         );
     }
+
+    // A status spelling this engine does not know is refused rather than mapped to a near match,
+    // on the stream and in an answer alike. The refusal names the field and is not fatal, so one
+    // odd frame is dropped and counted rather than halting the run.
+    {
+        let venue = venue();
+        let report = fixture!("report_new").replace("\"X\": \"NEW\"", "\"X\": \"BOGUS\"");
+        let refused = decode_stream_event(&report, &venue.decode_context(NOW))
+            .expect_err("an unknown order status is refused");
+        assert!(
+            matches!(
+                refused,
+                WireError::Decode(DecimalFault::UnknownEnum { field: "X", .. })
+            ),
+            "{refused:?}"
+        );
+        assert!(!refused.is_fatal());
+
+        let answer = fixture!("ack_order_status_filled")
+            .replace("\"status\": \"FILLED\"", "\"status\": \"BOGUS\"");
+        let refused = decode_response(
+            &answer,
+            &ResponseContext {
+                decode: venue.decode_context(NOW),
+                request: ExecRequest::OrderStatus {
+                    instrument: InstrumentId(0),
+                    client_id: ORDER_A,
+                },
+                recon_seq: 7,
+            },
+        )
+        .expect_err("an unknown order status is refused");
+        assert!(
+            matches!(
+                refused,
+                WireError::Decode(DecimalFault::UnknownEnum {
+                    field: "status",
+                    ..
+                })
+            ),
+            "{refused:?}"
+        );
+        assert!(!refused.is_fatal());
+    }
 }
 
 /// The wire shape of a placement (post-only vs crossing) and of an amend, read back through the

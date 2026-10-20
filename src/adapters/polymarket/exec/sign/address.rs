@@ -29,10 +29,7 @@ impl Address {
     }
 
     pub fn to_lowercase_hex(&self) -> String {
-        let mut out = String::with_capacity(2 + ADDRESS_BYTES * 2);
-        out.push_str("0x");
-        hex::push_lower(&mut out, &self.0);
-        out
+        hex::prefixed_lower(&self.0)
     }
 
     /// EIP-55: a hex letter uppercases when the matching nibble of `keccak256(lowercase_hex)` is ≥ 8.

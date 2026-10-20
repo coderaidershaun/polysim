@@ -1,11 +1,14 @@
-//! Wire JSON shapes (Polymarket spelling). Request bodies serialised once (HMAC covers socket bytes).
+//! The venue's JSON shapes, in its own spelling. Request bodies are serialised once, because the
+//! HMAC covers the exact bytes that reach the socket.
 //!
-//! REST and stream spell the same order differently: REST created_at is int+seconds; stream is
-//! string+milliseconds. Sharing struct fails at runtime not compile-time.
+//! REST and the stream spell the same order differently: REST sends `created_at` as integer
+//! seconds, the stream sends its stamp as a string of milliseconds. One shared struct would fail at
+//! run time, not at compile time.
 
 use serde::{Deserialize, Serialize};
 
-/// In typehash order. salt is JSON NUMBER; rest numeric is string. expiration here, not in signed.
+/// Fields in typehash order. `salt` is a JSON number while every other numeric field is a string,
+/// and `expiration` appears here but not in the signed struct.
 #[derive(Serialize)]
 pub(super) struct SignedOrderBody<'a> {
     pub salt: u64,
@@ -55,14 +58,16 @@ pub(super) struct HeartbeatBody<'a> {
     pub heartbeat_id: &'a str,
 }
 
-/// Success and stale 400 both carry heartbeat_id; in 400 it's the expected id, so one shape reads both.
+/// A success and a stale-id 400 both carry `heartbeat_id`; in the 400 it is the id the venue
+/// expects, so one shape reads both.
 #[derive(Deserialize)]
 pub(super) struct HeartbeatResponse {
     #[serde(default)]
     pub heartbeat_id: String,
 }
 
-/// Raw secret on this wire only, with no HMAC. Server closes if the socket goes silent.
+/// The raw secret travels on this wire only, with no HMAC. The server closes the socket if it goes
+/// silent.
 #[derive(Serialize)]
 pub(super) struct SubscribeBody<'a> {
     pub auth: SubscribeAuth<'a>,
@@ -78,7 +83,8 @@ pub(super) struct SubscribeAuth<'a> {
     pub passphrase: &'a str,
 }
 
-/// POST /order. HTTP 200 carries failures; amounts empty string when unmatched.
+/// The answer to `POST /order`. A failure can arrive with HTTP 200, and the amounts are empty
+/// strings when nothing matched.
 #[derive(Deserialize)]
 pub(super) struct PlaceResponse {
     #[serde(default)]
@@ -95,7 +101,7 @@ pub(super) struct PlaceResponse {
     pub taking_amount: String,
 }
 
-/// All cancel paths answer; partial success is design.
+/// Every cancel path answers in this shape, and partial success is by design.
 #[derive(Deserialize)]
 pub(super) struct CancelResponse {
     #[serde(default)]
@@ -104,7 +110,7 @@ pub(super) struct CancelResponse {
     pub not_canceled: std::collections::BTreeMap<String, String>,
 }
 
-/// No numeric codes here.
+/// The venue sends no numeric error codes; `code`, when present, is text.
 #[derive(Deserialize)]
 pub(super) struct ErrorResponse {
     #[serde(default)]
@@ -128,11 +134,12 @@ impl ErrorResponse {
 
 /// Response is wrapped in a data field. The prose docs show a bare array, but that is stale.
 #[derive(Deserialize)]
-pub(super) struct OrdersPage {
+pub(super) struct Page<T> {
     #[serde(default)]
     pub next_cursor: String,
-    #[serde(default)]
-    pub data: Vec<OrderRecord>,
+    // A bare `default` would make serde demand `Default` of every row type.
+    #[serde(default = "Vec::new")]
+    pub data: Vec<T>,
 }
 
 /// created_at is an integer here. The stream sends it as a string.
@@ -148,14 +155,6 @@ pub(super) struct OrderRecord {
     pub status: String,
     #[serde(default)]
     pub created_at: i64,
-}
-
-#[derive(Deserialize)]
-pub(super) struct TradesPage {
-    #[serde(default)]
-    pub next_cursor: String,
-    #[serde(default)]
-    pub data: Vec<TradeRecord>,
 }
 
 /// The wire carries the taker's side, so this struct omits it. Reading it would flip attribution
@@ -190,7 +189,8 @@ pub(super) struct MakerOrderFill {
     pub fee_rate_bps: String,
 }
 
-/// event_type splits order/trade; type splits order kinds.
+/// `event_type` separates order frames from trade frames; `type` then separates the kinds of order
+/// event.
 #[derive(Deserialize)]
 #[serde(tag = "event_type")]
 pub(super) enum StreamFrame {
@@ -202,7 +202,7 @@ pub(super) enum StreamFrame {
     Unhandled,
 }
 
-/// Stream: timestamp milliseconds as string, created_at also string.
+/// The stream sends `timestamp` as a string of milliseconds, and `created_at` as a string too.
 #[derive(Deserialize)]
 pub(super) struct OrderEvent {
     pub id: String,
@@ -227,8 +227,8 @@ pub(super) struct BalanceAllowance {
     pub balance: String,
 }
 
-/// Public endpoint, one call per rotation binding. mos/mts arrive as JSON numbers and are read as
-/// such, not as floats, because a tick is a price-grid key.
+/// A public endpoint, called once per rotation binding. `mos` and `mts` arrive as JSON numbers and
+/// are read as exact numbers, not floats, because a tick is a price-grid key.
 #[derive(Deserialize)]
 pub(super) struct ClobMarketResponse {
     #[serde(rename = "c")]
@@ -245,7 +245,7 @@ pub(super) struct ClobMarketResponse {
     pub taker_fee_bps: i32,
     #[serde(rename = "ao", default)]
     pub is_accepting_orders: bool,
-    /// Omitted when no taker delay.
+    /// Omitted when the market has no taker delay.
     #[serde(rename = "itode", default)]
     pub is_taker_order_delay_enabled: bool,
 }
@@ -258,14 +258,14 @@ pub(super) struct ClobTokenResponse {
     pub outcome: String,
 }
 
-/// Separate call; flag picks signing contract.
+/// A separate call, because this flag picks the contract an order is signed for.
 #[derive(Deserialize)]
 pub(super) struct NegRiskResponse {
     #[serde(default)]
     pub neg_risk: bool,
 }
 
-/// Venue answers `{version}` or bare number (see decode_protocol_version).
+/// The venue answers either this object or a bare number, so a failure here is not yet a refusal.
 #[derive(Deserialize)]
 pub(super) struct VersionResponse {
     pub version: u32,

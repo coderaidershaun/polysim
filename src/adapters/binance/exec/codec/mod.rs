@@ -1,19 +1,19 @@
-//! Wire boundary: JSON <-> [`ExecEvent`]/[`AccountChunk`]. Symbols + assets + client_id decoded once.
-//! Pure: no socket/clock/self. Stamps = params. Pins classification where silent error costs money.
+//! Translates Binance JSON to and from [`ExecEvent`] and [`AccountChunk`], resolving symbols,
+//! assets and client ids in one place. It holds no socket, clock or state: every stamp arrives as a
+//! parameter, so a replay decodes identically.
 
 mod client_id;
 mod reject;
 mod request;
 mod response;
-mod rest;
 mod stream;
 mod wire;
 
-use crate::adapters::decode::{DecimalFault, JsonFrame, mantissa_field};
+use crate::adapters::decode::{DecimalFault, JsonFrame, mantissa_field, unknown_enum};
 use crate::adapters::exec::EngineIdentity;
-use crate::ids::{InstrumentId, Side};
+use crate::ids::InstrumentId;
 use crate::msg::exec::VenueOrderStatus;
-use crate::registry::Registry;
+use crate::registry::{AssetDictionary, Registry};
 use crate::time::TsUs;
 
 pub(super) const FRAME: JsonFrame = JsonFrame("binance execution");
@@ -23,28 +23,25 @@ pub use client_id::{
 };
 pub use reject::{RejectSubject, classify_error};
 pub use request::{EncodedRequest, encode_request};
-pub use response::{DecodedResponse, ResponseContext, decode_response};
-pub use rest::decode_order_record;
+pub use response::{DecodedResponse, ResponseContext, decode_order_record, decode_response};
 pub use stream::{IgnoredReason, StreamEvent, account_snapshot_chunks, decode_stream_event};
 
-/// Decoder context: identity + dicts.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeContext<'a> {
     pub symbols: &'a SymbolTable,
-    pub assets: &'a crate::registry::AssetDictionary,
+    pub assets: &'a AssetDictionary,
     pub identity: EngineIdentity,
-    /// Local receipt (clamp ref). Not venue's clock.
+    /// When this process received the message. Venue stamps are clamped against it; it is not the
+    /// venue's clock.
     pub received_ts_us: TsUs,
 }
 
-/// Encoder context: symbol + tag.
 #[derive(Debug, Clone, Copy)]
 pub struct EncodeContext<'a> {
     pub symbols: &'a SymbolTable,
     pub identity: EngineIdentity,
 }
 
-/// Symbol <-> instrument bidir.
 #[derive(Debug, Clone, Default)]
 pub struct SymbolTable {
     rows: Vec<SymbolRow>,
@@ -57,7 +54,7 @@ struct SymbolRow {
 }
 
 impl SymbolTable {
-    /// Upper-case (Binance rejects lower-case).
+    /// Symbols are stored upper-case, because Binance rejects lower-case ones.
     pub fn new(symbols: impl IntoIterator<Item = (InstrumentId, Box<str>)>) -> Self {
         Self {
             rows: symbols
@@ -99,14 +96,6 @@ pub enum WireError {
     #[error(transparent)]
     Decode(#[from] DecimalFault),
     #[error(
-        "unknown binance {field} {value:?} — refusing to map a spelling this engine does not know"
-    )]
-    UnknownEnum {
-        field: &'static str,
-        value: Box<str>,
-    },
-    /// Binance negates amount -> unavailable. Fold fails.
-    #[error(
         "binance reports {field} as {value:?}, which it does for a value it cannot supply — refusing to fold an unavailable amount"
     )]
     UnavailableAmount {
@@ -137,25 +126,7 @@ fn venue_status(field: &'static str, status: &str) -> Result<VenueOrderStatus, W
         "REJECTED" => VenueOrderStatus::Rejected,
         "EXPIRED" => VenueOrderStatus::Expired,
         "EXPIRED_IN_MATCH" => VenueOrderStatus::ExpiredInMatch,
-        unknown => {
-            return Err(WireError::UnknownEnum {
-                field,
-                value: unknown.into(),
-            });
-        }
-    })
-}
-
-fn order_side(field: &'static str, side: &str) -> Result<Side, WireError> {
-    Ok(match side {
-        "BUY" => Side::Buy,
-        "SELL" => Side::Sell,
-        unknown => {
-            return Err(WireError::UnknownEnum {
-                field,
-                value: unknown.into(),
-            });
-        }
+        unknown => return Err(unknown_enum(field, unknown).into()),
     })
 }
 

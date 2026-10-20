@@ -1,8 +1,9 @@
-//! Wire format translation: Polymarket JSON to/from ExecEvent and AccountChunk. Pure (no socket/clock/state).
-//! Normalizes three venue quirks here only (silent wrong answers, not parse failures):
-//! Order status uses three names (live/LIVE/ORDER_STATUS_LIVE); trade status uses two.
-//! Read surfaces: decimal strings; write surface: 6-decimal integers.
-//! Fills reported by three payloads; only two are trustworthy (see response and stream modules).
+//! Translates Polymarket JSON to and from `ExecEvent` and `AccountChunk`, holding no socket, clock
+//! or state. Three venue quirks are normalised here and nowhere else, because each yields a
+//! silently wrong answer rather than a parse failure: order status has three spellings (`live`,
+//! `LIVE`, `ORDER_STATUS_LIVE`) and trade status two; the read surfaces send decimal strings where
+//! the write surface sends 6-decimal integers; and three payloads report fills, of which only two
+//! can be trusted.
 
 mod correlation;
 mod read;
@@ -12,8 +13,8 @@ mod response;
 mod stream;
 mod wire;
 
-use crate::adapters::decode::{DecimalFault, JsonFrame};
-use crate::ids::{InstrumentId, Price, Qty, Side};
+use crate::adapters::decode::{DecimalFault, JsonFrame, mantissa_field, qty_field, unknown_enum};
+use crate::ids::{InstrumentId, Price, Qty};
 use crate::msg::exec::VenueOrderStatus;
 use crate::time::TsUs;
 
@@ -43,14 +44,15 @@ pub use stream::{
 
 pub(super) const FRAME: JsonFrame = JsonFrame("polymarket execution");
 
-// CLOB protocol version. V2 (2026-04-28) has no V1 compatibility; any other version rejected silently.
+/// The venue's protocol version. Version 2 is not compatible with version 1, and the venue rejects
+/// a payload shaped for another version without saying why.
 pub const PROTOCOL_VERSION: u32 = 2;
 
 // Venue scale (6 decimals) to engine scale (8 decimals) conversion factor.
 const VENUE_TO_ENGINE_SCALE: i64 = 100;
 
-// Venue response before per-endpoint interpretation. Availability separated at this level so
-// decoders cannot forget it: maintenance-window unavailability is not an order verdict.
+/// A venue answer before any endpoint reads it. Unavailability is split off at this level so no
+/// decoder can forget it: a maintenance window is not a verdict on an order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VenueAnswer<T> {
     Answered(T),
@@ -66,21 +68,23 @@ impl<T> VenueAnswer<T> {
     }
 }
 
-// HTTP response: status + body together (venue puts failures in both; neither alone decides).
+/// The status and the body travel together because the venue reports failures in both, and neither
+/// decides alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpAnswer<'a> {
     pub status: u16,
     pub body: &'a str,
 }
 
-// Decoder context: token bindings, run identities, receipt timestamp.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeContext<'a> {
     pub tokens: &'a TokenTable,
     pub orders: &'a OrderIndex,
-    // The CLOB API key (owner on all payloads). Distinguishes our maker fills from counterparty fills in one trade event.
+    /// The api key every payload names as its owner. It tells our maker fills apart from a
+    /// counterparty's within one trade event.
     pub api_key: &'a str,
-    // Local receipt timestamp (clamp reference for venue stamps, not the venue's clock).
+    /// When this process received the message. Venue stamps are clamped against it; it is not the
+    /// venue's clock.
     pub received_ts_us: TsUs,
 }
 
@@ -105,7 +109,7 @@ pub struct TokenBinding {
     pub is_neg_risk: bool,
 }
 
-/// Instrument <-> token id, both directions, with memory of retired bindings.
+/// Maps instruments to token ids and back, and remembers retired bindings.
 ///
 /// The up/down markets mint a fresh token pair every five minutes under a fixed [`InstrumentId`],
 /// so this table is REBOUND while orders from the previous window may still be settling. Retired
@@ -171,13 +175,6 @@ pub enum WireError {
     #[error(transparent)]
     Decode(#[from] DecimalFault),
     #[error(
-        "unknown polymarket {field} {value:?} — refusing to map a spelling this engine does not know"
-    )]
-    UnknownEnum {
-        field: &'static str,
-        value: Box<str>,
-    },
-    #[error(
         "no live token binding for instrument {instrument} — the rotation has not been applied"
     )]
     UnboundInstrument { instrument: u16 },
@@ -229,12 +226,7 @@ fn venue_status(field: &'static str, status: &str) -> Result<VenueOrderStatus, W
         "MATCHED" => VenueOrderStatus::Filled,
         "CANCELED" | "CANCELED_MARKET_RESOLVED" => VenueOrderStatus::Canceled,
         "INVALID" => VenueOrderStatus::Rejected,
-        _ => {
-            return Err(WireError::UnknownEnum {
-                field,
-                value: status.into(),
-            });
-        }
+        _ => return Err(unknown_enum(field, status).into()),
     })
 }
 
@@ -247,19 +239,6 @@ fn status_with_fill(status: VenueOrderStatus, filled: Qty, total: Qty) -> VenueO
     }
 }
 
-fn order_side(field: &'static str, side: &str) -> Result<Side, WireError> {
-    Ok(match side {
-        "BUY" => Side::Buy,
-        "SELL" => Side::Sell,
-        unknown => {
-            return Err(WireError::UnknownEnum {
-                field,
-                value: unknown.into(),
-            });
-        }
-    })
-}
-
 /// A venue amount to an 8-decimal mantissa. Two shapes reach here for the SAME quantity: the write
 /// surface sends a 6-decimal integer (`"5200000"` = 5.2), but the place RESPONSE was found live to
 /// carry the read surface's decimal-dollar string instead (`"2.549999"`), which the doc-shaped
@@ -269,7 +248,7 @@ fn order_side(field: &'static str, side: &str) -> Result<Side, WireError> {
 fn venue_amount(field: &'static str, text: &str) -> Result<i64, WireError> {
     let digits = text.trim();
     if digits.contains('.') {
-        return Ok(crate::adapters::decode::mantissa_field(field, digits)?);
+        return Ok(mantissa_field(field, digits)?);
     }
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(WireError::VenueAmount {
@@ -296,17 +275,9 @@ fn optional_venue_amount(field: &'static str, text: &str) -> Result<i64, WireErr
     }
 }
 
-pub(super) fn price_of(field: &'static str, text: &str) -> Result<Price, WireError> {
-    Ok(crate::adapters::decode::price_field(field, text)?)
-}
-
-pub(super) fn qty_of(field: &'static str, text: &str) -> Result<Qty, WireError> {
-    Ok(crate::adapters::decode::qty_field(field, text)?)
-}
-
 pub(super) fn optional_qty(field: &'static str, text: &str) -> Result<Qty, WireError> {
     match text.trim().is_empty() {
         true => Ok(Qty(0)),
-        false => qty_of(field, text),
+        false => Ok(qty_field(field, text)?),
     }
 }

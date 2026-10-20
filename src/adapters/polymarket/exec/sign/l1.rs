@@ -5,6 +5,7 @@
 use super::address::Address;
 use super::eip712::{self, Word, keccak256};
 use super::key::SigningKey;
+use super::{ADDRESS_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER};
 
 const DOMAIN_TYPE: &str = "EIP712Domain(string name,string version,uint256 chainId)";
 const DOMAIN_NAME: &str = "ClobAuthDomain";
@@ -16,9 +17,6 @@ const CLOB_AUTH_TYPE: &str =
 /// Verbatim, no trailing period — it is hashed into the signature, so a typo reads as a bad key.
 const ATTESTATION: &str = "This message attests that I control the given wallet";
 
-const ADDRESS_HEADER: &str = "POLY_ADDRESS";
-const SIGNATURE_HEADER: &str = "POLY_SIGNATURE";
-const TIMESTAMP_HEADER: &str = "POLY_TIMESTAMP";
 const NONCE_HEADER: &str = "POLY_NONCE";
 
 /// A credential set per nonce; `0` unless an account deliberately runs several.
@@ -51,7 +49,7 @@ impl ClobAuthHeaders {
     }
 }
 
-/// `POLY_ADDRESS` goes out LOWERCASE here and checksummed at L2 — see [`super::l2`].
+/// `POLY_ADDRESS` goes out LOWERCASE here, where the L2 headers send it checksummed.
 pub fn clob_auth_headers(key: &SigningKey, request: &ClobAuthRequest) -> ClobAuthHeaders {
     let digest = signing_digest(key.address(), request);
     ClobAuthHeaders {

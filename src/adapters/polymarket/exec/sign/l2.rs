@@ -12,15 +12,13 @@ use ring::hmac;
 use crate::secrets::Secret;
 
 use super::address::Address;
+use super::{ADDRESS_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER};
 
 const BASE64URL_ALPHABET: [u8; 64] =
     *b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-const ADDRESS_HEADER: &str = "POLY_ADDRESS";
 const API_KEY_HEADER: &str = "POLY_API_KEY";
 const PASSPHRASE_HEADER: &str = "POLY_PASSPHRASE";
-const SIGNATURE_HEADER: &str = "POLY_SIGNATURE";
-const TIMESTAMP_HEADER: &str = "POLY_TIMESTAMP";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HttpMethod {

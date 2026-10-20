@@ -1,7 +1,7 @@
 //! The wallet private key and the two things it produces: this account's own address, and 65-byte
 //! `r‖s‖v` signatures over a 32-byte digest. Signing is RFC-6979 deterministic, so no RNG enters the
-//! stack anywhere — the same digest always yields the same signature, which is what makes the sign
-//! vectors in `tests/fitness/poly_sign.rs` pinnable at all.
+//! stack anywhere — the same digest always yields the same signature, which is what makes recorded
+//! sign vectors pinnable at all.
 
 use std::fmt;
 
@@ -74,10 +74,7 @@ impl Signature {
     }
 
     pub fn to_hex(&self) -> String {
-        let mut out = String::with_capacity(2 + SIGNATURE_BYTES * 2);
-        out.push_str("0x");
-        hex::push_lower(&mut out, &self.0);
-        out
+        hex::prefixed_lower(&self.0)
     }
 }
 

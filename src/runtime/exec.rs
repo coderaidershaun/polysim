@@ -228,9 +228,6 @@ pub(super) fn exec_bring_up(mut setup: ExecBringUpSetup<'_>) -> Result<ExecBring
                 )
             }
             Some(VenuePreflight::Polymarket(preflight)) => {
-                // Before the lease: a refused edge must not burn a run nonce it never places under.
-                PolymarketExecAdapter::check_available(&preflight.wallet)
-                    .map_err(EngineError::PolymarketExecutionUnavailable)?;
                 let capabilities = polymarket_exec::capabilities();
                 let signer = preflight.wallet.signer.to_checksum_hex();
                 let lease = refuse_or_acquire_lease(

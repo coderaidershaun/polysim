@@ -79,77 +79,75 @@ fn venue_availability(failure: VenueFailure<'_>) -> Option<VenueAvailability> {
     }
 }
 
+/// Message fragments and the class each draws. The first row with a fragment the lowered message
+/// contains decides, so the order of the rows matters.
+const MESSAGE_RULES: &[(&[&str], RejectClass)] = &[
+    (
+        &[
+            // Auth, signature, payload, and account failures all fail identically on retry.
+            "unauthorized",
+            "invalid api key",
+            "invalid l1 request headers",
+            "invalid order payload",
+            "has to be the owner of the api key",
+            "has to be the address of the api key",
+            "address banned",
+            "in closed only mode",
+            "invalid expiration",
+            // Funding is fatal. The sell gate depends on allowance refresh, and quoting through an
+            // empty wallet burns the reject budget unnecessarily.
+            "not enough balance",
+            "allowance",
+            // A grid violation: preflight already stamps tick size and minimum, so a venue
+            // disagreement here means those stamps were wrong.
+            "minimum tick size rule",
+            "lower than the minimum",
+            "breaks minimum",
+        ],
+        RejectClass::Fatal,
+    ),
+    // A duplicate order shares the same signed fields and timestamp as one already sent. The first
+    // one is likely resting under an id this run never received, so it is Ambiguous; resync will
+    // find it.
+    (&["duplicated"], RejectClass::Ambiguous),
+    (
+        &[
+            // The routine cost of post-only quoting, or a marketable order with no counterparty.
+            // The level-triggered declaration will resubmit on its own: this slot simply closes and
+            // the next spin decides again.
+            "post-only order",
+            "fok orders are fully filled or killed",
+            "no orders found to match",
+            "there are no matching orders",
+            "rounding issues",
+            "not yet ready to process new orders",
+            // A 500 "order timed out" means the order never reached the book. This is Refused
+            // rather than Ambiguous, since there is no probe handle for it and Ambiguous would
+            // stall the slot.
+            "order timed out",
+        ],
+        RejectClass::Refused,
+    ),
+    // A taker hold: the order was accepted and cannot be cancelled until the hold lapses. This is
+    // StillLive on every subject, because closing the slot would abandon an order the venue is about
+    // to match; the edge withholds the cancel itself until the hold lapses.
+    (&["order match delayed"], RejectClass::StillLive),
+    // The order was cancelled on-chain, outside the CLOB. It is definitively gone.
+    (
+        &["canceled in the ctf exchange contract"],
+        RejectClass::Gone,
+    ),
+];
+
 /// The verdict a KNOWN message draws, or `None` when this engine cannot name it — the caller then
 /// decides from the HTTP status (see [`unmatched_class`]), which the message alone cannot see.
 fn order_class(message: &str, subject: RejectSubject) -> Option<RejectClass> {
     let lowered = message.to_ascii_lowercase();
-
-    // Auth, signature, payload, and account failures all fail identically on retry, so they
-    // are classified Fatal.
-    if lowered.contains("unauthorized")
-        || lowered.contains("invalid api key")
-        || lowered.contains("invalid l1 request headers")
-        || lowered.contains("invalid order payload")
-        || lowered.contains("has to be the owner of the api key")
-        || lowered.contains("has to be the address of the api key")
-        || lowered.contains("address banned")
-        || lowered.contains("in closed only mode")
-        || lowered.contains("invalid expiration")
-    {
-        return Some(RejectClass::Fatal);
-    }
-
-    // Funding is fatal. The sell gate depends on allowance refresh, and quoting through an empty
-    // wallet burns the reject budget unnecessarily.
-    if lowered.contains("not enough balance") || lowered.contains("allowance") {
-        return Some(RejectClass::Fatal);
-    }
-
-    // A grid violation: preflight already stamps tick size and minimum, so a venue
-    // disagreement here means those stamps were wrong.
-    if lowered.contains("minimum tick size rule")
-        || lowered.contains("lower than the minimum")
-        || lowered.contains("breaks minimum")
-    {
-        return Some(RejectClass::Fatal);
-    }
-
-    // A duplicate order shares the same signed fields and timestamp as one already sent. The
-    // first one is likely resting under an id this run never received, so it is Ambiguous;
-    // resync will find it.
-    if lowered.contains("duplicated") {
-        return Some(RejectClass::Ambiguous);
-    }
-
-    // The routine cost of post-only quoting, or a marketable order with no counterparty. The
-    // level-triggered declaration will resubmit on its own: this slot simply closes and the
-    // next spin decides again.
-    if lowered.contains("post-only order")
-        || lowered.contains("fok orders are fully filled or killed")
-        || lowered.contains("no orders found to match")
-        || lowered.contains("there are no matching orders")
-        || lowered.contains("rounding issues")
-        || lowered.contains("not yet ready to process new orders")
-    {
-        return Some(RejectClass::Refused);
-    }
-
-    // A 500 "order timed out" means the order never reached the book. This is Refused rather
-    // than Ambiguous, since there is no probe handle for it and Ambiguous would stall the slot.
-    if lowered.contains("order timed out") {
-        return Some(RejectClass::Refused);
-    }
-
-    // A taker hold: the order was accepted and cannot be cancelled until the hold lapses.
-    // This is StillLive on every subject, because closing the slot would abandon an order
-    // the venue is about to match; the edge withholds the cancel itself until the hold lapses.
-    if lowered.contains("order match delayed") {
-        return Some(RejectClass::StillLive);
-    }
-
-    // The order was cancelled on-chain, outside the CLOB. It is definitively gone.
-    if lowered.contains("canceled in the ctf exchange contract") {
-        return Some(RejectClass::Gone);
+    let rule = MESSAGE_RULES
+        .iter()
+        .find(|(fragments, _)| fragments.iter().any(|fragment| lowered.contains(fragment)));
+    if let Some(&(_, class)) = rule {
+        return Some(class);
     }
 
     // "not found" is definitive only on the cancel path. Elsewhere it claims the request was bad.

@@ -19,13 +19,7 @@ pub fn keccak256(bytes: &[u8]) -> Word {
 
 /// `keccak256(abi.encode(..))` over static-type fields, where that encoding IS the concatenation.
 pub fn hash_words(words: &[Word]) -> Word {
-    let mut hasher = Keccak::v256();
-    let mut digest = ZERO_WORD;
-    for word in words {
-        hasher.update(word);
-    }
-    hasher.finalize(&mut digest);
-    digest
+    keccak256(&words.concat())
 }
 
 pub fn word_from_uint(value: u128) -> Word {

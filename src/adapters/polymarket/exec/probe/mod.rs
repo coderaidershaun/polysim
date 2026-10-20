@@ -7,7 +7,7 @@
 //! and the L2 credentials do not exist until L1 mints them.
 
 /// An implementation partition, not a concept a caller names: everything worth reaching is
-/// re-exported below (lib.rs doctrine).
+/// re-exported below.
 mod payload;
 
 use std::time::Duration;
@@ -140,12 +140,20 @@ impl Probe {
         })
     }
 
-    async fn geoblock(&self) -> Result<Geoblock, ProbeError> {
-        let response = self.http.send_unsigned(GEOBLOCK_URL).await?;
-        payload::read_geoblock(GEOBLOCK_URL, &response)
+    pub(super) fn http(&self) -> &ClobHttp {
+        &self.http
     }
 
-    async fn protocol_version(&self) -> Result<String, ProbeError> {
+    pub(super) fn into_key(self) -> SigningKey {
+        self.key
+    }
+
+    pub(super) async fn geoblock(&self) -> Result<Geoblock, ProbeError> {
+        let response = self.http.send_unsigned(GEOBLOCK_URL).await?;
+        payload::decode(GEOBLOCK_URL, &response)
+    }
+
+    pub(super) async fn protocol_version(&self) -> Result<String, ProbeError> {
         let request = protocol_version();
         let response = self.http.send_public(&request).await?;
         payload::read_protocol_version(&request.path, &response)
@@ -153,7 +161,7 @@ impl Probe {
 
     /// Signing against the venue's own clock rather than ours: `POLY_TIMESTAMP` has no documented
     /// staleness tolerance, so a skewed host would fail auth with no way to tell why.
-    async fn server_time(&self) -> Result<i64, ProbeError> {
+    pub(super) async fn server_time(&self) -> Result<i64, ProbeError> {
         let request = server_time();
         let response = self.http.send_public(&request).await?;
         let body = payload::success_body(&request.path, &response)?;
@@ -165,7 +173,7 @@ impl Probe {
 
     /// Derive first: it is idempotent for an address that already holds credentials, where create
     /// would fail. A fresh wallet has none to derive, so create is the fallback, not the first move.
-    async fn api_credentials(
+    pub(super) async fn api_credentials(
         &self,
         timestamp_secs: i64,
     ) -> Result<(ApiCredentials, CredentialSource), ProbeError> {
@@ -199,7 +207,7 @@ impl Probe {
         payload::read_api_credentials(&request.path, &response)
     }
 
-    async fn is_closed_only(
+    pub(super) async fn is_closed_only(
         &self,
         signer: &RequestSigner,
         timestamp_secs: i64,

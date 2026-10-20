@@ -15,15 +15,17 @@
 
 use std::collections::BTreeSet;
 
+use polysim::adapters::decode::DecimalFault;
 use polysim::adapters::exec::ExecRequest;
 use polysim::adapters::polymarket::exec::codec::{
     AccountStamps, DecodeContext, EncodeContext, HttpAnswer, IgnoredReason, KnownOrder, OrderIndex,
     OrderSigner, OrderSignerSetup, OrdersRead, PROTOCOL_VERSION, PlaceRequestContext,
     PlacementStatus, RejectSubject, RejectVerdict, SettlementWatermark, StreamEvent, TokenBinding,
-    TokenTable, TradeSettlement, VenueAnswer, VenueAvailability, VenueFailure, account_snapshot,
-    cancel_market_orders, classify_error, decode_balance, decode_cancel, decode_clob_market,
-    decode_closed_only, decode_orders_page, decode_place, decode_protocol_version,
-    decode_single_order, decode_stream_frame, decode_trades_page, encode_request,
+    TokenTable, TradeSettlement, VenueAnswer, VenueAvailability, VenueFailure, WireError,
+    account_snapshot, cancel_market_orders, classify_error, decode_balance, decode_cancel,
+    decode_clob_market, decode_closed_only, decode_orders_page, decode_place,
+    decode_protocol_version, decode_single_order, decode_stream_frame, decode_trades_page,
+    encode_request,
 };
 use polysim::adapters::polymarket::exec::sign::address::Address;
 use polysim::adapters::polymarket::exec::sign::order::SignatureType;
@@ -597,6 +599,26 @@ fn single_fixture_reads_decode_their_documented_shape() {
         assert_eq!(event.client_id, CLIENT_A);
         assert_eq!(event.status, Some(VenueOrderStatus::PartiallyFilled));
         assert_eq!(event.qty, SIZE);
+    }
+
+    // A status spelling this engine does not know is refused rather than mapped to a near match.
+    // The refusal names the field, carries the venue's own spelling rather than the normalised one
+    // an operator would never find in the payload, and is not fatal.
+    {
+        let body = fixture!("data_order_single").replace(
+            "\"status\": \"LIVE\"",
+            "\"status\": \"ORDER_STATUS_Paused\"",
+        );
+        let refused = decode_single_order(ok(&body), 3, &wiring.decode())
+            .expect_err("an unknown order status is refused");
+        match &refused {
+            WireError::Decode(DecimalFault::UnknownEnum { field, value }) => {
+                assert_eq!(*field, "status");
+                assert_eq!(&**value, "ORDER_STATUS_Paused");
+            }
+            other => panic!("expected an unknown-status refusal, got {other:?}"),
+        }
+        assert!(!refused.is_fatal());
     }
 
     // The trades page decodes both roles.

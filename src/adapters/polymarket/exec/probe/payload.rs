@@ -78,10 +78,6 @@ pub enum ProbeError {
     HostClock,
 }
 
-pub(super) fn read_geoblock(url: &str, response: &ClobResponse) -> Result<Geoblock, ProbeError> {
-    decode(url, response)
-}
-
 /// Reported as text, not as a number: the probe exists to say what the venue answered, and a body
 /// [`decode_protocol_version`] cannot read is exactly the finding worth carrying back.
 pub(super) fn read_protocol_version(
@@ -107,9 +103,8 @@ pub(super) fn read_api_credentials(
     ))
 }
 
-/// # Errors
-/// Transport, a non-2xx status, or a body carrying no `closed_only` flag. Shared with the startup
-/// gate's [`decode_closed_only`] so the diagnostic and the refusal read the field the same way.
+/// A body without the `closed_only` flag is an error, never a "may trade": the startup gate reads
+/// the flag through here, so it must fail closed.
 pub(super) fn read_closed_only(url: &str, response: &ClobResponse) -> Result<bool, ProbeError> {
     let body = success_body(url, response)?;
     decode_closed_only(body).ok_or_else(|| ProbeError::UnexpectedBody {
@@ -180,7 +175,7 @@ struct WrappedOrders {
     data: Vec<serde_json::Value>,
 }
 
-fn decode<T: serde::de::DeserializeOwned>(
+pub(super) fn decode<T: serde::de::DeserializeOwned>(
     url: &str,
     response: &ClobResponse,
 ) -> Result<T, ProbeError> {

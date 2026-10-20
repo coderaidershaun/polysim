@@ -1,5 +1,6 @@
-//! HMAC-SHA256 signing gate (every private call). Params -> exact signed bytes (REST = URL,
-//! WS = JSON). Never unsigned on wire.
+//! Signs every private Binance call with HMAC-SHA256. Parameters become the exact signed bytes,
+//! which REST sends in the URL and the WebSocket API sends as JSON, so nothing private reaches the
+//! wire unsigned.
 
 use std::fmt;
 
@@ -14,9 +15,8 @@ const SIGNATURE_PARAM: &str = "signature";
 const RECV_WINDOW_PARAM: &str = "recvWindow";
 const RECV_WINDOW_MAX_MILLIS: u32 = 60_000;
 
-const HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
-
-/// Binance timestamp tolerance. Widen -> replay exposure.
+/// How old a request's timestamp may be when Binance receives it. A wider window keeps a captured
+/// request replayable for longer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RecvWindow(u32);
 
@@ -24,7 +24,7 @@ impl RecvWindow {
     pub const DEFAULT: RecvWindow = RecvWindow(5_000);
 
     /// # Errors
-    /// Out of range 1..=60000.
+    /// The window is outside 1..=60000 milliseconds.
     pub fn from_millis(millis: u32) -> Result<Self, SignError> {
         if millis == 0 || millis > RECV_WINDOW_MAX_MILLIS {
             return Err(SignError::RecvWindowOutOfRange { millis });
@@ -37,7 +37,8 @@ impl RecvWindow {
     }
 }
 
-/// Binance timestamp ms since epoch. Minted by ClockOffset::stamp only (never uncorrected).
+/// A request timestamp in milliseconds since the epoch. Only [`ClockOffset::stamp`] mints one, so
+/// no request is ever stamped with the uncorrected local clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestStamp(i64);
 
@@ -47,7 +48,8 @@ impl RequestStamp {
     }
 }
 
-/// server_time - local_time (learned from GET /api/v3/time). Slow host -> recvWindow rejection.
+/// The venue's clock minus ours, learned from `GET /api/v3/time`. Without it, a host whose clock
+/// runs behind sends requests the venue rejects as outside the receive window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClockOffset {
     correction: DurationUs,
@@ -58,7 +60,8 @@ impl ClockOffset {
         correction: DurationUs::ZERO,
     };
 
-    /// observed_at = response arrival. Round-trip: safe at receipt (lags), unsafe at send.
+    /// `observed_at` must be when the response arrived. Taken at receipt, the offset lags, which is
+    /// safe; taken at send, it would stamp requests ahead of the venue's clock.
     pub fn learn(server_time: TsUs, observed_at: TsUs) -> Self {
         Self {
             correction: server_time.diff(observed_at),
@@ -69,13 +72,14 @@ impl ClockOffset {
         self.correction
     }
 
-    /// Parameter not clock -> replay identical. Floors to safe side.
+    /// Takes the time as a parameter rather than reading a clock, so a replay stamps identically.
+    /// Rounds down, which is the safe side.
     pub fn stamp(self, local_now: TsUs) -> RequestStamp {
         RequestStamp((local_now + self.correction).micros().div_euclid(1_000))
     }
 }
 
-/// Params unsigned alone -> only RequestSigner::sign yields sendable.
+/// Unsigned parameters. Only [`RequestSigner::sign`] turns them into something that can be sent.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RequestParams {
     entries: Vec<(&'static str, String)>,
@@ -86,7 +90,8 @@ impl RequestParams {
         Self::default()
     }
 
-    /// Replace if exists (venue rejects duplicates).
+    /// Replaces a value already set rather than adding a second, because the venue rejects a
+    /// duplicated parameter.
     #[must_use]
     pub fn set(mut self, name: &'static str, value: impl Into<String>) -> Self {
         let value = value.into();
@@ -103,7 +108,7 @@ impl RequestParams {
     }
 }
 
-/// HMAC-SHA256 lowercase hex.
+/// An HMAC-SHA256 tag in lowercase hex.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Signature(String);
 
@@ -113,7 +118,7 @@ impl Signature {
     }
 }
 
-/// Params + signature = only sendable private request form.
+/// Parameters together with their signature: the only form of a private request that can be sent.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SignedRequest {
     signed_params: Vec<(&'static str, String)>,
@@ -122,12 +127,14 @@ pub struct SignedRequest {
 }
 
 impl SignedRequest {
-    /// Exact bytes + sig VERBATIM to URL; never via reqwest.query().
+    /// These exact bytes, signature included, go into the URL VERBATIM. Never pass them through
+    /// reqwest's `query()`, which would rebuild the string the signature covers.
     pub fn query(&self) -> &str {
         &self.query
     }
 
-    /// Sorted, sig excluded. WS JSON adds sig key. Venue verifies sorted payload.
+    /// Sorted by name, without the signature. A WebSocket request adds the signature as its own
+    /// JSON key, and the venue verifies the sorted payload.
     pub fn signed_params(&self) -> &[(&'static str, String)] {
         &self.signed_params
     }
@@ -137,7 +144,8 @@ impl SignedRequest {
     }
 }
 
-/// Derived Debug leaks: query replayable. WS apiKey is param (plaintext). Names only.
+/// Hand-written because the derived form would leak: the query can be replayed, and on the
+/// WebSocket API the api key travels in plain text as a parameter. Only parameter names are shown.
 impl fmt::Debug for SignedRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let names: Vec<&str> = self.signed_params.iter().map(|(name, _)| *name).collect();
@@ -170,10 +178,11 @@ impl RequestSigner {
         Signature(hex_lower(tag.as_ref()))
     }
 
-    /// Sort by name, stamp, sign. Caller timestamp/sig dropped.
+    /// Sorts by name, stamps and signs. Any timestamp or signature the caller set is dropped.
     ///
     /// # Errors
-    /// Not URL safe (char illegal unescaped -> divergence).
+    /// A parameter holds a character a URL query cannot carry unescaped. Escaping it would make the
+    /// bytes sent differ from the bytes signed.
     pub fn sign(
         &self,
         params: RequestParams,
@@ -199,7 +208,7 @@ impl RequestSigner {
     }
 }
 
-/// Hand-written (prevent ring::Key rendering from leaking key material).
+/// Hand-written so the key material inside the HMAC key is never rendered.
 impl fmt::Debug for RequestSigner {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("RequestSigner(<hmac-sha256>)")
@@ -216,7 +225,8 @@ pub enum SignError {
     RecvWindowOutOfRange { millis: u32 },
 }
 
-/// Binance params legal unencoded (symbols/enums/decimals/charset). Refuse others.
+/// Binance's private parameters are symbols, enum words and decimals, which a URL carries
+/// unescaped. Anything else is refused rather than escaped.
 fn check_query_safe(name: &str, value: &str) -> Result<(), SignError> {
     let value_offset = name.len() + 1;
     let offender = name
@@ -249,10 +259,5 @@ fn join_params(entries: &[(&'static str, String)]) -> String {
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
-    let mut hex = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        hex.push(HEX_DIGITS[usize::from(byte >> 4)] as char);
-        hex.push(HEX_DIGITS[usize::from(byte & 0x0f)] as char);
-    }
-    hex
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

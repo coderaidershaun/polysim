@@ -66,13 +66,6 @@ impl OrderSide {
             OrderSide::Sell => 1,
         }
     }
-
-    pub const fn wire_name(self) -> &'static str {
-        match self {
-            OrderSide::Buy => "BUY",
-            OrderSide::Sell => "SELL",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

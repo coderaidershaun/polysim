@@ -1,12 +1,14 @@
-//! Decoders for placement and cancellation responses. Read decoders live in super::read.
+//! Decoders for placement and cancellation responses.
 //!
 //! Fill law: a taker fill folds from the placement response's own amounts, which are the
 //! sole report of it. A maker fill instead folds from the order stream's cumulative
 //! size_matched. Trade payloads carry lineage, fees, and settlement only — the same id
 //! repeats at every settlement step, so it is never itself accumulated.
 
-use crate::ids::{AssetId, ClientOrderId, InstrumentId, Price, Qty, Side};
-use crate::msg::exec::{ExecEvent, ExecKind, Provenance, VenueOrderStatus};
+use crate::adapters::decode::unknown_enum;
+use crate::adapters::exec::blank;
+use crate::ids::{ClientOrderId, InstrumentId, Price, Qty, Side};
+use crate::msg::exec::{ExecEvent, ExecKind, VenueOrderStatus};
 
 use super::correlation::venue_order_id_digest;
 use super::reject::{RejectSubject, VenueFailure, cancel_refusal, classify_error};
@@ -91,11 +93,7 @@ pub fn decode_place(
         _ => VenueOrderStatus::New,
     };
     let event = ExecEvent {
-        instrument: request.instrument,
-        client_id: request.client_id,
         venue_order_id: Some(venue_order_id_digest(&response.order_id)),
-        trade_id: None,
-        kind: ExecKind::AckPlaced,
         status: Some(status_with_fill(venue_status, filled_qty, request.qty)),
         side: request.side,
         price: request.price,
@@ -105,7 +103,12 @@ pub fn decode_place(
         last_qty: filled_qty,
         cumulative_qty: filled_qty,
         cumulative_quote: filled_quote,
-        ..blank_event(request.instrument, request.client_id, context)
+        ..blank_event(
+            ExecKind::AckPlaced,
+            request.instrument,
+            request.client_id,
+            context,
+        )
     };
     Ok(VenueAnswer::Answered(PlaceOutcome {
         event,
@@ -145,9 +148,13 @@ pub fn decode_cancel(
         };
         events.push(ExecEvent {
             venue_order_id: Some(venue_order_id_digest(venue_order_id)),
-            kind: ExecKind::AckCanceled,
             status: Some(VenueOrderStatus::Canceled),
-            ..blank_event(known.instrument, known.client_id, context)
+            ..blank_event(
+                ExecKind::AckCanceled,
+                known.instrument,
+                known.client_id,
+                context,
+            )
         });
     }
     // Partial success is this venue's design; each decline carries its own verdict.
@@ -157,9 +164,13 @@ pub fn decode_cancel(
         };
         events.push(ExecEvent {
             venue_order_id: Some(venue_order_id_digest(venue_order_id)),
-            kind: ExecKind::AckFailed,
             reject: Some(cancel_refusal(reason)),
-            ..blank_event(known.instrument, known.client_id, context)
+            ..blank_event(
+                ExecKind::AckFailed,
+                known.instrument,
+                known.client_id,
+                context,
+            )
         });
     }
     Ok(VenueAnswer::Answered(events))
@@ -195,9 +206,13 @@ pub(super) fn decode_failure(
     Ok(Some(match verdict {
         RejectVerdict::Venue(availability) => VenueAnswer::Unavailable(availability),
         RejectVerdict::Order(class) => VenueAnswer::Answered(ExecEvent {
-            kind: ExecKind::AckFailed,
             reject: Some(class),
-            ..blank_event(InstrumentId(0), ClientOrderId(0), context)
+            ..blank_event(
+                ExecKind::AckFailed,
+                InstrumentId::NOT_APPLICABLE,
+                ClientOrderId(0),
+                context,
+            )
         }),
     }))
 }
@@ -210,49 +225,30 @@ fn reject_answer(
     match verdict {
         RejectVerdict::Venue(availability) => VenueAnswer::Unavailable(availability),
         RejectVerdict::Order(class) => VenueAnswer::Answered(ExecEvent {
-            kind: ExecKind::AckFailed,
             reject: Some(class),
             side: request.side,
             price: request.price,
             qty: request.qty,
-            ..blank_event(request.instrument, request.client_id, context)
+            ..blank_event(
+                ExecKind::AckFailed,
+                request.instrument,
+                request.client_id,
+                context,
+            )
         }),
     }
 }
 
-/// Fills in the fields this venue never supplies for us: a commission rate, an error code,
-/// and an amend budget.
+/// This venue has no amend, so every event it raises says the amend budget is spent.
 pub(super) fn blank_event(
+    kind: ExecKind,
     instrument: InstrumentId,
     client_id: ClientOrderId,
     context: &DecodeContext<'_>,
 ) -> ExecEvent {
     ExecEvent {
-        instrument,
-        client_id,
-        venue_order_id: None,
-        trade_id: None,
-        kind: ExecKind::AckFailed,
-        status: None,
-        reject: None,
-        provenance: Provenance::Mine,
-        side: Side::Buy,
-        liquidity: None,
-        price: Price(0),
-        qty: Qty(0),
-        last_price: Price(0),
-        last_qty: Qty(0),
-        cumulative_qty: Qty(0),
-        cumulative_quote: 0,
-        commission: 0,
-        commission_asset: AssetId::UNKNOWN,
-        reject_code: 0,
         amends_remaining: ExecEvent::AMENDS_EXHAUSTED,
-        recon_seq: 0,
-        exchange_ts_us: context.received_ts_us,
-        request_sent_ts_us: None,
-        received_ts_us: context.received_ts_us,
-        queued_ts_us: context.received_ts_us,
+        ..blank(kind, instrument, client_id, context.received_ts_us)
     }
 }
 
@@ -264,11 +260,6 @@ fn placement_status(status: &str) -> Result<PlacementStatus, WireError> {
         "matched" => PlacementStatus::Matched,
         // The venue's own spelling, not the lowercased one it was matched against: an operator
         // chasing an unknown status needs the string that was actually sent.
-        _ => {
-            return Err(WireError::UnknownEnum {
-                field: "status",
-                value: status.into(),
-            });
-        }
+        _ => return Err(unknown_enum("status", status).into()),
     })
 }

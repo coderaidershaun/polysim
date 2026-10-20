@@ -1,5 +1,5 @@
-//! Runtime seam: actor setup and the gate that must pass before it. Preflight lives in preflight.rs
-//! and is re-exported here so runtime doesn't need to know multiple modules.
+//! What the runtime needs to start the execution actor, and the startup gate that must pass first.
+//! The gate is re-exported here so the runtime reaches both through one module.
 
 use std::time::Duration;
 
@@ -65,19 +65,6 @@ pub struct PolymarketExecAdapterSetup {
 pub struct PolymarketExecAdapter;
 
 impl PolymarketExecAdapter {
-    /// A pre-spawn check, run before a lease is acquired. A refusal here consumes no run nonce.
-    ///
-    /// # Errors
-    /// [`PolymarketExecError::UnprovenWalletType`] for unproven signing paths.
-    pub fn check_available(wallet: &WalletIdentity) -> Result<(), PolymarketExecError> {
-        match wallet.signature_type {
-            SignatureType::Eoa | SignatureType::GnosisSafe => Ok(()),
-            unproven => Err(PolymarketExecError::UnprovenWalletType {
-                code: unproven.code(),
-            }),
-        }
-    }
-
     pub(crate) fn spawn(setup: PolymarketExecAdapterSetup, runtime: &Handle) -> EdgeHandle {
         let stop = ExecStop::new();
         let sweep_deadline = setup.context.sweep_deadline;
@@ -89,12 +76,4 @@ impl PolymarketExecAdapter {
             missed_sweep_cost: "orders may still rest on the venue",
         }
     }
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum PolymarketExecError {
-    #[error(
-        "this wallet signs orders as signatureType {code}, which needs the erc-7739 wrap — the wrap is implemented and pinned against a vector, but no live order has ever been signed with it, and an unproven signing path fails at the venue as a generic refusal"
-    )]
-    UnprovenWalletType { code: u8 },
 }

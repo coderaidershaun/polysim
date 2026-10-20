@@ -17,6 +17,12 @@ pub(super) fn encode_lower(bytes: &[u8]) -> String {
     out
 }
 
+pub(super) fn prefixed_lower(bytes: &[u8]) -> String {
+    let mut out = String::from("0x");
+    push_lower(&mut out, bytes);
+    out
+}
+
 /// Optional `0x` prefix accepted; count must be even.
 pub fn decode(text: &str) -> Result<Vec<u8>, HexError> {
     let body = text.strip_prefix("0x").unwrap_or(text);

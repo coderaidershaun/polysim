@@ -1,8 +1,9 @@
-//! Deserialised Binance REST response shapes (public + private). Decimals stay as venue strings.
+//! Binance REST response shapes, public and private. Decimals stay as the venue's strings until a
+//! decoder turns them into mantissas.
 
 use serde::Deserialize;
 
-/// exchangeInfo subset (startup 1e-8 scale check).
+/// The part of `exchangeInfo` the startup scale check reads.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ExchangeInfo {
     #[serde(rename = "rateLimits", default)]
@@ -28,8 +29,9 @@ pub struct SymbolInfo {
     pub filters: Vec<SymbolFilter>,
 }
 
-/// Union of every filter shape engine reads (spot + futures use different names for same limits).
-/// Key on filter_type first (several spell limit; MARKET_LOT_SIZE mirrors LOT_SIZE).
+/// Every filter shape the engine reads, in one struct, because spot and futures name the same
+/// limits differently. Match on `filter_type` first: several filters spell a `limit`, and
+/// `MARKET_LOT_SIZE` mirrors `LOT_SIZE`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SymbolFilter {
     #[serde(rename = "filterType")]
@@ -58,8 +60,8 @@ pub struct SymbolFilter {
     pub max_num_order_amends: Option<u32>,
 }
 
-/// GET /api/v3/account. Only fields engine acts on (venue returns ~20 more). deny_unknown_fields
-/// absent (venue additions don't break startup).
+/// `GET /api/v3/account`, holding only the fields the engine acts on out of the twenty or so more
+/// the venue returns. Unknown fields are allowed so a venue addition cannot break startup.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct AccountInfo {
     #[serde(rename = "canTrade")]
@@ -70,7 +72,7 @@ pub struct AccountInfo {
     pub can_deposit: bool,
     #[serde(rename = "accountType")]
     pub account_type: Box<str>,
-    /// Account-specific trading group (logged, never gated).
+    /// The account's trading groups. They are logged, never used as a gate.
     #[serde(default)]
     pub permissions: Vec<Box<str>>,
     #[serde(rename = "commissionRates")]
@@ -84,7 +86,7 @@ pub struct AccountInfo {
 }
 
 impl AccountInfo {
-    /// Balances worth showing (live accounts have dozens of dust zeros).
+    /// The balances worth showing, because a live account holds dozens of zero dust entries.
     pub fn funded_balances(&self) -> impl Iterator<Item = &Balance> {
         self.balances.iter().filter(|balance| balance.is_funded())
     }
@@ -106,14 +108,15 @@ pub struct Balance {
 }
 
 impl Balance {
-    /// String test, not parse (venue pads to 8 decimals, "zeroes+dots" avoids dust conversion).
+    /// Tests the text instead of parsing it: the venue pads to 8 decimals, so any non-zero digit
+    /// means a balance, and no dust amount has to be converted.
     pub fn is_funded(&self) -> bool {
         let has_value = |amount: &str| amount.chars().any(|digit| ('1'..='9').contains(&digit));
         has_value(&self.free) || has_value(&self.locked)
     }
 }
 
-/// Fill from GET /api/v3/myTrades.
+/// A fill as `GET /api/v3/myTrades` reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct AccountTrade {
     pub symbol: Box<str>,
@@ -135,7 +138,8 @@ pub struct AccountTrade {
     pub is_maker: bool,
 }
 
-/// Order as venue reports (shared shape: GET order, GET openOrders, DELETE acknowledgement).
+/// An order as the venue reports it. REST reads and every WebSocket order answer share this shape;
+/// only the amend answer spells two of its fields differently, hence the aliases.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct OrderRecord {
     pub symbol: Box<str>,
@@ -146,11 +150,11 @@ pub struct OrderRecord {
     #[serde(rename = "origClientOrderId", default)]
     pub orig_client_order_id: Option<Box<str>>,
     pub price: Box<str>,
-    #[serde(rename = "origQty")]
+    #[serde(rename = "origQty", alias = "qty")]
     pub orig_qty: Box<str>,
     #[serde(rename = "executedQty")]
     pub executed_qty: Box<str>,
-    #[serde(rename = "cummulativeQuoteQty", default)]
+    #[serde(rename = "cummulativeQuoteQty", alias = "cumulativeQuoteQty", default)]
     pub cumulative_quote_qty: Box<str>,
     pub status: Box<str>,
     #[serde(rename = "timeInForce", default)]

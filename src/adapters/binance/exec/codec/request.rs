@@ -1,22 +1,23 @@
-//! Intent -> method. Hot side names what, encoder picks which. Params only.
-//! Signer gate owns apiKey/recvWindow/timestamp/signature. No second opinions on wire.
+//! Turns an engine request into a WebSocket API method and its parameters. The hot side names what
+//! it wants and this picks the method. Only the signer adds `apiKey`, `recvWindow`, `timestamp` and
+//! `signature`, so nothing here sets them.
 
 use crate::adapters::exec::ExecRequest;
-use crate::ids::{ClientOrderId, FIXED_SCALE, InstrumentId, Side};
+use crate::ids::{ClientOrderId, FIXED_SCALE, InstrumentId};
 use crate::msg::exec::OrderStyle;
 
 use super::super::sign::RequestParams;
 use super::client_id::format_client_order_id;
 use super::{EncodeContext, WireError};
 
-/// Method + params.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedRequest {
     pub method: &'static str,
     pub params: RequestParams,
 }
 
-/// # Errors: UnknownInstrument (wiring fault).
+/// # Errors
+/// The request names an instrument the symbol table does not hold, which is a wiring fault.
 pub fn encode_request(
     request: ExecRequest,
     context: &EncodeContext<'_>,
@@ -34,7 +35,7 @@ pub fn encode_request(
             params: style_params(
                 RequestParams::new()
                     .set("symbol", symbol(instrument, context)?)
-                    .set("side", side_param(side))
+                    .set("side", side.wire_name())
                     .set("price", decimal(price.0))
                     .set("quantity", decimal(qty.0))
                     .set("newClientOrderId", client_order_id(client_id, context)),
@@ -75,12 +76,14 @@ pub fn encode_request(
                 .set("symbol", symbol(instrument, context)?)
                 .set("origClientOrderId", client_order_id(client_id, context)),
         },
-        // Symbol-scoped. Account-wide costs weight 80 vs 6, returns off-topic symbols.
+        // Scoped to one symbol: the account-wide form costs weight 80 instead of 6 and returns
+        // symbols this engine does not trade.
         ExecRequest::OpenOrders { instrument } => EncodedRequest {
             method: "openOrders.status",
             params: RequestParams::new().set("symbol", symbol(instrument, context)?),
         },
-        // Unsigned userDataStream.subscribe needs Ed25519 session. Use signature form + HMAC.
+        // The unsigned `userDataStream.subscribe` needs an Ed25519 session, so this uses the
+        // signature form, signed with HMAC.
         ExecRequest::SubscribeUserStream => EncodedRequest {
             method: "userDataStream.subscribe.signature",
             params: RequestParams::new(),
@@ -88,7 +91,8 @@ pub fn encode_request(
     })
 }
 
-/// Pin newOrderRespType=RESULT (defaults differ by type). LIMIT_MAKER no timeInForce.
+/// Pins `newOrderRespType=RESULT`, because the default differs by order type. `LIMIT_MAKER` takes
+/// no `timeInForce`.
 fn style_params(params: RequestParams, style: OrderStyle) -> RequestParams {
     let params = params.set("newOrderRespType", "RESULT");
     match style {
@@ -111,22 +115,15 @@ fn client_order_id(client_id: ClientOrderId, context: &EncodeContext<'_>) -> Str
     format_client_order_id(context.identity.te_tag, client_id)
 }
 
-fn side_param(side: Side) -> &'static str {
-    match side {
-        Side::Buy => "BUY",
-        Side::Sell => "SELL",
-    }
-}
-
 /// Decimal places in an engine mantissa, i.e. `FIXED_SCALE == 10^FIXED_DECIMALS`.
 const FIXED_DECIMALS: u32 = 8;
 
 const _: () = assert!(FIXED_SCALE == 10_i64.pow(FIXED_DECIMALS));
 
-/// Mantissa -> decimal. Never f64. Trim trailing zeros.
+/// Renders a mantissa as a decimal with trailing zeros trimmed, never passing through `f64`.
 fn decimal(mantissa: i64) -> String {
     let scale = FIXED_SCALE as u64;
-    // unsigned_abs avoids -i64::MIN overflow.
+    // `unsigned_abs` avoids the overflow of negating `i64::MIN`.
     let magnitude = mantissa.unsigned_abs();
     let sign = match mantissa < 0 {
         true => "-",

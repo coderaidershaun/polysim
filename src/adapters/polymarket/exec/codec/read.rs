@@ -1,15 +1,16 @@
-//! Read answers -> events. Orders, trades, balances and market metadata: everything the driver
-//! asks for rather than causes.
+//! Turns read answers into events: orders, trades, balances and market metadata, everything the
+//! driver asks for rather than causes.
 //!
 //! The rebuild after a disconnect happens HERE and only here. This venue's user stream replays
 //! nothing it dropped, so `GET /data/orders` and `GET /data/trades` are the state of record and the
 //! stream may only resume once they have landed.
 
+use crate::adapters::decode::{order_side, price_field, qty_field, unknown_enum};
+use crate::adapters::exec::{ChunkStamps, account_chunks};
 use crate::adapters::venue_clock::clamp_exchange_ts;
 use crate::ids::{AssetId, ClientOrderId, InstrumentId, Price, Qty, Side};
 use crate::msg::exec::{
-    ACCOUNT_CHUNK_ASSETS, AccountChunk, AccountChunkKind, AssetBalance, ExecEvent, ExecKind,
-    VenueOrderStatus,
+    AccountChunk, AccountChunkKind, AssetBalance, ExecEvent, ExecKind, VenueOrderStatus,
 };
 use crate::time::TsUs;
 
@@ -19,11 +20,11 @@ use super::response::{blank_event, decode_failure};
 use super::stream::{TradeLineage, trade_lineage};
 use super::wire::{
     BalanceAllowance, ClobMarketResponse, ClosedOnlyResponse, HeartbeatResponse, NegRiskResponse,
-    OrderRecord, OrdersPage, TradesPage, VersionResponse,
+    OrderRecord, Page, TradeRecord, VersionResponse,
 };
 use super::{
-    DecodeContext, FRAME, HttpAnswer, VenueAnswer, WireError, optional_qty, order_side, price_of,
-    qty_of, status_with_fill, venue_amount, venue_status,
+    DecodeContext, FRAME, HttpAnswer, VenueAnswer, WireError, optional_qty, status_with_fill,
+    venue_amount, venue_status,
 };
 
 /// The cursor the venue answers on the LAST page — base64 for `-1`. Reported as a page to follow it
@@ -40,7 +41,7 @@ fn page_after(cursor: &str) -> Option<Box<str>> {
 
 /// Orders read. Each page sorts by whether we know the token and whether the token is bound to an
 /// instrument.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct DecodedOrders {
     pub events: Vec<ExecEvent>,
     /// Known token, unknown order id. At boot these are prior-run orders to be swept; mid-run they
@@ -88,19 +89,13 @@ pub fn decode_orders_page(
         recon_seq,
     } = read;
     if let Some(failure) = decode_failure(answer, RejectSubject::Read, context)? {
-        return Ok(failure.map(|_| DecodedOrders {
-            events: Vec::new(),
-            unmapped: Vec::new(),
-            unattributable: Vec::new(),
-            next_cursor: None,
-        }));
+        return Ok(failure.map(|_| DecodedOrders::default()));
     }
-    let page: OrdersPage = FRAME.decode(answer.body)?;
+    let page: Page<OrderRecord> = FRAME.decode(answer.body)?;
     let mut decoded = DecodedOrders {
         events: Vec::with_capacity(page.data.len() + 1),
-        unmapped: Vec::new(),
-        unattributable: Vec::new(),
         next_cursor: page_after(&page.next_cursor),
+        ..DecodedOrders::default()
     };
     for record in &page.data {
         match decode_order_record(record, ExecKind::SnapshotOrder, recon_seq, context)? {
@@ -113,9 +108,8 @@ pub fn decode_orders_page(
     }
     // Push end marker even on empty page: an account with nothing resting still finishes resync.
     decoded.events.push(ExecEvent {
-        kind: ExecKind::SnapshotEnd,
         recon_seq,
-        ..blank_event(instrument, ClientOrderId(0), context)
+        ..blank_event(ExecKind::SnapshotEnd, instrument, ClientOrderId(0), context)
     });
     Ok(VenueAnswer::Answered(decoded))
 }
@@ -147,13 +141,11 @@ fn decode_order_record(
     let Some(known) = context.orders.resolve(&record.id) else {
         return Ok(None);
     };
-    let qty = qty_of("original_size", &record.original_size)?;
+    let qty = qty_field("original_size", &record.original_size)?;
     let filled = optional_qty("size_matched", &record.size_matched)?;
-    let price = price_of("price", &record.price)?;
+    let price = price_field("price", &record.price)?;
     Ok(Some(ExecEvent {
-        instrument,
         venue_order_id: Some(venue_order_id_digest(&record.id)),
-        kind,
         status: Some(status_with_fill(
             venue_status("status", &record.status)?,
             filled,
@@ -163,7 +155,7 @@ fn decode_order_record(
         price,
         qty,
         cumulative_qty: filled,
-        // Resting order fills at its limit; quote agrees exactly.
+        // A resting order fills at its own limit, so the quote total is exact.
         cumulative_quote: price.notional(filled),
         recon_seq,
         // Seconds, and an INTEGER on this surface where the stream sends the same idea as a string.
@@ -171,7 +163,7 @@ fn decode_order_record(
             record.created_at.saturating_mul(1_000),
             context.received_ts_us,
         ),
-        ..blank_event(instrument, known.client_id, context)
+        ..blank_event(kind, instrument, known.client_id, context)
     }))
 }
 
@@ -183,13 +175,13 @@ fn unmapped_order(
     let Some(instrument) = context.tokens.instrument(&record.asset_id) else {
         return Ok(None);
     };
-    let qty = qty_of("original_size", &record.original_size)?;
+    let qty = qty_field("original_size", &record.original_size)?;
     let filled = optional_qty("size_matched", &record.size_matched)?;
     Ok(Some(UnmappedOrder {
         instrument,
         venue_order_id: record.id.clone().into(),
         side: order_side("side", &record.side)?,
-        price: price_of("price", &record.price)?,
+        price: price_field("price", &record.price)?,
         qty,
         filled,
         status: status_with_fill(venue_status("status", &record.status)?, filled, qty),
@@ -203,7 +195,7 @@ fn unattributable_order(record: &OrderRecord) -> Result<UnattributableOrder, Wir
     })
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct DecodedTrades {
     pub trades: Vec<TradeLineage>,
     pub next_cursor: Option<Box<str>>,
@@ -216,12 +208,9 @@ pub fn decode_trades_page(
     context: &DecodeContext<'_>,
 ) -> Result<VenueAnswer<DecodedTrades>, WireError> {
     if let Some(failure) = decode_failure(answer, RejectSubject::Read, context)? {
-        return Ok(failure.map(|_| DecodedTrades {
-            trades: Vec::new(),
-            next_cursor: None,
-        }));
+        return Ok(failure.map(|_| DecodedTrades::default()));
     }
-    let page: TradesPage = FRAME.decode(answer.body)?;
+    let page: Page<TradeRecord> = FRAME.decode(answer.body)?;
     let mut trades = Vec::with_capacity(page.data.len());
     for record in &page.data {
         if let Some(trade) = trade_lineage(record, context)? {
@@ -252,7 +241,7 @@ pub fn decode_balance(
     Ok(VenueAnswer::Answered(AssetBalance {
         asset,
         free: venue_amount("balance", &response.balance)?,
-        // Venue reports no locked/reserved; engine tracks this separately.
+        // The venue reports no locked or reserved amount; the engine tracks reservations itself.
         locked: 0,
     }))
 }
@@ -303,38 +292,12 @@ pub fn account_snapshot(
         settled_through,
         received_ts_us,
     } = stamps;
-    let blank = AssetBalance {
-        asset: AssetId::UNKNOWN,
-        free: 0,
-        locked: 0,
-    };
-    let mut chunk = AccountChunk {
-        kind,
-        balances: [blank; ACCOUNT_CHUNK_ASSETS],
-        len: 0,
-        is_last_chunk: false,
+    let chunk_stamps = ChunkStamps {
         venue_update_ts_ms: settled_through.0,
         exchange_ts_us: received_ts_us,
         received_ts_us,
-        queued_ts_us: received_ts_us,
     };
-    let mut chunks = Vec::new();
-    for group in balances.chunks(ACCOUNT_CHUNK_ASSETS) {
-        chunk.balances = [blank; ACCOUNT_CHUNK_ASSETS];
-        for (slot, balance) in chunk.balances.iter_mut().zip(group) {
-            *slot = *balance;
-        }
-        chunk.len = group.len() as u8;
-        chunks.push(chunk);
-    }
-    // Empty sweep must still commit to arm readiness.
-    if chunks.is_empty() {
-        chunks.push(chunk);
-    }
-    if let Some(last) = chunks.last_mut() {
-        last.is_last_chunk = true;
-    }
-    chunks
+    account_chunks(kind, balances, chunk_stamps)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,7 +309,8 @@ pub struct ClobMarket {
     pub maker_fee_bps: i32,
     pub taker_fee_bps: i32,
     pub is_accepting_orders: bool,
-    /// True on crypto markets: taker orders held 250ms and uncancellable until hold lapses.
+    /// True on crypto markets, where a taker order is held for 250ms and cannot be cancelled until
+    /// the hold lapses.
     pub has_taker_delay: bool,
 }
 
@@ -361,15 +325,12 @@ pub struct ClobToken {
 pub fn decode_heartbeat(body: &str) -> Result<Box<str>, WireError> {
     let response: HeartbeatResponse = FRAME.decode(body)?;
     match response.heartbeat_id.is_empty() {
-        true => Err(WireError::UnknownEnum {
-            field: "heartbeat_id",
-            value: "".into(),
-        }),
+        true => Err(unknown_enum("heartbeat_id", "").into()),
         false => Ok(response.heartbeat_id.into()),
     }
 }
 
-/// Venue answers `{"version":2}`; docs promise bare `2`. Both shapes read here.
+/// The venue answers `{"version":2}` where its documentation promises a bare `2`, so both are read.
 pub fn decode_protocol_version(body: &str) -> Option<u32> {
     let trimmed = body.trim();
     match serde_json::from_str::<VersionResponse>(trimmed) {
@@ -394,8 +355,8 @@ pub struct ApiKeyPayload {
     pub passphrase: String,
 }
 
-/// Which contract signs orders. Not in `/clob-markets`; wrong choice invalidates all signatures
-/// with unhelpful error.
+/// Which exchange contract an order on this token is signed for. `/clob-markets` does not say, and
+/// the wrong contract invalidates every signature with an unhelpful error.
 ///
 /// # Errors
 /// Malformed JSON.
@@ -404,6 +365,8 @@ pub fn decode_neg_risk(body: &str) -> Result<bool, WireError> {
     Ok(response.neg_risk)
 }
 
+/// # Errors
+/// Malformed JSON, or a minimum order size or tick size the engine's scale cannot hold.
 pub fn decode_clob_market(body: &str) -> Result<ClobMarket, WireError> {
     let response: ClobMarketResponse = FRAME.decode(body)?;
     Ok(ClobMarket {
@@ -416,8 +379,8 @@ pub fn decode_clob_market(body: &str) -> Result<ClobMarket, WireError> {
                 outcome: token.outcome.into(),
             })
             .collect(),
-        min_order_size: qty_of("mos", &response.min_order_size.to_string())?,
-        tick_size: price_of("mts", &response.min_tick_size.to_string())?,
+        min_order_size: qty_field("mos", &response.min_order_size.to_string())?,
+        tick_size: price_field("mts", &response.min_tick_size.to_string())?,
         maker_fee_bps: response.maker_fee_bps,
         taker_fee_bps: response.taker_fee_bps,
         is_accepting_orders: response.is_accepting_orders,

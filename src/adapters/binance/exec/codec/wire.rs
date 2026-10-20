@@ -1,9 +1,13 @@
-//! Venue JSON shapes (Binance spelling). Deserialise only; amounts = String -> mantissa once.
-//! Structs permissive (Binance appends). Envelopes strict (absence = silent failure).
+//! The venue's JSON shapes, in its own spelling. Amounts stay strings here and become mantissas
+//! exactly once, in the decoders. Payload structs ignore fields they do not name, because Binance
+//! adds fields over time; envelopes are strict, because a missing envelope field fails silently.
 
 use serde::Deserialize;
 
-/// Wrapped event (event required; legacy bare fails).
+use crate::adapters::binance::rest::OrderRecord;
+
+/// The event must arrive wrapped, so the legacy bare form fails to decode rather than reading as
+/// empty fields.
 #[derive(Deserialize)]
 pub(super) struct StreamEnvelope {
     pub event: StreamPayload,
@@ -12,12 +16,12 @@ pub(super) struct StreamEnvelope {
 #[derive(Deserialize)]
 #[serde(tag = "e")]
 pub(super) enum StreamPayload {
-    /// Boxed. ExecutionReport wide. Unboxed = frame size tax.
+    /// Boxed because an execution report is wide, and every frame would otherwise pay for its size.
     #[serde(rename = "executionReport")]
     ExecutionReport(Box<ExecutionReport>),
     #[serde(rename = "outboundAccountPosition")]
     AccountPosition(AccountPosition),
-    /// Delta only. Loses frame -> wrong forever.
+    /// Carries a delta only, so one lost frame would leave the balance wrong forever.
     #[serde(rename = "balanceUpdate")]
     BalanceUpdate,
     #[serde(other)]
@@ -26,14 +30,15 @@ pub(super) enum StreamPayload {
 
 #[derive(Deserialize)]
 pub(super) struct ExecutionReport {
-    /// Transact time. Event time deliberately omitted (2 stamps = 2 wrongs).
+    /// The transaction time. The event time is left out on purpose, because two stamps invite
+    /// reading the wrong one.
     #[serde(rename = "T")]
     pub transact_ts_ms: i64,
     #[serde(rename = "s")]
     pub symbol: String,
     #[serde(rename = "c")]
     pub client_order_id: String,
-    /// Subject on cancel/amend (empty else). c = request.
+    /// The order a cancel or amend acted on, empty otherwise; `c` is then the request's own id.
     #[serde(rename = "C", default)]
     pub orig_client_order_id: String,
     #[serde(rename = "S")]
@@ -60,7 +65,7 @@ pub(super) struct ExecutionReport {
     pub cumulative_quote: String,
     #[serde(rename = "n")]
     pub commission: String,
-    /// null when no fee. Option (not empty string like other absences).
+    /// Null when there is no fee, unlike the other absent fields, which arrive as empty strings.
     #[serde(rename = "N")]
     pub commission_asset: Option<String>,
     #[serde(rename = "t")]
@@ -89,7 +94,8 @@ pub(super) struct WireBalance {
     pub locked: String,
 }
 
-/// WS answer: status + result xor error (shapes vary by method).
+/// A WebSocket API answer carries either a result or an error, and the result's shape depends on
+/// the method.
 #[derive(Deserialize)]
 pub(super) struct ResponseEnvelope {
     #[serde(default)]
@@ -105,35 +111,8 @@ pub(super) struct ResponseError {
     pub msg: String,
 }
 
-/// Order in responses. Aliases matter: amend uses qty not origQty, one m not two.
-#[derive(Deserialize)]
-pub(super) struct OrderResponse {
-    pub symbol: String,
-    #[serde(rename = "orderId")]
-    pub order_id: i64,
-    #[serde(rename = "clientOrderId")]
-    pub client_order_id: String,
-    /// Cancel/amend target (clientOrderId = request).
-    #[serde(rename = "origClientOrderId", default)]
-    pub orig_client_order_id: Option<String>,
-    #[serde(rename = "transactTime", default)]
-    pub transact_ts_ms: Option<i64>,
-    /// Used by order.status/openOrders.status (not transactTime).
-    #[serde(rename = "updateTime", default)]
-    pub update_ts_ms: Option<i64>,
-    pub price: String,
-    #[serde(rename = "origQty", alias = "qty")]
-    pub qty: String,
-    #[serde(rename = "executedQty")]
-    pub executed_qty: String,
-    #[serde(rename = "cummulativeQuoteQty", alias = "cumulativeQuoteQty")]
-    pub cumulative_quote: String,
-    pub status: String,
-    pub side: String,
-}
-
 #[derive(Deserialize)]
 pub(super) struct AmendResult {
     #[serde(rename = "amendedOrder")]
-    pub amended_order: OrderResponse,
+    pub amended_order: OrderRecord,
 }

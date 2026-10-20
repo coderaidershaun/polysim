@@ -4,36 +4,28 @@
 //! configured in advance — only checked at boot.
 
 use std::path::Path;
-use std::time::Duration;
 
-use crate::secrets::{EnvFile, Secret, SecretError};
+use crate::secrets::{EnvFile, SecretError};
 use crate::time::DurationUs;
 use crate::{info, warn};
 
-use super::codec::{
-    ApiKeyPayload, EncodedRequest, PROTOCOL_VERSION, closed_only_status, collateral_balance,
-    create_api_key, decode_closed_only, decode_protocol_version, derive_api_key, open_orders_page,
-    protocol_version, server_time,
-};
+use super::codec::{PROTOCOL_VERSION, collateral_balance, open_orders_page};
 use super::handle::WalletIdentity;
-use super::probe::Geoblock;
-use super::rest::{CLOB_BASE, ClobHttp, ClobHttpError, ClobResponse, GEOBLOCK_URL};
+use super::probe::{Geoblock, Probe, ProbeError};
+use super::rest::{ClobHttp, ClobHttpError, ClobResponse};
 use super::sign::address::{Address, AddressError};
 use super::sign::key::{KeyError, SigningKey};
-use super::sign::l2::{ApiCredentials, L2Error, RequestSigner};
+use super::sign::l2::{ApiCredentials, RequestSigner};
 use super::sign::order::SignatureType;
 use super::{POLYMARKET_CREDENTIAL_VARIABLES, SIGNATURE_TYPE_VARIABLE, WALLET_ADDRESS_VARIABLE};
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-
-// Gate result: credentials, key, and identity the adapter uses, avoiding re-derivation.
+/// What the gate proved, handed to the adapter so none of it is derived a second time.
 pub struct PolymarketPreflight {
-    // Minted by L1 at boot, never persisted.
+    /// Minted with the wallet key at boot and never written to disk.
     pub credentials: ApiCredentials,
     pub key: SigningKey,
     pub wallet: WalletIdentity,
-    // Applied to local clock to stamp POLY_TIMESTAMP in venue time.
+    /// Added to the local clock so `POLY_TIMESTAMP` is stamped in venue time.
     pub venue_clock_offset: DurationUs,
 }
 
@@ -44,37 +36,37 @@ pub struct PolymarketPreflight {
 /// already decided.
 ///
 /// # Errors
-/// [`PolymarketPreflightError`] for absent or contradictory wallet configuration, a venue that
-/// cannot be reached or speaks another protocol version, credentials it refuses to mint, and an
-/// account it will not let open a position.
+/// [`PolymarketPreflightError`] for absent, contradictory or unproven wallet configuration, a venue
+/// that cannot be reached or speaks another protocol version, credentials it refuses to mint, and
+/// an account it will not let open a position.
 pub async fn preflight_polymarket() -> Result<PolymarketPreflight, PolymarketPreflightError> {
     let secrets = EnvFile::load(Path::new(EnvFile::DEFAULT_PATH))?;
     let key =
         SigningKey::from_secret(&secrets.resolve(POLYMARKET_CREDENTIAL_VARIABLES.api_secret_env)?)?;
     let wallet = wallet_identity(&secrets, &key)?;
 
-    let clob = GateReads::new()?;
-    let body = clob.public_text(&protocol_version()).await?;
-    let version = decode_protocol_version(&body);
-    if version != Some(PROTOCOL_VERSION) {
+    let probe = Probe::new(key)?;
+    // The probe answers in text so that an unreadable body comes back verbatim: an operator cannot
+    // act on "not 2".
+    let found = probe.protocol_version().await?;
+    if found != PROTOCOL_VERSION.to_string() {
         return Err(PolymarketPreflightError::ProtocolVersion {
-            // Unreadable answers report the body itself: an operator cannot act on "not 2".
-            found: version.map_or(body, |version| version.to_string()).into(),
+            found: found.into(),
             expected: PROTOCOL_VERSION,
         });
     }
-    let server_time_secs = clob.server_time().await?;
+    let server_time_secs = probe.server_time().await?;
     let venue_clock_offset = DurationUs::from_secs(server_time_secs - local_unix_secs());
     info!(
         "polymarket venue clock offset {}us, protocol v{PROTOCOL_VERSION}",
         venue_clock_offset.micros()
     );
-    report_geoblock(clob.geoblock().await?);
+    report_geoblock(probe.geoblock().await?);
 
-    let credentials = clob.api_credentials(&key, server_time_secs).await?;
+    let credentials = probe.api_credentials(server_time_secs).await?.0;
     let signer = RequestSigner::new(&credentials, wallet.signer)
-        .map_err(|source| PolymarketPreflightError::Signer { source })?;
-    if clob.is_closed_only(&signer, server_time_secs).await? {
+        .map_err(|source| ProbeError::Credentials { source })?;
+    if probe.is_closed_only(&signer, server_time_secs).await? {
         return Err(PolymarketPreflightError::ClosedOnly);
     }
     info!(
@@ -83,11 +75,11 @@ pub async fn preflight_polymarket() -> Result<PolymarketPreflight, PolymarketPre
         wallet.signer.to_checksum_hex(),
         wallet.signature_type.code()
     );
-    clob.report_account(&signer, wallet, server_time_secs).await;
+    report_account(probe.http(), &signer, wallet, server_time_secs).await;
 
     Ok(PolymarketPreflight {
         credentials,
-        key,
+        key: probe.into_key(),
         wallet,
         venue_clock_offset,
     })
@@ -124,30 +116,15 @@ pub enum PolymarketPreflightError {
     )]
     WalletSignatureType { value: Box<str> },
     #[error(
-        "the venue could not be reached — refusing to start without proof the wallet can trade"
+        "this wallet signs orders as signatureType {code}, which needs the erc-7739 wrap — the wrap is implemented and pinned against a vector, but no live order has ever been signed with it, and an unproven signing path fails at the venue as a generic refusal"
     )]
-    Http(#[from] ClobHttpError),
-    #[error("{url} answered http {status}: {body}")]
-    Status {
-        url: String,
-        status: u16,
-        body: String,
-    },
-    #[error("{url} answered a body this engine cannot read: {body}")]
-    UnexpectedBody { url: String, body: String },
+    UnprovenWalletType { code: u8 },
+    #[error(transparent)]
+    Probe(#[from] ProbeError),
     #[error(
         "the polymarket clob speaks protocol {found}, and every payload this engine signs is shaped for {expected}"
     )]
     ProtocolVersion { found: Box<str>, expected: u32 },
-    #[error(
-        "the venue minted no l2 credentials for this wallet — derive said: {derive}; create said: {create}"
-    )]
-    NoCredentials { derive: String, create: String },
-    #[error("the minted l2 credentials cannot be used to sign")]
-    Signer {
-        #[source]
-        source: L2Error,
-    },
     #[error(
         "this polymarket account is closed-only and may only reduce positions — a market maker on it would quote one side into rejection"
     )]
@@ -183,6 +160,14 @@ fn wallet_identity(
         .ok_or_else(|| PolymarketPreflightError::WalletSignatureType {
             value: code_text.into_boxed_str(),
         })?;
+    if !matches!(
+        signature_type,
+        SignatureType::Eoa | SignatureType::GnosisSafe
+    ) {
+        return Err(PolymarketPreflightError::UnprovenWalletType {
+            code: signature_type.code(),
+        });
+    }
     Ok(WalletIdentity {
         maker,
         signer,
@@ -216,125 +201,28 @@ fn report_geoblock(geoblock: Geoblock) {
     );
 }
 
-/// The signed reads the gate needs, over the same transport the adapter itself uses.
-struct GateReads {
-    http: ClobHttp,
-}
-
-impl GateReads {
-    fn new() -> Result<Self, PolymarketPreflightError> {
-        Ok(Self {
-            http: ClobHttp::new(CONNECT_TIMEOUT, REQUEST_TIMEOUT)?,
-        })
-    }
-
-    async fn geoblock(&self) -> Result<Geoblock, PolymarketPreflightError> {
-        let response = self.http.send_unsigned(GEOBLOCK_URL).await?;
-        decode(GEOBLOCK_URL, &response)
-    }
-
-    async fn public_text(
-        &self,
-        request: &EncodedRequest,
-    ) -> Result<String, PolymarketPreflightError> {
-        let response = self.http.send_public(request).await?;
-        Ok(success_body(&request.path, &response)?.trim().to_owned())
-    }
-
-    async fn server_time(&self) -> Result<i64, PolymarketPreflightError> {
-        let body = self.public_text(&server_time()).await?;
-        body.parse()
-            .map_err(|_| PolymarketPreflightError::UnexpectedBody {
-                url: format!("{CLOB_BASE}/time"),
-                body: body.clone(),
-            })
-    }
-
-    /// Derive first: it is idempotent for an address that already has credentials, where create
-    /// would fail. A fresh wallet has none to derive, so create is the fallback rather than the
-    /// first move.
-    async fn api_credentials(
-        &self,
-        key: &SigningKey,
-        timestamp_secs: i64,
-    ) -> Result<ApiCredentials, PolymarketPreflightError> {
-        let derived = self
-            .credential_call(key, &derive_api_key(), timestamp_secs)
-            .await;
-        match derived {
-            Ok(credentials) => Ok(credentials),
-            Err(derive_failure) => self
-                .credential_call(key, &create_api_key(), timestamp_secs)
-                .await
-                .map_err(|create_failure| PolymarketPreflightError::NoCredentials {
-                    derive: derive_failure.to_string(),
-                    create: create_failure.to_string(),
-                }),
-        }
-    }
-
-    async fn credential_call(
-        &self,
-        key: &SigningKey,
-        request: &EncodedRequest,
-        timestamp_secs: i64,
-    ) -> Result<ApiCredentials, PolymarketPreflightError> {
-        let response = self
-            .http
-            .send_wallet_signed(key, request, timestamp_secs)
-            .await?;
-        let payload: ApiKeyPayload = decode(&request.path, &response)?;
-        Ok(ApiCredentials::new(
-            payload.api_key,
-            Secret::new(&payload.secret),
-            Secret::new(&payload.passphrase),
-        ))
-    }
-
-    /// Fail-closed: a body that does not carry the flag refuses the arm rather than reading as "may
-    /// trade". The `#[serde(default)] bool` this replaced let an error envelope or `{}` pass the gate.
-    async fn is_closed_only(
-        &self,
-        signer: &RequestSigner,
-        timestamp_secs: i64,
-    ) -> Result<bool, PolymarketPreflightError> {
-        let request = closed_only_status();
-        let response = self
-            .http
-            .send_signed(signer, &request, timestamp_secs)
-            .await?;
-        let body = success_body(&request.path, &response)?;
-        decode_closed_only(body).ok_or_else(|| PolymarketPreflightError::UnexpectedBody {
-            url: request.path.clone(),
-            body: response.excerpt(),
-        })
-    }
-
-    /// What the operator has to see before a live arm: the collateral this wallet type actually
-    /// holds, and whether anything is already resting on the credentials.
-    async fn report_account(
-        &self,
-        signer: &RequestSigner,
-        wallet: WalletIdentity,
-        timestamp_secs: i64,
-    ) {
-        report_read(
-            "collateral",
-            self.http
-                .send_signed(
-                    signer,
-                    &collateral_balance(wallet.signature_type),
-                    timestamp_secs,
-                )
-                .await,
-        );
-        report_read(
-            "open orders",
-            self.http
-                .send_signed(signer, &open_orders_page(None), timestamp_secs)
-                .await,
-        );
-    }
+/// What the operator has to see before a live arm: the collateral this wallet type actually holds,
+/// and whether anything is already resting on the credentials.
+async fn report_account(
+    http: &ClobHttp,
+    signer: &RequestSigner,
+    wallet: WalletIdentity,
+    timestamp_secs: i64,
+) {
+    report_read(
+        "collateral",
+        http.send_signed(
+            signer,
+            &collateral_balance(wallet.signature_type),
+            timestamp_secs,
+        )
+        .await,
+    );
+    report_read(
+        "open orders",
+        http.send_signed(signer, &open_orders_page(None), timestamp_secs)
+            .await,
+    );
 }
 
 fn report_read(what: &str, answer: Result<ClobResponse, ClobHttpError>) {
@@ -349,31 +237,6 @@ fn report_read(what: &str, answer: Result<ClobResponse, ClobHttpError>) {
         ),
         Err(error) => warn!("polymarket {what} read failed: {error}"),
     }
-}
-
-fn decode<T: serde::de::DeserializeOwned>(
-    path: &str,
-    response: &ClobResponse,
-) -> Result<T, PolymarketPreflightError> {
-    let body = success_body(path, response)?;
-    serde_json::from_str(body).map_err(|_| PolymarketPreflightError::UnexpectedBody {
-        url: path.to_owned(),
-        body: response.excerpt(),
-    })
-}
-
-fn success_body<'a>(
-    path: &str,
-    response: &'a ClobResponse,
-) -> Result<&'a str, PolymarketPreflightError> {
-    if !response.is_success() {
-        return Err(PolymarketPreflightError::Status {
-            url: path.to_owned(),
-            status: response.status,
-            body: response.excerpt(),
-        });
-    }
-    Ok(&response.body)
 }
 
 fn blank_as_dash(value: &str) -> &str {

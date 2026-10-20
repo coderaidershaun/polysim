@@ -1,5 +1,5 @@
-//! Intent -> HTTP. The hot side names WHAT; this picks the endpoint, builds the body and signs the
-//! order inside it.
+//! Turns an engine request into an HTTP call. The hot side names WHAT it wants; this picks the
+//! endpoint, builds the body and signs the order inside it.
 //!
 //! Two rules bind every function here. The body string that comes back is the exact byte sequence
 //! the socket must send, because the L2 HMAC covers it and re-serialising invalidates the header.
@@ -53,6 +53,14 @@ impl EncodedRequest {
 
     fn with_query(mut self, query: impl Into<String>) -> Self {
         self.query = query.into();
+        self
+    }
+
+    fn with_cursor(mut self, cursor: Option<&str>) -> Self {
+        if let Some(cursor) = cursor {
+            let separator = if self.query.is_empty() { "" } else { "&" };
+            self.query = format!("{}{separator}next_cursor={cursor}", self.query);
+        }
         self
     }
 
@@ -144,14 +152,7 @@ pub fn encode_request(
             context,
         ),
         ExecRequest::Cancel { client_id, .. } => {
-            let venue_order_id =
-                context
-                    .orders
-                    .venue_order_id(client_id)
-                    .ok_or(WireError::UnknownOrder {
-                        client_id: client_id.0,
-                    })?;
-            cancel_venue_order(venue_order_id)
+            cancel_venue_order(venue_order_id(context, client_id)?)
         }
         ExecRequest::OpenOrders { instrument } => {
             // Token-scoped so other windows' markets don't leak in.
@@ -160,20 +161,13 @@ pub fn encode_request(
                     instrument: instrument.0,
                 });
             };
-            Ok(EncodedRequest::new(HttpMethod::Get, "/data/orders")
-                .with_query(format!("asset_id={}", binding.token_id)))
+            Ok(open_orders_for_token(&binding.token_id, None))
         }
         ExecRequest::OrderStatus { client_id, .. } => {
-            let venue_order_id =
-                context
-                    .orders
-                    .venue_order_id(client_id)
-                    .ok_or(WireError::UnknownOrder {
-                        client_id: client_id.0,
-                    })?;
+            let order_id = venue_order_id(context, client_id)?;
             Ok(EncodedRequest::new(
                 HttpMethod::Get,
-                format!("/data/order/{venue_order_id}"),
+                format!("/data/order/{order_id}"),
             ))
         }
         ExecRequest::SubscribeUserStream => Err(WireError::UnsupportedRequest {
@@ -185,6 +179,18 @@ pub fn encode_request(
             request: "order amendment",
         }),
     }
+}
+
+fn venue_order_id<'a>(
+    context: &EncodeContext<'a>,
+    client_id: ClientOrderId,
+) -> Result<&'a str, WireError> {
+    context
+        .orders
+        .venue_order_id(client_id)
+        .ok_or(WireError::UnknownOrder {
+            client_id: client_id.0,
+        })
 }
 
 struct PlaceRequest {
@@ -254,7 +260,7 @@ fn place(request: &PlaceRequest, context: &EncodeContext<'_>) -> Result<EncodedR
                 token_id: &binding.token_id,
                 maker_amount: amounts.maker.to_string(),
                 taker_amount: amounts.taker.to_string(),
-                side: side.wire_name(),
+                side: request.side.wire_name(),
                 expiration: NO_EXPIRATION,
                 timestamp: timestamp_millis.to_string(),
                 signature_type: signer.setup.signature_type.code(),
@@ -281,7 +287,10 @@ pub fn cancel_venue_order(venue_order_id: &str) -> Result<EncodedRequest, WireEr
     )
 }
 
-/// Sweep all resting on one token. Ordinary reconciliation uses per-order path.
+/// Cancels everything resting on one token. Ordinary reconciliation cancels one order at a time.
+///
+/// # Errors
+/// The body cannot be serialised.
 pub fn cancel_market_orders(token_id: &str) -> Result<EncodedRequest, WireError> {
     EncodedRequest::new(HttpMethod::Delete, "/cancel-market-orders").with_body(
         "cancel market orders",
@@ -300,16 +309,14 @@ pub fn neg_risk_request(token_id: &str) -> EncodedRequest {
     EncodedRequest::new(HttpMethod::Get, "/neg-risk").with_query(format!("token_id={token_id}"))
 }
 
-/// Allowance cache must be warmed. Unrefreshed cache rejects sell as empty wallet, and every
-/// rotation mints a token never refreshed.
+/// The venue's allowance cache must be warmed before a sell: an unrefreshed cache rejects the sell
+/// as if the wallet were empty, and every rotation brings a token that has never been refreshed.
 pub fn conditional_allowance_refresh(
     token_id: &str,
     signature_type: SignatureType,
 ) -> EncodedRequest {
-    EncodedRequest::new(HttpMethod::Get, "/balance-allowance/update").with_query(format!(
-        "asset_type=CONDITIONAL&token_id={token_id}&signature_type={}",
-        signature_type.code()
-    ))
+    EncodedRequest::new(HttpMethod::Get, "/balance-allowance/update")
+        .with_query(conditional_query(token_id, signature_type))
 }
 
 /// Collateral (pUSD) and per-token balances use the same endpoint but specify different asset
@@ -322,13 +329,21 @@ pub fn collateral_balance(signature_type: SignatureType) -> EncodedRequest {
 }
 
 pub fn conditional_balance(token_id: &str, signature_type: SignatureType) -> EncodedRequest {
-    EncodedRequest::new(HttpMethod::Get, "/balance-allowance").with_query(format!(
-        "asset_type=CONDITIONAL&token_id={token_id}&signature_type={}",
-        signature_type.code()
-    ))
+    EncodedRequest::new(HttpMethod::Get, "/balance-allowance")
+        .with_query(conditional_query(token_id, signature_type))
 }
 
-/// Dead man's switch. Stale id is answered with the expected one.
+fn conditional_query(token_id: &str, signature_type: SignatureType) -> String {
+    format!(
+        "asset_type=CONDITIONAL&token_id={token_id}&signature_type={}",
+        signature_type.code()
+    )
+}
+
+/// The venue's dead man's switch. A stale id is answered with the id the venue expects next.
+///
+/// # Errors
+/// The body cannot be serialised.
 pub fn heartbeat(heartbeat_id: &str) -> Result<EncodedRequest, WireError> {
     EncodedRequest::new(HttpMethod::Post, "/v1/heartbeats")
         .with_body("heartbeat", &HeartbeatBody { heartbeat_id })
@@ -336,29 +351,20 @@ pub fn heartbeat(heartbeat_id: &str) -> Result<EncodedRequest, WireError> {
 
 /// Account-wide read to see orders from prior runs before token bindings land.
 pub fn open_orders_page(cursor: Option<&str>) -> EncodedRequest {
-    let request = EncodedRequest::new(HttpMethod::Get, "/data/orders");
-    match cursor {
-        Some(cursor) => request.with_query(format!("next_cursor={cursor}")),
-        None => request,
-    }
+    EncodedRequest::new(HttpMethod::Get, "/data/orders").with_cursor(cursor)
 }
 
 /// One token's open orders — the check a freshly bound window gets.
 pub fn open_orders_for_token(token_id: &str, cursor: Option<&str>) -> EncodedRequest {
-    let query = match cursor {
-        Some(cursor) => format!("asset_id={token_id}&next_cursor={cursor}"),
-        None => format!("asset_id={token_id}"),
-    };
-    EncodedRequest::new(HttpMethod::Get, "/data/orders").with_query(query)
+    EncodedRequest::new(HttpMethod::Get, "/data/orders")
+        .with_query(format!("asset_id={token_id}"))
+        .with_cursor(cursor)
 }
 
-/// Cursor in query only; page walk re-signs path only.
+/// The cursor rides in the query, which is not signed, so every page of the walk signs the same
+/// path.
 pub fn trades_page(cursor: Option<&str>) -> EncodedRequest {
-    let request = EncodedRequest::new(HttpMethod::Get, "/data/trades");
-    match cursor {
-        Some(cursor) => request.with_query(format!("next_cursor={cursor}")),
-        None => request,
-    }
+    EncodedRequest::new(HttpMethod::Get, "/data/trades").with_cursor(cursor)
 }
 
 pub fn protocol_version() -> EncodedRequest {
@@ -384,6 +390,9 @@ pub fn create_api_key() -> EncodedRequest {
 
 /// The raw api secret crosses this channel, and there is no HMAC here. We subscribe unfiltered
 /// to avoid gaps between unsubscribe and resubscribe.
+///
+/// # Errors
+/// The secret or passphrase is not UTF-8, or the frame cannot be serialised.
 pub fn subscribe_user_stream(
     api_key: &str,
     secret: &Secret,
