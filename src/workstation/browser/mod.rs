@@ -3,6 +3,7 @@
 
 mod app;
 pub mod chart;
+pub mod chrome;
 mod controls;
 pub mod dom;
 mod latency;

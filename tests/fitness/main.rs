@@ -129,6 +129,7 @@ mod volume_bars;
 #[cfg(feature = "web")]
 mod web_http;
 mod workstation_format;
+mod workstation_shell;
 mod workstation_support;
 mod zero_alloc;
 

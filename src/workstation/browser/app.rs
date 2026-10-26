@@ -17,11 +17,13 @@ use super::link_bar::{self, LinkAction};
 use super::socket::{Frame, LinkSocket};
 use super::theme::{DARK, METRICS, clear_color};
 use crate::config::{ConfigError, StrategyId};
+use crate::hot::exec::ExecHalt;
 use crate::link::LinkHash;
 use crate::msg::relay::RelayHello;
 use crate::time::{DurationUs, EngineClock, TsUs};
 use crate::workstation::attachment::{Attachment, Screen};
 use crate::workstation::link_session::{LinkSession, LinkSessionError, LinkTarget};
+use crate::workstation::shell::{self, Arrangement, Navigation, Selection};
 use crate::workstation::text::{STARTING_SCREEN, ScreenText};
 use crate::{error, warn};
 
@@ -34,15 +36,12 @@ const TICK_MS: i32 = 1_000;
 const LIVE_REPAINT: Duration = Duration::from_millis(8);
 const STARTING_REPAINT: Duration = Duration::from_millis(250);
 
-/// Floor set by the summary band: below about 1190 points its mid cell is narrower than a BTC mid,
-/// so the number would cross a separator. A page that cannot be that big is shrunk instead.
-const MIN_WIDTH: f32 = 1_200.0;
-const MIN_HEIGHT: f32 = 700.0;
-const MIN_ZOOM: f32 = 0.5;
-
-/// Rounding to whole pixels moves the measured size by under a pixel each frame. A change smaller
-/// than this is that jitter, and acting on it would resize the page every frame.
-const ZOOM_TOLERANCE: f32 = 0.002;
+const NUMBER_KEYS: [egui::Key; Selection::ALL.len()] = [
+    egui::Key::Num0,
+    egui::Key::Num1,
+    egui::Key::Num2,
+    egui::Key::Num3,
+];
 
 #[derive(thiserror::Error, Debug)]
 pub(super) enum StartError {
@@ -73,11 +72,19 @@ pub(super) struct Station {
     socket: Option<LinkSocket>,
     connected_ts_us: Option<TsUs>,
     title: Box<str>,
+    navigation: Navigation,
+    /// The selection the address bar already shows, so only a change writes to it.
+    written: Selection,
     _tick: Option<Closure<dyn FnMut()>>,
 }
 
 impl Station {
     fn new(ctx: egui::Context, document: Document) -> Self {
+        let hash = document
+            .location()
+            .and_then(|location| location.hash().ok())
+            .unwrap_or_default();
+        let selection = Selection::from_fragment(&hash);
         Self {
             ctx,
             document,
@@ -86,6 +93,8 @@ impl Station {
             socket: None,
             connected_ts_us: None,
             title: Box::default(),
+            navigation: Navigation::new(selection),
+            written: selection,
             _tick: None,
         }
     }
@@ -238,27 +247,84 @@ impl Station {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(DARK.canvas))
             .show(ui, |ui| {
-                let (content, bar) = layout::split_link_bar(ui.available_rect_before_wrap());
-                ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
-                    self.paint_content(ui);
-                });
+                let canvas = ui.available_rect_before_wrap();
+                let arrangement = Arrangement::new(canvas.into(), &self.navigation, self.halt());
+                self.select_by_key(ui.ctx(), &arrangement);
+                if let Some(selection) = self.paint_content(ui, &arrangement) {
+                    self.navigation.select(selection, arrangement.class);
+                    ui.ctx().request_repaint();
+                }
                 let status = self
                     .attached
                     .as_ref()
                     .map(|(_, attachment)| attachment.link_status());
-                link_action = link_bar::paint(ui, bar, status);
+                link_action = link_bar::paint(ui, arrangement.link_bar.into(), status);
+                self.write_fragment();
             });
         link_action
     }
 
-    fn paint_content(&mut self, ui: &mut egui::Ui) {
+    /// The latch the engine reports. It is `None` before any engine has said anything.
+    fn halt(&self) -> Option<ExecHalt> {
+        let (_, attachment) = self.attached.as_ref()?;
+        attachment.model().exec().halt()
+    }
+
+    /// A chord belongs to the browser or the operating system, so only a bare digit counts.
+    fn select_by_key(&mut self, ctx: &egui::Context, arrangement: &Arrangement) {
+        let pressed = ctx.input(|input| {
+            let modifiers = input.modifiers;
+            if modifiers.alt || modifiers.ctrl || modifiers.command {
+                return None;
+            }
+            NUMBER_KEYS
+                .into_iter()
+                .zip(Selection::ALL)
+                .find(|(key, _)| input.key_pressed(*key))
+                .map(|(_, selection)| selection)
+        });
+        if let Some(selection) = pressed {
+            self.navigation.select(selection, arrangement.class);
+            ctx.request_repaint();
+        }
+    }
+
+    /// Returns the view the operator picked on a bar, for the caller to apply.
+    fn paint_content(&mut self, ui: &mut egui::Ui, arrangement: &Arrangement) -> Option<Selection> {
         match &mut self.attached {
             Some((_, attachment)) if matches!(attachment.screen(), Screen::Live) => {
-                let feed = attachment.feed_status();
-                let (model, monitor_state) = attachment.panels();
-                layout::workstation(ui, model, monitor_state, feed);
+                layout::workstation(ui, arrangement, attachment)
             }
-            _ => paint_screen(ui, &STARTING_SCREEN),
+            _ => {
+                let area = arrangement.above_link_bar().into();
+                ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+                    paint_screen(ui, &STARTING_SCREEN);
+                });
+                None
+            }
+        }
+    }
+
+    /// `location.replace` swaps the current history entry, so a keystroke or a tap never adds one.
+    /// The address is built whole, because a bare `#chart` resolves against the page's base
+    /// address and would load another page.
+    fn write_fragment(&mut self) {
+        let selection = self.navigation.selection();
+        if selection == self.written {
+            return;
+        }
+        self.written = selection;
+        let fragment = selection.fragment();
+        let Some(location) = self.document.location() else {
+            warn!("this page has no address to write {fragment} to");
+            return;
+        };
+        let replaced = location.href().and_then(|href| {
+            let page = href.split_once('#').map_or(href.as_str(), |(page, _)| page);
+            location.replace(&format!("{page}{fragment}"))
+        });
+        if let Err(error) = replaced {
+            warn!("cannot write {fragment} to the page address: {error:?}");
         }
     }
 
@@ -338,18 +404,12 @@ impl eframe::App for WorkstationApp {
 /// is zoomed out until the layout fits.
 fn fit_zoom(ctx: &egui::Context) {
     let css = ctx.content_rect().size() * ctx.zoom_factor();
-    if css.x <= 0.0 || css.y <= 0.0 {
-        return;
-    }
-    let zoom = (css.x / MIN_WIDTH)
-        .min(css.y / MIN_HEIGHT)
-        .clamp(MIN_ZOOM, 1.0);
-    if (zoom - ctx.zoom_factor()).abs() > ZOOM_TOLERANCE {
+    if let Some(zoom) = shell::zoom_to_fit(css.x, css.y, ctx.zoom_factor()) {
         ctx.set_zoom_factor(zoom);
     }
 }
 
-/// The whole surface while no workstation is live. It is honest, with no made-up numbers.
+/// Fills its area while no workstation is live. It shows words only, never made-up numbers.
 fn paint_screen(ui: &mut egui::Ui, screen_text: &ScreenText) {
     let full = ui.available_rect_before_wrap();
     ui.painter().rect_filled(full, 0.0, DARK.canvas);

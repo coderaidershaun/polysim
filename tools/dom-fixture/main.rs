@@ -16,6 +16,8 @@ mod monitor_scenes;
 mod position_dump;
 mod position_scenes;
 mod scenes;
+#[cfg(target_arch = "wasm32")]
+mod shell_scene;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {

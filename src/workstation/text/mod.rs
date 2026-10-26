@@ -26,7 +26,7 @@ pub(crate) use monitor::{
     write_amount, write_delta, write_feature_cell,
 };
 pub(crate) use rows::{Cell, ChannelRow, record_row};
-pub(crate) use screen::{STARTING_SCREEN, execution_badge};
+pub(crate) use screen::{HALT_BADGE, STARTING_SCREEN, execution_badge, selection_label};
 pub(crate) use tone::Tone;
 
 // Only the painters name these types.

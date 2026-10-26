@@ -1,16 +1,18 @@
-//! The fixture page: the workstation's 50/25/25 split with every panel on a fixed scene, stepped by
-//! keys.
+//! The fixture page: the workstation's own arrangement, top bar and tab bar around every panel on a
+//! fixed scene, stepped by keys.
 
 use eframe::egui;
 
 use polysim::workstation::browser::chart::mid::{self, ChartFrame};
 use polysim::workstation::browser::chart::stack::{self, ChartStackFrame};
+use polysim::workstation::browser::chrome;
 use polysim::workstation::browser::dom::ladder::{self, DomFrame};
 use polysim::workstation::browser::monitor::bands;
 use polysim::workstation::chart::position_view::RiskSeries;
 use polysim::workstation::chart::view::ChartMode;
 use polysim::workstation::dom_view::{DEFAULT_ROWS_PER_SIDE, DomOverlay};
 use polysim::workstation::monitor::view::{Channel, MonitorFrame};
+use polysim::workstation::shell::{Arrangement, View};
 
 use crate::chart_scenes::{ChartScene, chart_scenes};
 use crate::hud;
@@ -18,11 +20,12 @@ use crate::monitor_feed::MonitorScene;
 use crate::monitor_scenes::monitor_scenes;
 use crate::position_scenes::{PositionScene, position_scenes};
 use crate::scenes::{Scene, scenes};
+use crate::shell_scene::{self, ShellScene};
 
 // SMELL: these repeat colours from the workstation's palette, which the library keeps private, so a
 // palette change leaves the fixture's own background and the HUD's text behind.
 const CANVAS: egui::Color32 = egui::Color32::from_rgb(10, 13, 18);
-const PANEL: egui::Color32 = egui::Color32::from_rgb(15, 19, 26);
+const PANEL_RAISED: egui::Color32 = egui::Color32::from_rgb(21, 27, 36);
 const BORDER: egui::Color32 = egui::Color32::from_rgb(44, 53, 67);
 
 /// A position scene brings its own mid chart, so its risk chart always shares that chart's window.
@@ -41,6 +44,7 @@ pub struct DomFixture {
     positions: Panel<PositionScene>,
     risk_series: RiskSeries,
     left_panel: LeftPanel,
+    shell: ShellScene,
 }
 
 /// The scenes of one panel and the one on show.
@@ -83,7 +87,7 @@ impl DomFixture {
         if let Some(tab) = Channel::ALL.get(number("MON_TAB").unwrap_or(0)) {
             monitors.current_mut().state.active_tab = *tab;
         }
-        // Choosing a risk scene also puts the stacked chart and positions view on the left.
+        // Choosing a risk scene also puts the stacked chart and positions view in the chart pane.
         let risk_scene = number("RISK_SCENE");
         Self {
             scenes,
@@ -105,6 +109,7 @@ impl DomFixture {
                 Some(_) => LeftPanel::Positions,
                 None => LeftPanel::Chart,
             },
+            shell: ShellScene::new(),
         }
     }
 
@@ -201,57 +206,78 @@ impl DomFixture {
     }
 }
 
-impl eframe::App for DomFixture {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.handle_keys(&ui.ctx().clone());
-
+impl DomFixture {
+    /// Paints the HUD band first and arranges the panes in what is left, so no pane sits under the
+    /// band.
+    fn paint_page(&mut self, ui: &mut egui::Ui) {
         let full = ui.available_rect_before_wrap();
-        let painter = ui.painter_at(full);
-        painter.rect_filled(full, 0.0, CANVAS);
-        let (left, center, right) = panels(full);
-        painter.rect_filled(left, 0.0, PANEL);
+        ui.painter_at(full).rect_filled(full, 0.0, CANVAS);
 
+        // The size class and the shown view depend on the width alone, so an arrangement of the
+        // whole canvas can name them before the band's height is known.
+        let page = self.shell.arrange(full);
+        self.shell.handle_keys(ui.ctx(), &page);
+        let band = if self.shell.is_hud_shown() { self.paint_hud(ui, full, &page) } else { 0.0 };
+        let below = full.with_min_y((full.top() + band).min(full.bottom()));
+        let arrangement = self.shell.arrange(below);
+
+        let action = chrome::paint_top_bar(ui, &arrangement, &self.shell.top_bar_frame());
+        self.shell.apply(action, arrangement.class);
+        self.paint_panes(ui, &arrangement);
+        let action = chrome::paint_tab_bar(ui, &arrangement);
+        self.shell.apply(action, arrangement.class);
+        paint_link_strip(ui, arrangement.link_bar.into());
+    }
+
+    fn paint_hud(&self, ui: &egui::Ui, canvas: egui::Rect, page: &Arrangement) -> f32 {
         let dom_scene = self.scenes.current();
-        let variant = &dom_scene.variants[self.variant];
-        let dom_frame = DomFrame {
-            snapshot: variant.snapshot.as_ref(),
-            overlay: DomOverlay {
-                desired: variant.quote,
-                bid_orders: &variant.bid_orders,
-                ask_orders: &variant.ask_orders,
-            },
-            tick: variant.tick,
-            grouping: variant.grouping,
-            price_decimals: variant.price_decimals,
-            qty_scale: variant.qty_scale,
-            qty_decimals: variant.qty_decimals,
-            feed: variant.feed,
-            stale_age: variant.stale_age,
-            levels: dom_levels(),
-        };
-        ladder::paint(ui, right, &dom_frame);
-
-        let monitor = self.monitors.current_mut();
-        let monitor_name = monitor.name;
-        let tab = monitor.state.active_tab;
-        let monitor_frame = MonitorFrame {
-            model: &monitor.model,
-            instrument: monitor.instrument,
-            tick: monitor.tick,
-            qty_scale: monitor.qty_scale,
-            qty_decimals: monitor.qty_decimals,
-            // The ladder variant's own unit, so cycling scenes shows both delta captions.
-            dom_unit: variant.grouping.unit(),
-            feature_names: &monitor.feature_names,
-            instrument_names: &monitor.instrument_names,
-        };
-        bands::paint(ui, center, &monitor_frame, &mut monitor.state);
-
-        let chart_scene = self.charts.current();
+        let monitor = self.monitors.current();
         let position_scene = self.positions.current();
-        let body = hud::below(left);
+        hud::paint(
+            &ui.painter_at(canvas),
+            canvas,
+            &hud::Hud {
+                dom_index: self.scenes.index,
+                dom_count: self.scenes.items.len(),
+                dom: dom_scene,
+                variant: dom_scene.variants[self.variant].label,
+                monitor: monitor.name,
+                tab: monitor.state.active_tab,
+                chart: self.charts.current().name,
+                mode: self.chart_mode,
+                position: position_scene.name,
+                check: position_scene.check,
+                series: self.risk_series,
+                left_panel: self.left_panel,
+                shown: page.shown,
+                class: page.class,
+                size: canvas.size(),
+                zoom: ui.ctx().zoom_factor(),
+            },
+        )
+    }
+
+    /// The pane headers stay empty, because their controls change a live model the fixture does
+    /// not have.
+    fn paint_panes(&mut self, ui: &mut egui::Ui, arrangement: &Arrangement) {
+        chrome::paint_pane_frames(ui, arrangement);
+        if let Some(pane) = arrangement.pane(View::Chart) {
+            self.paint_chart(ui, pane.body.into());
+        }
+        if let Some(pane) = arrangement.pane(View::Monitor) {
+            self.paint_monitor(ui, pane.body.into());
+        }
+        if let Some(pane) = arrangement.pane(View::Ladder) {
+            self.paint_ladder(ui, pane.body.into());
+        }
+        chrome::paint_pane_rules(ui, arrangement);
+    }
+
+    /// Paints through the workstation's own chart painters.
+    fn paint_chart(&self, ui: &mut egui::Ui, body: egui::Rect) {
         match self.left_panel {
             LeftPanel::Chart => {
+                let chart_scene = self.charts.current();
                 // This panel draws no crosshair, so the geometry the mid chart hands back goes
                 // unused.
                 let _mid = mid::paint(
@@ -271,42 +297,68 @@ impl eframe::App for DomFixture {
                 let _picked = self.paint_stack(ui, body);
             }
         }
+    }
 
-        let overlay = ui.painter_at(full);
-        for x in [left.right(), center.right()] {
-            overlay.vline(x, full.y_range(), egui::Stroke::new(1.0, BORDER));
-        }
-        hud::paint(
-            &overlay,
-            &hud::Hud {
-                left,
-                dom_index: self.scenes.index,
-                dom_count: self.scenes.items.len(),
-                dom: dom_scene,
-                variant: variant.label,
-                monitor: monitor_name,
-                tab,
-                chart: chart_scene.name,
-                mode: self.chart_mode,
-                position: position_scene.name,
-                check: position_scene.check,
-                series: self.risk_series,
-                left_panel: self.left_panel,
+    fn paint_monitor(&mut self, ui: &mut egui::Ui, body: egui::Rect) {
+        // The ladder variant's own unit, so cycling scenes shows both delta captions.
+        let dom_unit = self.scenes.current().variants[self.variant].grouping.unit();
+        let monitor = self.monitors.current_mut();
+        let monitor_frame = MonitorFrame {
+            model: &monitor.model,
+            instrument: monitor.instrument,
+            tick: monitor.tick,
+            qty_scale: monitor.qty_scale,
+            qty_decimals: monitor.qty_decimals,
+            dom_unit,
+            feature_names: &monitor.feature_names,
+            instrument_names: &monitor.instrument_names,
+        };
+        bands::paint(ui, body, &monitor_frame, &mut monitor.state);
+    }
+
+    fn paint_ladder(&self, ui: &mut egui::Ui, body: egui::Rect) {
+        let variant = &self.scenes.current().variants[self.variant];
+        let dom_frame = DomFrame {
+            snapshot: variant.snapshot.as_ref(),
+            overlay: DomOverlay {
+                desired: variant.quote,
+                bid_orders: &variant.bid_orders,
+                ask_orders: &variant.ask_orders,
             },
-        );
+            tick: variant.tick,
+            grouping: variant.grouping,
+            price_decimals: variant.price_decimals,
+            qty_scale: variant.qty_scale,
+            qty_decimals: variant.qty_decimals,
+            feed: variant.feed,
+            stale_age: variant.stale_age,
+            levels: dom_levels(),
+        };
+        ladder::paint(ui, body, &dom_frame);
     }
 }
 
-fn panels(full: egui::Rect) -> (egui::Rect, egui::Rect, egui::Rect) {
-    let left_right = full.left() + full.width() * 0.50;
-    let center_right = full.left() + full.width() * 0.75;
-    let left = egui::Rect::from_min_max(full.min, egui::pos2(left_right, full.bottom()));
-    let center = egui::Rect::from_min_max(
-        egui::pos2(left_right, full.top()),
-        egui::pos2(center_right, full.bottom()),
+impl eframe::App for DomFixture {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        shell_scene::fit_zoom(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.handle_keys(&ui.ctx().clone());
+        self.paint_page(ui);
+    }
+}
+
+/// The link bar's painter is private to the page, so the fixture holds its place with an empty
+/// strip.
+fn paint_link_strip(ui: &egui::Ui, rect: egui::Rect) {
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, PANEL_RAISED);
+    painter.hline(
+        rect.x_range(),
+        rect.top() + 0.5,
+        egui::Stroke::new(1.0, BORDER),
     );
-    let right = egui::Rect::from_min_max(egui::pos2(center_right, full.top()), full.max);
-    (left, center, right)
 }
 
 /// `DOM_LEVELS` reproduces any position of the header's level stepper, which the fixture does not
@@ -320,7 +372,10 @@ fn number(name: &str) -> Option<usize> {
     query(name)?.parse().ok()
 }
 
-fn query(name: &str) -> Option<String> {
+// SMELL: the shell scene reads the query string through this function while this page builds the
+// shell scene, so the two files import each other. The reader belongs in a small file of its own
+// beside them.
+pub(crate) fn query(name: &str) -> Option<String> {
     let search = web_sys::window()?.location().search().ok()?;
     search
         .trim_start_matches('?')

@@ -77,14 +77,11 @@ pub(crate) struct Metrics {
     pub space_1: f32,
     pub space_2: f32,
     pub space_3: f32,
-    pub toolbar_height: f32,
-    pub link_bar_height: f32,
     pub corner_radius: f32,
-    /// The bar on one edge that marks a selected cell, shared by the toolbar, the ladder header and
+    /// The bar on one edge that marks a selected cell, shared by the top bar, the pane headers and
     /// the tabs.
     pub accent_thickness: f32,
     pub segment_font: f32,
-    pub dom_header_height: f32,
     pub dom_separator_fraction: f32,
     pub dom_row_height: f32,
     pub dom_row_height_floor: f32,
@@ -141,13 +138,9 @@ pub(crate) const METRICS: Metrics = Metrics {
     space_1: 4.0,
     space_2: 8.0,
     space_3: 12.0,
-    toolbar_height: 40.0,
-    link_bar_height: 24.0,
     corner_radius: 3.0,
     accent_thickness: 2.0,
     segment_font: 12.0,
-    // The ladder header's height. The latency grid's header and the chart sub-header reuse it.
-    dom_header_height: 30.0,
     dom_separator_fraction: 0.08,
     // Reference row: fonts are full size here and shrink proportionally below it, down to the
     // floor that clamps how many levels the operator can ask for.

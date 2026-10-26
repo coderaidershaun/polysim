@@ -1,11 +1,12 @@
-//! The words on the starting screen and on the execution badge. The starting screen shows no
-//! numbers, because there are none yet.
+//! The words on the starting screen and in the top bar: the view names and the two safety badges.
+//! The starting screen shows no numbers, because there are none yet.
 
 use crate::config::ExecutionMode;
+use crate::workstation::shell::{Selection, View};
 
 use super::tone::Tone;
 
-/// Title and detail with the role each wears.
+/// A title and a detail line, each with its colour role.
 pub(crate) struct ScreenText {
     pub title: &'static str,
     pub title_tone: Tone,
@@ -30,4 +31,16 @@ pub(crate) fn execution_badge(mode: Option<ExecutionMode>) -> (&'static str, Ton
         Some(ExecutionMode::Live) => Tone::Negative,
     };
     (ExecutionMode::badge(mode), tone)
+}
+
+// SMELL: the monitor's halt banner spells this word itself, so renaming the state takes two edits.
+pub(crate) const HALT_BADGE: (&str, Tone) = ("HALTED", Tone::Invalid);
+
+pub(crate) fn selection_label(selection: Selection) -> &'static str {
+    match selection {
+        Selection::Desk => "Desk",
+        Selection::View(View::Chart) => "Chart",
+        Selection::View(View::Ladder) => "Ladder",
+        Selection::View(View::Monitor) => "Monitor",
+    }
 }

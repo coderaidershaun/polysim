@@ -6,7 +6,8 @@
 //! projects that state to geometry.
 //!
 //! The link session is `pub` on its own merit. The models, views and painters are `pub` because the
-//! `dom-fixture` page builds its scenes from them and paints with them. The page itself is private.
+//! `dom-fixture` page builds its scenes from them and paints with them. The shell is `pub` because
+//! the same page arranges its panes with it. The page itself is private.
 
 // SMELL: many model, view and `format` items are `pub` only because the fitness suite names them,
 // which the project's rules do not accept as a reason. Narrowing them means re-expressing those
@@ -24,4 +25,5 @@ pub mod link_session;
 pub mod link_view;
 pub mod model;
 pub mod monitor;
+pub mod shell;
 pub(crate) mod text;

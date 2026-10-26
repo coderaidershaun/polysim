@@ -4,32 +4,69 @@
 
 use eframe::egui;
 
-use crate::config::ExecutionMode;
-
 use super::theme::{self, DARK, METRICS};
-use crate::workstation::text::{self, Tone};
 
-const EXECUTION_MODE_BADGE_WIDTH: f32 = 60.0;
+/// A dropdown that fills `rect`. The popup's rows are as tall as the cell, so a cell sized as a
+/// touch target gets touch-sized rows too, and the popup is tall enough to show all `row_count`
+/// rows.
+pub(crate) struct DropdownSpec<'a> {
+    pub rect: egui::Rect,
+    pub id_salt: &'a str,
+    pub selected_text: &'a str,
+    pub row_count: usize,
+}
 
-pub(crate) fn paint_execution_mode_badge(
-    painter: &egui::Painter,
-    strip: egui::Rect,
-    mode: Option<ExecutionMode>,
+pub(crate) fn paint_dropdown(
+    ui: &mut egui::Ui,
+    spec: DropdownSpec<'_>,
+    rows: impl FnOnce(&mut egui::Ui),
 ) {
-    let rect = strip.with_min_x(strip.right() - EXECUTION_MODE_BADGE_WIDTH);
-    let (badge, tone) = text::execution_badge(mode);
-    let (fill, text_color) = match tone {
-        Tone::Text => (DARK.border, DARK.text_primary),
-        other => (DARK.tone(other), DARK.canvas),
-    };
-    painter.rect_filled(rect, 0.0, fill);
-    painter.text(
-        egui::pos2(rect.center().x, theme::crisp(painter, rect.center().y)),
-        egui::Align2::CENTER_CENTER,
-        badge,
-        egui::FontId::proportional(METRICS.segment_font),
-        text_color,
-    );
+    let DropdownSpec {
+        rect,
+        id_salt,
+        selected_text,
+        row_count,
+    } = spec;
+    let height = rect.height();
+    let rows_height = row_count as f32 * (height + METRICS.space_1);
+    // egui builds the popup from the page-wide style, not this scope's, so the popup needs its own
+    // row height. It floats above the panes, so it keeps rounded corners while inline cells stay
+    // square.
+    let popup_style = egui::style::StyleModifier::new(move |style| {
+        style.spacing.interact_size.y = height;
+        style.visuals.menu_corner_radius = egui::CornerRadius::same(METRICS.corner_radius as u8);
+    });
+    let builder = egui::UiBuilder::new()
+        .max_rect(rect)
+        .layout(egui::Layout::left_to_right(egui::Align::Center));
+    ui.scope_builder(builder, |ui| {
+        style_combo(ui.style_mut(), height);
+        egui::ComboBox::from_id_salt(id_salt)
+            .width(rect.width())
+            .height(rows_height)
+            .truncate()
+            .popup_style(popup_style)
+            .selected_text(selected_text)
+            .show_ui(ui, rows);
+    });
+}
+
+fn style_combo(style: &mut egui::Style, height: f32) {
+    style.spacing.interact_size.y = height;
+    let widgets = &mut style.visuals.widgets;
+    for state in [
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+        &mut widgets.open,
+    ] {
+        state.bg_stroke = egui::Stroke::NONE;
+        state.corner_radius = egui::CornerRadius::ZERO;
+    }
+    widgets.inactive.weak_bg_fill = DARK.panel_raised;
+    widgets.hovered.weak_bg_fill = DARK.panel;
+    widgets.active.weak_bg_fill = DARK.panel;
+    widgets.open.weak_bg_fill = DARK.panel;
 }
 
 pub(crate) fn paint_segmented_toggle<T: Copy + PartialEq>(
@@ -152,8 +189,8 @@ fn paint_track(
     Some(spec.min + (along * span).round() as usize)
 }
 
-/// Value right, label left. The clamp reads as `50 (34)`: what was asked for, then what the consumer
-/// can actually give. The value is the load-bearing half, so a track too narrow for both drops the
+/// The value sits on the right and the label on the left. The clamp reads as `50 (34)`: what was
+/// asked for, then what the consumer can actually give. The value is the load-bearing half, so a track too narrow for both drops the
 /// label rather than painting them through each other.
 fn paint_readout(painter: &egui::Painter, track: egui::Rect, spec: &StepperSpec<'_>) {
     let font = egui::FontId::proportional(METRICS.segment_font);
@@ -210,7 +247,8 @@ fn paint_step(
     response.clicked()
 }
 
-/// A fill plus a bar along the cell's bottom edge, the one way the page marks a selected cell.
+/// A fill plus a bar along the cell's bottom edge. It is the only way the page marks a selected
+/// cell.
 pub(crate) fn fill_selected(painter: &egui::Painter, cell: egui::Rect) {
     painter.rect_filled(cell, 0.0, DARK.selected.gamma_multiply(0.28));
     let accent = cell.with_min_y(cell.bottom() - METRICS.accent_thickness);
