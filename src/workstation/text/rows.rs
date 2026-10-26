@@ -54,7 +54,7 @@ impl TagColumn {
 pub(crate) enum Cell {
     Time(String),
     Tag(TagColumn),
-    /// Free text, cut with an ellipsis at its left end, running to the quantity column. It starts
+    /// Free text, cut with an ellipsis at its right end, running to the edge of the row. It starts
     /// past the tag when the row has one.
     Description {
         text: String,
@@ -62,7 +62,7 @@ pub(crate) enum Cell {
     },
     Price(String),
     Qty(String),
-    /// Shown only on hover: too wide for the row, too useful to drop.
+    /// Shown in its own column while the row is wide enough, and always part of the hover record.
     Detail(String),
 }
 

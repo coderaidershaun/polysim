@@ -236,7 +236,7 @@ fn spins(spin_interval: DurationUs, count: i64) -> i64 {
 
 labelled_enum! {
     /// Monitor channels in tab order; System is the tab a fresh session opens on.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub enum Channel {
         System = "System",
         Orders = "Orders",
@@ -257,7 +257,7 @@ impl Channel {
 
 /// While following, a channel stays pinned to its newest row and `seen` tracks every row appended.
 /// Scrolled away, it holds still, and a pending offset forces one scroll on the next frame.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ChannelSeen {
     pub(crate) is_following: bool,
     pub(crate) seen: u64,
@@ -282,11 +282,21 @@ impl ChannelSeen {
     }
 }
 
-/// The tab and scroll state the caller owns. It holds no market data.
-#[derive(Debug, Clone)]
+/// What a tap can pin. A row is named by its place in its channel's append order, counted from
+/// the first row ever appended, so the pin stays on that row while newer rows arrive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MonitorDetail {
+    Delta(Side),
+    Feature(FeatureId),
+    Row { channel: Channel, ordinal: u64 },
+}
+
+/// The tab, scroll and pinned-detail state the caller owns. It holds no market data.
+#[derive(Debug, Clone, PartialEq)]
 pub struct MonitorUiState {
     pub active_tab: Channel,
     channels: [ChannelSeen; Channel::ALL.len()],
+    pinned: Option<MonitorDetail>,
 }
 
 impl Default for MonitorUiState {
@@ -294,6 +304,7 @@ impl Default for MonitorUiState {
         Self {
             active_tab: Channel::System,
             channels: [ChannelSeen::FOLLOWING; Channel::ALL.len()],
+            pinned: None,
         }
     }
 }
@@ -310,6 +321,16 @@ impl MonitorUiState {
         slot.is_following = false;
         slot.seen = seen;
         slot.pending_offset = Some(offset);
+    }
+
+    /// `Some` pins that detail in place of any other, or lets go when it is already pinned. `None`
+    /// is a tap on nothing and clears the pin.
+    pub fn tap(&mut self, target: Option<MonitorDetail>) {
+        self.pinned = target.filter(|detail| self.pinned != Some(*detail));
+    }
+
+    pub(crate) fn pinned(&self) -> Option<MonitorDetail> {
+        self.pinned
     }
 
     pub(crate) fn channel(&mut self, channel: Channel) -> &mut ChannelSeen {

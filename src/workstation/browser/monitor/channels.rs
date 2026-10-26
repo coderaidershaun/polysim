@@ -1,24 +1,36 @@
-//! The monitor's tab strip and the active channel's rows, newest first, each row in fixed columns
-//! taken from its own rect so the numbers never shift while the rows scroll.
+//! The monitor's tab strip and the active channel's rows, newest first. The pane's width picks the
+//! columns a row shows, and each sits at an anchor taken from the row's own rect, so the numbers
+//! never shift while the rows scroll.
 
 use eframe::egui;
 
-use super::bands::{RowList, paint_left_ellipsized, paint_row_list};
+use super::bands::{RowList, paint_ellipsized, paint_row_list};
+use super::pin::Pins;
+use super::sizes::{column_widths, content_column};
 use crate::workstation::browser::controls;
 use crate::workstation::browser::dom::overlay::{Direction, triangle};
 use crate::workstation::browser::theme::{self, DARK, METRICS};
+use crate::workstation::monitor::fit::{ColumnPlan, ColumnWidths, TimeColumn, fit_columns};
 use crate::workstation::monitor::model::{FillRow, OrderRow, SystemRow, TradeRow};
-use crate::workstation::monitor::view::{Channel, MonitorFrame, MonitorUiState};
+use crate::workstation::monitor::view::{Channel, MonitorDetail, MonitorFrame, MonitorUiState};
 use crate::workstation::text::{Cell, ChannelRow, TagColumn, record_row};
 
 /// A list scrolled less than this from the top still shows the newest row, which absorbs sub-pixel
 /// jitter.
 const FOLLOW_EPS: f32 = 1.0;
 
-/// One equal cell per channel, so the strip never wraps or overflows.
-pub(super) fn paint_tabs(ui: &mut egui::Ui, rect: egui::Rect, state: &mut MonitorUiState) {
+/// A finger cannot reliably hit the small pill, so on a touch screen the badge answers taps in a
+/// target this tall and this much wider than the pill on each side.
+const BADGE_TOUCH_HEIGHT: f32 = 36.0;
+const BADGE_TOUCH_MARGIN: f32 = 8.0;
+
+const SHORT_TIME_LEN: usize = "HH:MM:SS".len();
+
+/// One equal cell per channel, drawn in the centred column of `band`, so the strip never wraps or
+/// overflows. The caller fills the band.
+pub(super) fn paint_tabs(ui: &mut egui::Ui, band: egui::Rect, state: &mut MonitorUiState) {
+    let rect = content_column(band);
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, DARK.panel_raised);
     let cell_w = rect.width() / Channel::ALL.len() as f32;
 
     for (index, channel) in Channel::ALL.iter().enumerate() {
@@ -55,28 +67,32 @@ pub(super) fn paint_tabs(ui: &mut egui::Ui, rect: egui::Rect, state: &mut Monito
     theme::rules_v(&painter, dividers, rect.y_range());
 }
 
-/// The active channel's rows, newest first. Switching tabs clears nothing.
+/// The active channel's rows, newest first, in the centred column of `band`. Switching tabs clears
+/// nothing.
 pub(super) fn paint_channel(
     ui: &mut egui::Ui,
-    rect: egui::Rect,
+    band: egui::Rect,
     frame: &MonitorFrame<'_>,
     state: &mut MonitorUiState,
+    pins: &mut Pins,
 ) {
     match state.active_tab {
-        Channel::System => render_channel::<SystemRow>(ui, rect, frame, state),
-        Channel::Orders => render_channel::<OrderRow>(ui, rect, frame, state),
-        Channel::PubTrades => render_channel::<TradeRow>(ui, rect, frame, state),
-        Channel::TradeFills => render_channel::<FillRow>(ui, rect, frame, state),
+        Channel::System => render_channel::<SystemRow>(ui, band, frame, state, pins),
+        Channel::Orders => render_channel::<OrderRow>(ui, band, frame, state, pins),
+        Channel::PubTrades => render_channel::<TradeRow>(ui, band, frame, state, pins),
+        Channel::TradeFills => render_channel::<FillRow>(ui, band, frame, state, pins),
     }
 }
 
 /// A row's cells drive both the paint and the hover record, so the two cannot differ.
 fn render_channel<R: ChannelRow>(
     ui: &mut egui::Ui,
-    rect: egui::Rect,
+    band: egui::Rect,
     frame: &MonitorFrame<'_>,
     state: &mut MonitorUiState,
+    pins: &mut Pins,
 ) {
+    let rect = content_column(band);
     let appended = R::appended(frame);
     let slot = state.channel(R::CHANNEL);
     let forced = slot.take_pending_offset();
@@ -85,22 +101,32 @@ fn render_channel<R: ChannelRow>(
         slot.seen = appended;
     }
 
+    let widths = column_widths();
+    let plan = fit_columns(R::CHANNEL, band.width(), &widths);
     let mut cells: Vec<Cell> = Vec::new();
     let offset = paint_row_list(
         ui,
-        rect,
         RowList {
+            rect,
+            pins,
             salt: ("monitor-channel", R::CHANNEL.index()),
             row_count: R::count(frame),
             empty_note: R::EMPTY_NOTE,
             forced_offset: forced,
             row_spacing: 0.0,
         },
+        // A row is named by its place in the append order, not on screen, so it keeps its pin as
+        // newer rows arrive above it.
+        |index| MonitorDetail::Row {
+            channel: R::CHANNEL,
+            ordinal: appended.saturating_sub(index as u64 + 1),
+        },
         |painter, row_rect, index| {
             let Some(row) = R::at(frame, index) else { return };
             cells.clear();
             row.cells(frame, &mut cells);
-            paint_cells(painter, row_rect, &cells);
+            let columns = RowColumns::new(painter, row_rect, plan, &widths);
+            columns.paint_cells(painter, row_rect, &cells);
         },
         |index| R::at(frame, index).map_or_else(String::new, |row| record_row(&row, frame)),
     );
@@ -133,7 +159,7 @@ fn paint_unseen_badge(
     );
 
     let response = ui.interact(
-        badge,
+        badge_target(ui, badge, rect),
         egui::Id::new(("monitor-unseen", channel.index())),
         egui::Sense::click(),
     );
@@ -161,6 +187,22 @@ fn paint_unseen_badge(
     }
 }
 
+/// With a mouse the badge answers on its own pill. On a touch screen its target starts at the
+/// channel's top edge and never above it, so it cannot catch a tap meant for a tab.
+fn badge_target(ui: &egui::Ui, badge: egui::Rect, channel: egui::Rect) -> egui::Rect {
+    if !ui.input(|input| input.has_touch_screen()) {
+        return badge;
+    }
+    egui::Rect::from_min_max(
+        egui::pos2(badge.left() - BADGE_TOUCH_MARGIN, channel.top()),
+        egui::pos2(
+            badge.right() + BADGE_TOUCH_MARGIN,
+            (channel.top() + BADGE_TOUCH_HEIGHT).max(badge.bottom()),
+        ),
+    )
+    .intersect(channel)
+}
+
 fn mono_font() -> egui::FontId {
     egui::FontId::monospace(METRICS.monitor_channel_font)
 }
@@ -169,58 +211,67 @@ fn text_font() -> egui::FontId {
     egui::FontId::proportional(METRICS.monitor_channel_font)
 }
 
-fn paint_cells(painter: &egui::Painter, rect: egui::Rect, cells: &[Cell]) {
-    let cols = ChannelColumns::new(painter, rect);
-    let mut description_offset = 0.0;
-    for cell in cells {
-        match cell {
-            Cell::Time(text) => cols.paint_time(painter, text),
-            Cell::Tag(tag) => {
-                cols.paint_tag(painter, tag);
-                description_offset = METRICS.monitor_intent_tag_w;
-            }
-            Cell::Description { text, tone } => paint_left_ellipsized(
-                painter,
-                rect.with_min_x(cols.tag_x + description_offset)
-                    .with_max_x(cols.qty_x),
-                text,
-                text_font(),
-                DARK.tone(*tone),
-            ),
-            Cell::Price(text) => cols.paint_number(painter, cols.price_x, text),
-            Cell::Qty(text) => cols.paint_number(painter, cols.qty_x, text),
-            Cell::Detail(_) => {}
-        }
-    }
-}
-
-/// The column anchors and the text baseline, taken from the row's rect so the columns never move.
-struct ChannelColumns {
-    tag_x: f32,
+/// The column anchors and the text baseline, taken from the row's rect and the plan so the columns
+/// never move.
+struct RowColumns {
+    plan: ColumnPlan,
+    widths: ColumnWidths,
     time_x: f32,
+    tag_x: f32,
     price_x: f32,
     qty_x: f32,
+    fee_x: f32,
     y: f32,
 }
 
-impl ChannelColumns {
-    fn new(painter: &egui::Painter, rect: egui::Rect) -> Self {
-        let pad = METRICS.space_2;
-        let time_w = METRICS.monitor_time_col_w;
-        let qty_w = METRICS.monitor_qty_col_w;
+impl RowColumns {
+    fn new(
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        plan: ColumnPlan,
+        widths: &ColumnWidths,
+    ) -> Self {
+        let left = rect.left() + widths.pad;
+        let right = rect.right() - widths.pad;
+        let fee_w = plan.fee_width(widths);
         Self {
-            time_x: rect.left() + pad,
-            tag_x: rect.left() + pad + time_w,
-            price_x: rect.right() - pad - qty_w,
-            qty_x: rect.right() - pad,
+            plan,
+            widths: *widths,
+            time_x: left,
+            tag_x: left + plan.time_width(widths),
+            price_x: right - fee_w - widths.qty,
+            qty_x: right - fee_w,
+            fee_x: right,
             y: theme::crisp(painter, rect.center().y),
         }
     }
 
-    /// Liquidity note first when present, and the side word one tag width right of it.
+    fn paint_cells(&self, painter: &egui::Painter, rect: egui::Rect, cells: &[Cell]) {
+        let mut description_offset = 0.0;
+        for cell in cells {
+            match cell {
+                Cell::Time(text) => self.paint_time(painter, text),
+                Cell::Tag(tag) => {
+                    self.paint_tag(painter, tag);
+                    description_offset = self.widths.side;
+                }
+                Cell::Description { text, tone } => {
+                    let room = rect
+                        .with_min_x(self.tag_x + description_offset)
+                        .with_max_x(self.qty_x);
+                    paint_ellipsized(painter, room, text, text_font(), DARK.tone(*tone));
+                }
+                Cell::Price(text) => self.paint_number(painter, self.price_x, text),
+                Cell::Qty(text) => self.paint_number(painter, self.qty_x, text),
+                Cell::Detail(text) => self.paint_fee(painter, text),
+            }
+        }
+    }
+
+    /// Liquidity note first when the plan keeps it, and the side word one tag width right of it.
     fn paint_tag(&self, painter: &egui::Painter, tag: &TagColumn) {
         let mut x = self.tag_x;
-        if let Some(liquidity) = tag.liquidity {
+        if let Some(liquidity) = tag.liquidity.filter(|_| self.plan.has_liquidity) {
             painter.text(
                 egui::pos2(x, self.y),
                 egui::Align2::LEFT_CENTER,
@@ -228,7 +279,7 @@ impl ChannelColumns {
                 text_font(),
                 DARK.text_secondary,
             );
-            x += METRICS.monitor_fill_tag_w;
+            x += self.widths.liquidity;
         }
         painter.text(
             egui::pos2(x, self.y),
@@ -240,10 +291,15 @@ impl ChannelColumns {
     }
 
     fn paint_time(&self, painter: &egui::Painter, text: &str) {
+        let shown = match self.plan.time {
+            TimeColumn::Full => text,
+            TimeColumn::Short => text.get(..SHORT_TIME_LEN).unwrap_or(text),
+            TimeColumn::Hidden => return,
+        };
         painter.text(
             egui::pos2(self.time_x, self.y),
             egui::Align2::LEFT_CENTER,
-            text,
+            shown,
             mono_font(),
             DARK.text_secondary,
         );
@@ -256,6 +312,19 @@ impl ChannelColumns {
             text,
             mono_font(),
             DARK.text_primary,
+        );
+    }
+
+    fn paint_fee(&self, painter: &egui::Painter, text: &str) {
+        if !self.plan.has_fee {
+            return;
+        }
+        painter.text(
+            egui::pos2(self.fee_x, self.y),
+            egui::Align2::RIGHT_CENTER,
+            text,
+            mono_font(),
+            DARK.text_secondary,
         );
     }
 }

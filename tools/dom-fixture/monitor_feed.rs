@@ -1,18 +1,19 @@
 //! Builds the monitor scenes by feeding ordered events through the real model, as the link would.
 
-use polysim::hot::exec::{CloseReason, OrderState, RejectOrigin};
+use polysim::hot::exec::{CloseReason, ExecHalt, OrderState, RejectOrigin};
 use polysim::ids::{AssetId, ClientOrderId};
 use polysim::ids::{FIXED_SCALE, InstrumentId, Price, Qty, Side};
 use polysim::msg::exec::Liquidity;
+use polysim::msg::inbound::Level;
 use polysim::msg::persist::FeatureId;
-use polysim::msg::ui::{DomQuote, UiBookState, UiEvent};
+use polysim::msg::ui::{DomQuote, UiBookState, UiCatalog, UiEvent};
 use polysim::time::DurationUs;
 use polysim::time::TsUs;
 use polysim::workstation::model::UiModel;
 use polysim::workstation::monitor::model::SystemNote;
 use polysim::workstation::monitor::view::MonitorUiState;
 
-use crate::fixture::{BASE_TS, book, levels, px, qm};
+use crate::fixture::{BASE_TS, book, qm};
 
 pub const SPIN: DurationUs = DurationUs::from_micros(100_000);
 pub const QUOTE_QTY_MILLI: i64 = 9_000;
@@ -32,19 +33,55 @@ pub struct MonitorScene {
 /// A commission in units of 1e-8, picked to look real rather than round.
 const FILL_COMMISSION: i64 = 944_000;
 
+struct OrderStep {
+    ts: i64,
+    id: u64,
+    side: Side,
+    tick: i64,
+    state: OrderState,
+    filled: Qty,
+}
+
+/// Every price a feed carries is a whole number of ticks on its grid, so a scene sets its scale
+/// once.
 pub struct Feed {
     model: UiModel,
+    tick: Price,
     seq: u64,
     book_seq: u64,
 }
 
 impl Feed {
+    /// Prices on a grid of one whole unit, the grid the first four scenes use.
     pub fn new(instruments: usize, features: usize) -> Self {
+        Self::with_tick(instruments, features, TICK)
+    }
+
+    pub fn with_tick(instruments: usize, features: usize, tick: Price) -> Self {
         Self {
             model: UiModel::with_monitor_capacity(instruments, features, SPIN),
+            tick,
             seq: 0,
             book_seq: 0,
         }
+    }
+
+    /// Reconfigures the monitor's grid and spin interval, so it comes before any event.
+    pub fn set_catalog(&mut self, catalog: UiCatalog) {
+        self.model.set_catalog(catalog);
+    }
+
+    fn price(&self, tick_index: i64) -> Price {
+        Price(tick_index * self.tick.0)
+    }
+
+    fn levels(&self, rows: &[(i64, i64)]) -> Vec<Level> {
+        rows.iter()
+            .map(|&(tick_index, milli)| Level {
+                price: self.price(tick_index),
+                qty: qm(milli),
+            })
+            .collect()
     }
 
     pub fn lifecycle(&mut self, note: SystemNote) {
@@ -57,15 +94,15 @@ impl Feed {
             self.book_seq,
             BASE_TS + ts,
             state,
-            &levels(bids),
-            &levels(asks),
+            &self.levels(bids),
+            &self.levels(asks),
         ));
     }
 
     pub fn quote(&mut self, ts: i64, bid: Option<i64>, ask: Option<i64>) {
         let quote = DomQuote::top(
-            bid.map(|tick| (px(tick), qm(QUOTE_QTY_MILLI))),
-            ask.map(|tick| (px(tick), qm(QUOTE_QTY_MILLI))),
+            bid.map(|tick| (self.price(tick), qm(QUOTE_QTY_MILLI))),
+            ask.map(|tick| (self.price(tick), qm(QUOTE_QTY_MILLI))),
         );
         self.apply(UiEvent::Quote {
             instrument: InstrumentId(0),
@@ -81,7 +118,7 @@ impl Feed {
             seq: 0,
             event_ts_us: ts_at(ts),
             aggressor,
-            price: px(tick),
+            price: self.price(tick),
             qty: qm(milli),
         });
     }
@@ -102,16 +139,39 @@ impl Feed {
         } else {
             Qty(0)
         };
+        self.send_order(OrderStep {
+            ts,
+            id,
+            side,
+            tick,
+            state,
+            filled,
+        });
+    }
+
+    /// A resting order that has filled `filled_milli` of its size.
+    pub fn partial_order(&mut self, ts: i64, id: u64, side: Side, tick: i64, filled_milli: i64) {
+        self.send_order(OrderStep {
+            ts,
+            id,
+            side,
+            tick,
+            state: OrderState::Live,
+            filled: qm(filled_milli),
+        });
+    }
+
+    fn send_order(&mut self, step: OrderStep) {
         self.apply(UiEvent::OrderUpdate {
             instrument: InstrumentId(0),
             seq: 0,
-            event_ts_us: ts_at(ts),
-            client_id: ClientOrderId(id),
-            side,
-            state,
-            price: px(tick),
+            event_ts_us: ts_at(step.ts),
+            client_id: ClientOrderId(step.id),
+            side: step.side,
+            state: step.state,
+            price: self.price(step.tick),
             qty: qm(QUOTE_QTY_MILLI),
-            filled,
+            filled: step.filled,
             quote_level: None,
         });
     }
@@ -132,12 +192,30 @@ impl Feed {
             seq: 0,
             event_ts_us: ts_at(ts),
             side,
-            price: px(tick),
+            price: self.price(tick),
             qty: qm(milli),
             commission: FILL_COMMISSION,
             commission_asset: AssetId(1),
             liquidity: Some(Liquidity::Maker),
             quote_level: None,
+        });
+    }
+
+    pub fn balance(&mut self, ts: i64, asset: AssetId, free: i64, locked: i64) {
+        self.apply(UiEvent::Balance {
+            asset,
+            seq: 0,
+            event_ts_us: ts_at(ts),
+            free,
+            locked,
+        });
+    }
+
+    pub fn execution(&mut self, ts: i64, halt: ExecHalt) {
+        self.apply(UiEvent::Execution {
+            seq: 0,
+            event_ts_us: ts_at(ts),
+            halt,
         });
     }
 
@@ -155,6 +233,10 @@ impl Feed {
 
     pub fn system_appended(&self) -> u64 {
         self.model.monitor().system_appended()
+    }
+
+    pub fn orders_appended(&self) -> u64 {
+        self.model.monitor().orders_appended()
     }
 
     fn apply(&mut self, mut event: UiEvent) {
@@ -178,7 +260,7 @@ impl Feed {
                 .collect(),
             instrument_names: vec![Box::<str>::from("BTCUSDT")],
             instrument: InstrumentId(0),
-            tick: TICK,
+            tick: self.tick,
             qty_scale: FIXED_SCALE,
             qty_decimals: 3,
             state,

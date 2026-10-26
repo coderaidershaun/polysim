@@ -98,9 +98,10 @@ pub(crate) struct Metrics {
     pub monitor_tab_height: f32,
     pub monitor_row_height: f32,
     pub monitor_feature_fraction: f32,
-    /// The mid's share of the summary band; the two deltas split the rest. 0.40 is forced, not
-    /// chosen — at the minimum window it is the only split where neither cell's widest realistic
-    /// value overlaps a separator.
+    /// The mid's share of the summary band; the two deltas split the rest. At the narrowest
+    /// monitor, 300 points, any split from 0.36 to 0.46 keeps a ten-glyph mid such as 118234.505
+    /// and a nine-glyph delta inside their cells. 0.40 is the round split that leaves about one
+    /// glyph of spare room in both.
     pub monitor_mid_fraction: f32,
     pub monitor_mid_font: f32,
     pub monitor_delta_font: f32,
@@ -158,10 +159,11 @@ pub(crate) const METRICS: Metrics = Metrics {
     dom_qty_font: 13.0,
     dom_mid_font: 16.0,
     dom_tag_font: 9.0,
-    // The monitor's summary and tab bands are fixed. The feature list takes 43 percent of what is
-    // left, and the channel the rest.
+    // The monitor's account, summary and tab bands are fixed. A pane tall enough to show every band
+    // gives the feature list its fraction of what is left, up to the rows it needs, and the channel
+    // the rest. A shorter pane scrolls.
     monitor_summary_height: 56.0,
-    monitor_tab_height: 30.0,
+    monitor_tab_height: 36.0,
     monitor_row_height: 18.0,
     monitor_feature_fraction: 0.43,
     monitor_mid_fraction: 0.40,

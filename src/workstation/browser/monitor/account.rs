@@ -1,11 +1,13 @@
-//! The account band. It is always visible because it shows real money and must be readable from the
-//! corner of the eye, and each value it projects can be absent on its own.
+//! The account band and the status strip above it. The strip holds the halt latch and the last
+//! refusal and never scrolls, so they stay in view whatever the pane height. Each value the band
+//! projects can be absent on its own.
 
 use eframe::egui;
 
 use crate::hot::exec::ExecHalt;
 
-use super::bands::paint_left_ellipsized;
+use super::bands::paint_ellipsized;
+use super::sizes::content_column;
 use crate::workstation::browser::theme::{self, DARK, METRICS};
 use crate::workstation::format::MISSING;
 use crate::workstation::monitor::view::{
@@ -16,23 +18,42 @@ use crate::workstation::text::{
     write_amount,
 };
 
-/// Header, base, quote, bid counts, ask counts and status. A fixed count keeps the band's height
-/// fixed.
-const ROWS: usize = 6;
+/// Header, base, quote, bid counts and ask counts. A fixed count keeps the band's height fixed.
+const ROWS: usize = 5;
+
+// SMELL: the band size builder reads these two heights, and this file uses the centred column
+// from that same builder's module, so the two modules depend on each other. The heights stay here,
+// beside the rows they count.
 
 /// Computed from the row count, so the layout and the painter cannot disagree after a size change.
 pub(super) fn height() -> f32 {
     ROWS as f32 * METRICS.monitor_row_height + 2.0 * METRICS.space_1
 }
 
-pub(super) fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &MonitorFrame<'_>) {
-    let view = account(frame.model, frame.instrument, frame.tick);
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, DARK.panel_raised);
+pub(super) fn status_height() -> f32 {
+    METRICS.monitor_row_height + 2.0 * METRICS.space_1
+}
 
-    let grid = Grid::new(rect);
+/// Draws into the centred column of `band`. The caller fills the band.
+pub(super) fn paint_status(ui: &mut egui::Ui, band: egui::Rect, frame: &MonitorFrame<'_>) {
+    let view = account(frame.model, frame.instrument, frame.tick);
+    let column = content_column(band);
+    let painter = ui.painter_at(band);
+    let grid = Grid::new(&painter, column);
+    let row = column.shrink2(egui::vec2(0.0, METRICS.space_1));
+    paint_status_row(&painter, &grid, row, &view);
+}
+
+/// Draws into the centred column of `band`, and its rules across the whole band. The caller fills
+/// the band.
+pub(super) fn paint(ui: &mut egui::Ui, band: egui::Rect, frame: &MonitorFrame<'_>) {
+    let view = account(frame.model, frame.instrument, frame.tick);
+    let column = content_column(band);
+    let painter = ui.painter_at(band);
+
+    let grid = Grid::new(&painter, column);
     let mut scratch = String::new();
-    let mut row = RowCursor::new(rect);
+    let mut row = RowCursor::new(column);
 
     let header = row.next();
     paint_header(&painter, &grid, header, &view);
@@ -41,12 +62,11 @@ pub(super) fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &MonitorFrame<'_
     paint_asset(&painter, &grid, assets_bottom, view.quote, &mut scratch);
     paint_counts(&painter, &grid, row.next(), "BID", view.bid);
     paint_counts(&painter, &grid, row.next(), "ASK", view.ask);
-    paint_status(&painter, &grid, row.next(), &view);
 
     // The container separates its own rows; no cell wears a box. The first rule closes the captions,
     // the second closes the asset table so the counts below it read as a separate list.
     let rules = [header.bottom(), assets_bottom.bottom()];
-    theme::rules_h(&painter, rules, rect.x_range());
+    theme::rules_h(&painter, rules, band.x_range());
 }
 
 /// Hands out fixed-height rows in order, so no painter works out its own y.
@@ -76,19 +96,28 @@ struct Grid {
     label_left: f32,
     numbers_left: f32,
     column_width: f32,
+    /// The longest number, in glyphs, that still leaves one glyph of space between it and the
+    /// column to its left.
+    number_glyphs: usize,
 }
 
 impl Grid {
     const COLUMNS: usize = 3;
 
-    fn new(rect: egui::Rect) -> Self {
+    fn new(painter: &egui::Painter, rect: egui::Rect) -> Self {
         let label_left = rect.left() + METRICS.space_2;
         let numbers_left = label_left + METRICS.monitor_asset_label_w;
         let width = (rect.right() - METRICS.space_2 - numbers_left).max(0.0);
+        let column_width = width / Self::COLUMNS as f32;
+        let glyph = painter
+            .layout_no_wrap("0".to_owned(), number_font(), DARK.text_primary)
+            .size()
+            .x;
         Self {
             label_left,
             numbers_left,
-            column_width: width / Self::COLUMNS as f32,
+            column_width,
+            number_glyphs: ((column_width - glyph) / glyph).floor().max(0.0) as usize,
         }
     }
 
@@ -113,27 +142,36 @@ fn paint_header(painter: &egui::Painter, grid: &Grid, rect: egui::Rect, view: &A
         egui::FontId::proportional(METRICS.monitor_micro_font),
         DARK.text_secondary,
     );
-    let mut note_left = title.right();
-    for (note, tone) in account_notes(view) {
-        let note = painter.text(
-            egui::pos2(note_left + METRICS.space_2, y),
-            egui::Align2::LEFT_CENTER,
-            note,
-            egui::FontId::proportional(METRICS.monitor_micro_font),
-            DARK.tone(tone),
-        );
-        note_left = note.right();
-    }
-
+    let mut notes_right = f32::INFINITY;
     for (index, caption) in account_captions(view).iter().enumerate() {
         let cell = grid.column(rect, index);
-        painter.text(
+        let drawn = painter.text(
             egui::pos2(cell.right(), theme::crisp(painter, cell.center().y)),
             egui::Align2::RIGHT_CENTER,
             caption,
             egui::FontId::proportional(METRICS.monitor_micro_font),
             DARK.text_secondary,
         );
+        if index == 0 {
+            notes_right = drawn.left() - METRICS.space_2;
+        }
+    }
+
+    // The notes get what is left between the title and the first caption, so one that does not fit
+    // is cut short instead of running under the caption.
+    let mut note_left = title.right() + METRICS.space_2;
+    for (note, tone) in account_notes(view) {
+        if note_left >= notes_right {
+            break;
+        }
+        let used = paint_ellipsized(
+            painter,
+            egui::Rect::from_x_y_ranges(note_left..=notes_right, y..=y),
+            &note,
+            egui::FontId::proportional(METRICS.monitor_micro_font),
+            DARK.tone(tone),
+        );
+        note_left += used + METRICS.space_2;
     }
 }
 
@@ -157,14 +195,35 @@ fn paint_asset(
 
     let free = asset.balance.map(|balance| balance.free);
     let locked = asset.balance.map(|balance| balance.locked);
-    write_amount(scratch, free, BALANCE_DECIMALS);
+    let glyphs = grid.number_glyphs;
+    write_fitted_amount(scratch, free, BALANCE_DECIMALS, glyphs);
     paint_number(painter, grid.column(rect, 0), scratch, DARK.text_primary);
     // Locked is dimmer: the venue holds it, so it cannot be spent.
-    write_amount(scratch, locked, BALANCE_DECIMALS);
+    write_fitted_amount(scratch, locked, BALANCE_DECIMALS, glyphs);
     paint_number(painter, grid.column(rect, 1), scratch, DARK.text_secondary);
     // Two places against the balances' five: obviously the same money, obviously a total.
-    write_amount(scratch, asset.value, VALUE_DECIMALS);
+    write_fitted_amount(scratch, asset.value, VALUE_DECIMALS, glyphs);
     paint_number(painter, grid.column(rect, 2), scratch, DARK.text_primary);
+}
+
+/// An amount too wide for its column loses decimal places, cut and never rounded, before it would
+/// run into the number beside it. The whole part is never cut.
+fn write_fitted_amount(
+    scratch: &mut String,
+    mantissa: Option<i64>,
+    decimals: usize,
+    max_glyphs: usize,
+) {
+    for places in (0..=decimals).rev() {
+        write_amount(scratch, mantissa, places);
+        if scratch.len() <= max_glyphs {
+            return;
+        }
+    }
+}
+
+fn number_font() -> egui::FontId {
+    egui::FontId::monospace(METRICS.monitor_channel_font)
 }
 
 fn paint_number(painter: &egui::Painter, cell: egui::Rect, text: &str, color: egui::Color32) {
@@ -172,7 +231,7 @@ fn paint_number(painter: &egui::Painter, cell: egui::Rect, text: &str, color: eg
         egui::pos2(cell.right(), theme::crisp(painter, cell.center().y)),
         egui::Align2::RIGHT_CENTER,
         text,
-        egui::FontId::monospace(METRICS.monitor_channel_font),
+        number_font(),
         color,
     );
 }
@@ -213,8 +272,9 @@ fn paint_counts(
     ];
     for (index, (tag, count, color)) in cells.into_iter().enumerate() {
         let cell = grid.column(rect, index);
+        // The gap keeps a tag off the number of the cell before it.
         painter.text(
-            egui::pos2(cell.left(), y),
+            egui::pos2(cell.left() + METRICS.space_2, y),
             egui::Align2::LEFT_CENTER,
             tag,
             egui::FontId::proportional(METRICS.monitor_micro_font),
@@ -224,11 +284,16 @@ fn paint_counts(
     }
 }
 
-/// The last refusal and the kill switch share a row. A halt takes the whole row instead: `HALTED`
-/// beside a refusal would collide exactly when it matters, and every refusal is in the Orders
-/// channel anyway. Before the engine's first execution frame the gate reads as missing, never as
-/// armed.
-fn paint_status(painter: &egui::Painter, grid: &Grid, rect: egui::Rect, view: &AccountView<'_>) {
+/// The last refusal and the kill switch share the strip. A halt takes the whole strip instead:
+/// `HALTED` beside a refusal would collide exactly when it matters, and every refusal is in the
+/// Orders channel anyway. Before the engine's first execution frame the gate reads as missing,
+/// never as armed.
+fn paint_status_row(
+    painter: &egui::Painter,
+    grid: &Grid,
+    rect: egui::Rect,
+    view: &AccountView<'_>,
+) {
     let y = theme::crisp(painter, rect.center().y);
     if let Some(ExecHalt::Halted { reason, .. }) = view.halt {
         // Filled, not outlined, so the halt is easy to find from the corner of the eye.
@@ -256,7 +321,7 @@ fn paint_status(painter: &egui::Painter, grid: &Grid, rect: egui::Rect, view: &A
     );
     let (reject, tone) = text::reject_display(view.last_reject.map(|reject| reject.origin));
     let reject_text_rect = grid.column(rect, 0).union(grid.column(rect, 1));
-    paint_left_ellipsized(
+    paint_ellipsized(
         painter,
         reject_text_rect,
         &reject,

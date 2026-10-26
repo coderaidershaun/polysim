@@ -73,6 +73,8 @@ mod mcp_tools;
 /// include point only — a second would mint a distinct `MicroRecorder` type.
 #[path = "../../strategies/strat-micro-recorder/te-binance-spot-btcusdt/strategy.rs"]
 mod micro_strategy;
+mod monitor_fit;
+mod monitor_pin;
 mod monitor_projection;
 mod parquet_readback;
 mod persist_drain;

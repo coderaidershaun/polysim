@@ -5,19 +5,26 @@ use eframe::egui;
 
 use crate::ids::Side;
 
+use super::pin::Pins;
+use super::sizes::content_column;
 use crate::workstation::browser::theme::{self, DARK, METRICS};
 use crate::workstation::format;
-use crate::workstation::monitor::view::{MonitorFrame, quote_summary};
+use crate::workstation::monitor::view::{MonitorDetail, MonitorFrame, quote_summary};
 use crate::workstation::text::{Lane, Tone, cell_tone, delta_hover, summary_caption, write_delta};
 
 const CELLS: usize = 3;
 
-/// Three cells parted by hairlines, each blank on its own when it has no reading. Hovering a delta
-/// says it is a distance, not a price.
-pub(super) fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &MonitorFrame<'_>) {
+/// Three cells parted by hairlines, each blank on its own when it has no reading. Hovering or
+/// tapping a delta says it is a distance, not a price. Draws into the centred column of `band`.
+pub(super) fn paint(
+    ui: &mut egui::Ui,
+    band: egui::Rect,
+    frame: &MonitorFrame<'_>,
+    pins: &mut Pins,
+) {
     let summary = quote_summary(frame.model, frame.instrument, frame.tick);
+    let rect = content_column(band);
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, DARK.panel_raised);
     // The mid carries the longest value (a half-tick BTC mid is 10 glyphs at the largest font in
     // the band), so it claims the widest cell rather than an equal third. Ten is the bound this
     // split is solved for: an eleven-glyph mid needs the split worked out again, not a wider
@@ -51,6 +58,12 @@ pub(super) fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &MonitorFrame<'_
     ];
     for (col, lane, tone, value) in cells {
         let cell = rect.with_min_x(edges[col]).with_max_x(edges[col + 1]);
+        if let Lane::Delta(side) = lane {
+            // Before the cell paints, so the pin's tint sits behind its text.
+            pins.interact(ui, cell, MonitorDetail::Delta(side), || {
+                delta_hover(frame.dom_unit).to_owned()
+            });
+        }
         painter.text(
             egui::pos2(cell.center().x, cell.top() + METRICS.space_3),
             egui::Align2::CENTER_CENTER,
@@ -76,14 +89,5 @@ pub(super) fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &MonitorFrame<'_
             egui::FontId::monospace(font),
             DARK.tone(cell_tone(wrote, tone)),
         );
-
-        if let Lane::Delta(_) = lane {
-            ui.interact(
-                cell,
-                egui::Id::new(("monitor-delta", col)),
-                egui::Sense::hover(),
-            )
-            .on_hover_text(delta_hover(frame.dom_unit));
-        }
     }
 }
