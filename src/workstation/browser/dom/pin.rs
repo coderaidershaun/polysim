@@ -1,5 +1,5 @@
-//! Touch has no hover, so a tap on a row pins the readout there, and the next tap anywhere in the
-//! ladder clears it.
+//! Touch has no hover, so a finger tap on a row pins the readout there, and the next tap or click
+//! anywhere in the ladder clears it. A mouse click never pins: hovering already shows the readout.
 
 use eframe::egui;
 
@@ -16,7 +16,7 @@ struct Pin {
     last_painted: u64,
 }
 
-/// Applies this frame's tap and returns where the readout is pinned, if anywhere. `ladder` is the
+/// Applies this frame's click and returns where the readout is pinned, if anywhere. `ladder` is the
 /// response of the ladder's whole body.
 pub(super) fn pinned_point(
     ladder: &egui::Response,
@@ -31,8 +31,8 @@ pub(super) fn pinned_point(
         .data(|data| data.get_temp::<Option<Pin>>(id))
         .flatten()
         .filter(|pin| pin.body == body && pin.last_painted + 1 >= this_frame);
-    let next = match touch_tap(ladder) {
-        Some(at) if pin.is_none() && layout.row_at(view, at).is_some() => Some(Pin {
+    let next = match read_click(ladder) {
+        Some(Click::Touch(at)) if pin.is_none() && layout.row_at(view, at).is_some() => Some(Pin {
             body,
             at,
             last_painted: this_frame,
@@ -47,22 +47,29 @@ pub(super) fn pinned_point(
     next.map(|pin| pin.at)
 }
 
-/// Returns where a finger tapped inside the ladder this frame, unless the tap landed on a window
-/// drawn over it. The browser sends the pointer release before the touch end, so egui reports the
-/// click in a frame that already holds a touch. A mouse click has no touch, so it never pins.
-fn touch_tap(ladder: &egui::Response) -> Option<egui::Pos2> {
-    let at = ladder.ctx.input(|input| {
+enum Click {
+    Touch(egui::Pos2),
+    Mouse,
+}
+
+/// Returns the click that landed inside the ladder this frame, unless it landed on a window drawn
+/// over it. The browser sends a finger's pointer release before its touch end, so a finger's click
+/// arrives in a frame that still holds the touch, and a mouse click's frame holds none.
+fn read_click(ladder: &egui::Response) -> Option<Click> {
+    let (at, is_touch) = ladder.ctx.input(|input| {
+        if !input.pointer.primary_clicked() {
+            return None;
+        }
         let is_touch = input.any_touches()
             || input
                 .events
                 .iter()
                 .any(|event| matches!(event, egui::Event::Touch { .. }));
-        if input.pointer.primary_clicked() && is_touch {
-            input.pointer.interact_pos()
-        } else {
-            None
-        }
+        Some((input.pointer.interact_pos()?, is_touch))
     })?;
     let is_on_top = ladder.ctx.layer_id_at(at) == Some(ladder.layer_id);
-    (ladder.rect.contains(at) && is_on_top).then_some(at)
+    if !ladder.rect.contains(at) || !is_on_top {
+        return None;
+    }
+    Some(if is_touch { Click::Touch(at) } else { Click::Mouse })
 }
