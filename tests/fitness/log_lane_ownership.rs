@@ -14,14 +14,10 @@ use std::path::Path;
 
 use crate::exec_no_clock::rust_sources;
 
-/// This engine's complete OS-thread census: the process entry, the single hot thread, the two
-/// dedicated output threads, the workstation's pair (its main/UI thread plus the link reader, which
-/// blocks on `recv_from`), and the bridge's main thread. The bridge's stdin reader logs nothing and
-/// so registers no lane. Everything else that runs concurrently here is a tokio task.
-const THREAD_LANE_OWNERS: [(&str, &str); 7] = [
-    ("src/bridge/mod.rs", "bridge"),
-    ("src/desktop/link_client/worker.rs", "link"),
-    ("src/desktop/mod.rs", "ui"),
+/// This engine's complete OS-thread census: the process entry, the single hot thread, and the two
+/// dedicated output threads. Everything else that runs concurrently here is a tokio task. The
+/// browser workstation runs on one thread with no log lane.
+const THREAD_LANE_OWNERS: [(&str, &str); 4] = [
     ("src/exposure/writer.rs", "exposure"),
     ("src/hot/spawn.rs", "config.tag"),
     ("src/persist/drain.rs", "persist"),

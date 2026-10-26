@@ -1,12 +1,12 @@
-//! Risk scenes as TEXT: GUI proves nothing on locked machine, so print series for headless check.
-//! Split from position_scenes for data/summary separation.
+//! The risk scenes as text, so they can be checked without a screen: a painted page proves nothing
+//! on a locked machine.
 
-use polysim::desktop::position_chart_model::PositionBucket;
 use polysim::ids::FIXED_SCALE;
+use polysim::workstation::chart::position_model::PositionBucket;
 
 use crate::position_scenes::position_scenes;
 
-/// Summarise every scene's banked series on stdout: same data lower chart would draw, reviewable.
+/// One summary per scene of the series the risk chart would draw.
 pub fn dump() {
     for scene in position_scenes() {
         let buckets: Vec<&PositionBucket> = scene.positions.buckets(scene.instrument).collect();
@@ -19,7 +19,8 @@ pub fn dump() {
         let exposure = extent(&buckets, |bucket| bucket.exposure_quote);
         let pnl = extent(&buckets, |bucket| bucket.pnl_quote);
         println!(
-            // Modulo keeps spin readable ONLY when BASE_TS/SPIN == 100_000 — change constants -> arbitrary epoch.
+            // The modulo prints the scene's own spin numbers only because the base time is a whole
+            // multiple of 100,000 spins. Other constants would print arbitrary numbers.
             "{:<46} {:>4} buckets  spins {}..={}  gaps {}  levels {:>3}  exposure {}  pnl {}",
             scene.name,
             buckets.len(),
@@ -34,7 +35,8 @@ pub fn dump() {
     }
 }
 
-/// Gap widths in spins: count alone can't distinguish 1-bucket from 60-bucket gaps (different bugs).
+/// Each gap's width in spins. A count alone cannot tell a one-bucket gap from a sixty-bucket one,
+/// and those are different bugs.
 fn gap_widths(buckets: &[&PositionBucket]) -> String {
     let widths: Vec<u64> = buckets
         .windows(2)
@@ -47,7 +49,8 @@ fn gap_widths(buckets: &[&PositionBucket]) -> String {
     }
 }
 
-/// Distinct exposure levels: extremes alone can't see SHAPE (staircase collapsed == correct staircase extremes).
+/// How many distinct exposure values the series holds. The extremes alone cannot see its shape: a
+/// collapsed staircase has the same extremes as the right one.
 fn distinct_levels(buckets: &[&PositionBucket]) -> usize {
     let mut levels: Vec<i64> = buckets.iter().map(|bucket| bucket.exposure_quote).collect();
     levels.sort_unstable();
@@ -63,7 +66,7 @@ fn extent(buckets: &[&PositionBucket], value: fn(&PositionBucket) -> i64) -> (i6
         })
 }
 
-/// Quote-mantissa range with marker for zero-crossing (property three scenes demonstrate).
+/// The range in quote units, marked when it crosses zero.
 fn span((low, high): (i64, i64)) -> String {
     let crosses = if low < 0 && high > 0 { " CROSSES 0" } else { "" };
     format!(

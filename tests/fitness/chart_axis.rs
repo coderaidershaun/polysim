@@ -4,8 +4,8 @@
 //! is a tick drawn outside the plotted range or a label that quietly rounds — a lie painted over live
 //! data rather than a crash, which is exactly what a fitness pin exists to catch.
 
-use polysim::desktop::chart_view::{ChartDomain, bucket_at_fraction, x_fraction};
-use polysim::desktop::format::{
+use polysim::workstation::chart::view::{ChartDomain, bucket_at_fraction, x_fraction};
+use polysim::workstation::format::{
     axis_ticks, legible_tick_ceiling, quote_axis_decimals, write_quote_amount,
 };
 use proptest::prelude::*;
@@ -26,8 +26,8 @@ fn arb_span(minimum: i64) -> impl Strategy<Value = i64> {
     ]
 }
 
-/// The widest window the model can ask for: `chart_model`'s own ceiling on retained buckets, so the
-/// round trip is pinned across every window shape a run can produce, not just the shipped one.
+/// The widest window the model can ask for: the chart model's own ceiling on retained buckets, so
+/// the round trip is pinned across every window shape a run can produce, not just the shipped one.
 const MAX_WINDOW_SLOTS: u64 = 3_000;
 
 /// Whether `step` sits on the {1,2,5}·10^k ladder, checked independently of the generator so a

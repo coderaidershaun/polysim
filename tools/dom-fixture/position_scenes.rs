@@ -1,11 +1,12 @@
-//! Deterministic exposure/PnL: stream -> ChartModel + PositionModel. Risk takes MID window, no hand-drawn curves.
+//! The risk scenes: a fixed stream of books and fills folded through the real chart and position
+//! models, so no curve is drawn by hand. The risk chart takes the mid chart's window.
 
-use polysim::desktop::chart_model::{BookContinuity, ChartModel};
-use polysim::desktop::position_chart_model::PositionModel;
 use polysim::ids::{FIXED_SCALE, InstrumentId, Price, Qty, Side};
 use polysim::msg::ui::{UiBookState, UiEvent};
 use polysim::time::DurationUs;
 use polysim::time::TsUs;
+use polysim::workstation::chart::model::{BookContinuity, ChartModel};
+use polysim::workstation::chart::position_model::PositionModel;
 
 use crate::fixture::{self, BASE_TS, INSTRUMENT, book, px, unit};
 
@@ -16,10 +17,10 @@ const COMMITS_PER_BUCKET: i64 = 2;
 
 const TICK: Price = Price(FIXED_SCALE);
 
-/// BTC scale: $1 = 1 tick.
+/// BTC scale, one dollar to a tick.
 const BASE_BID: i64 = 65_990;
 
-/// Order size 0.01 base: handful fills axis at BASE_BID.
+/// 0.01 of the base asset, so a handful of fills spans the axis at this price.
 const ORDER_QTY: Qty = Qty(FIXED_SCALE / 100);
 
 pub struct PositionScene {
@@ -43,7 +44,8 @@ pub fn position_scenes() -> Vec<PositionScene> {
     ]
 }
 
-/// Position held, mark oscillates entry: PnL crosses zero. Toggle rescales axis, most different series.
+/// A held position whose mark swings around the entry, so the PnL crosses zero. Switching series
+/// rescales the axis more here than in any other scene.
 fn pnl_through_zero() -> PositionScene {
     let mut feed = Feed::new(Some(TICK));
     feed.walk(0..20);
@@ -55,11 +57,13 @@ fn pnl_through_zero() -> PositionScene {
     )
 }
 
-/// Inventory long->short: exposure flips sign, JUMPS on fills, DRIFTS between (~243 levels not 13), mark-to-market essence.
+/// Inventory goes from long to short. Exposure jumps at each fill and drifts with the mark between
+/// them, giving about 243 levels rather than a staircase of 13.
 fn exposure_steps() -> PositionScene {
     let mut feed = Feed::new(Some(TICK));
     for step in 0..WINDOW_BUCKETS {
-        // Buy phase short on purpose: equal split -> never short, negative color unused.
+        // The buying phase is a third of the scene on purpose: an even split never goes short, and
+        // the negative colour would go unseen.
         if step % 24 == 0 && step > 0 {
             match step < WINDOW_BUCKETS / 3 {
                 true => feed.buy(step),
@@ -77,7 +81,8 @@ fn exposure_steps() -> PositionScene {
     )
 }
 
-/// Marked, never traded: axis floor catches 1e-8 mantissas. Every run first minutes, not corner case.
+/// Marked but never traded, so the axis floor must stop it labelling in 1e-8 steps. Every run looks
+/// like this for its first minutes.
 fn flat_at_zero() -> PositionScene {
     let mut feed = Feed::new(Some(TICK));
     feed.walk(0..WINDOW_BUCKETS);
@@ -87,7 +92,8 @@ fn flat_at_zero() -> PositionScene {
     )
 }
 
-/// Ring overflow: frames drop (drop policy safe on absolute state), mid chart draws through. Line SPLITS hole, no bridge.
+/// A full event ring drops position frames while books still arrive. Dropping is safe because each
+/// frame is an absolute state. The risk line splits at the hole while the mid line runs through it.
 fn dropped_frames() -> PositionScene {
     let mut feed = Feed::new(Some(TICK));
     feed.walk(0..40);
@@ -101,7 +107,8 @@ fn dropped_frames() -> PositionScene {
     )
 }
 
-/// Rotation clears + re-marks: draws flat zero (NOT silent). Catches "no data" vs "zero" painter bug. Stale exposure = ghost.
+/// A rotation clears the series and the new mark draws a flat zero line, not nothing, which catches
+/// a painter that confuses no data with zero. An exposure carried over would be a ghost.
 fn rotation_clears_then_re_marks() -> PositionScene {
     let mut feed = Feed::new(Some(TICK));
     feed.walk(0..60);
@@ -117,7 +124,9 @@ fn rotation_clears_then_re_marks() -> PositionScene {
     )
 }
 
-/// ALIGNMENT: 70-bucket stagger LOAD-BEARING. Mid @140, risk @210 -> catches wrong window derivation. 1-bucket stagger looks right, catches nothing.
+/// The 70-bucket stagger is what makes this scene work: the mid restarts at 140 and the risk series
+/// at 210, so a risk chart that derived its own window would visibly misalign. A one-bucket stagger
+/// would look right and catch nothing.
 fn rotation_then_new_window() -> PositionScene {
     let mut feed = Feed::new(Some(TICK));
     feed.walk(0..60);
@@ -133,7 +142,8 @@ fn rotation_then_new_window() -> PositionScene {
     )
 }
 
-/// Polymarket: no tick -> MID empty, risk paints empty (shared window consequence).
+/// No tick grid, as on Polymarket: the mid chart is empty, so the risk chart that shares its window
+/// is empty too.
 fn no_tick_grid() -> PositionScene {
     let mut feed = Feed::new(None);
     feed.walk(0..60);
@@ -148,7 +158,7 @@ fn no_tick_grid() -> PositionScene {
     }
 }
 
-/// Drives fold via ledger, derived not drawn.
+/// Keeps a small ledger and derives each position from it, rather than drawing one.
 struct Feed {
     chart: ChartModel,
     positions: PositionModel,
@@ -174,7 +184,6 @@ impl Feed {
         }
     }
 
-    /// Commit book + emit position/bucket.
     fn walk(&mut self, steps: std::ops::Range<i64>) {
         for step in steps {
             self.bucket(step);
@@ -182,14 +191,15 @@ impl Feed {
         }
     }
 
-    /// Books not dropped, position frames are (full ring policy). Mark SET, books land.
+    /// Books still arrive and set the mark, but the position frames are lost, as a full event ring
+    /// loses them.
     fn walk_undelivered(&mut self, steps: std::ops::Range<i64>) {
         for step in steps {
             self.bucket(step);
         }
     }
 
-    /// Mark = last mid (mirrors engine re-mark).
+    /// The mark follows the last mid, as the engine's does.
     fn bucket(&mut self, step: i64) {
         for sub in 0..COMMITS_PER_BUCKET {
             let bid = mid_bid(step) + wobble(step * COMMITS_PER_BUCKET + sub);
@@ -198,7 +208,7 @@ impl Feed {
         }
     }
 
-    /// Absolute state: skip if no mark, f64 at emit.
+    /// An absolute position, sent only once there is a mark. It becomes `f64` here, as on the link.
     fn emit(&mut self, step: i64) {
         let Some(mark) = self.mark else { return };
         let exposure = mark.notional(Qty(self.position_base));
@@ -220,7 +230,6 @@ impl Feed {
         self.fill(step, Side::Sell);
     }
 
-    /// Buy pays cash, sell returns.
     fn fill(&mut self, step: i64, side: Side) {
         let price = px(mid_bid(step));
         let notional = price.notional(ORDER_QTY);
@@ -244,7 +253,7 @@ impl Feed {
         ));
     }
 
-    /// Window handover resets position, no emit until re-mark.
+    /// A window handover resets the position, and nothing is sent until a new mark.
     fn rotate(&mut self, step: i64) {
         self.seq += 1;
         let event = UiEvent::Rotation {
@@ -284,7 +293,8 @@ impl Feed {
     }
 }
 
-/// Triangles: slow carries entry, fast breaks monotone.
+/// Two triangle waves: the slow one carries the mark away from the entry, and the fast one keeps it
+/// from moving in one direction only.
 fn mid_bid(step: i64) -> i64 {
     BASE_BID + wave(step, 137, 400) + wave(step, 23, 40)
 }
@@ -293,7 +303,8 @@ fn wobble(commit: i64) -> i64 {
     wave(commit, 7, 3)
 }
 
-/// Triangle ±amplitude: no RNG, reproducible.
+/// A triangle wave between minus and plus `amplitude`, with no randomness, so every run is the
+/// same.
 fn wave(step: i64, period: i64, amplitude: i64) -> i64 {
     let phase = step.rem_euclid(period);
     let rise = phase.min(period - phase);

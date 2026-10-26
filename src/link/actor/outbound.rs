@@ -1,4 +1,5 @@
-//! Link serving half: drain hot-thread UI rings, idempotent catalog, lifecycle heartbeat, subscription refresh.
+//! The link's sending half. It drains the hot thread's UI rings to subscribers, repeats the catalog
+//! and lifecycle every heartbeat so a late subscriber catches up, and renews its own subscriptions.
 
 use std::net::SocketAddr;
 
@@ -63,14 +64,14 @@ impl Actor {
                     self.execution_mode = catalog.execution_mode;
                     self.build_catalog_frames(&catalog, now);
                 }
-                UiLifecycle::Draining { .. } => self.phase = RunPhase::Draining,
-                UiLifecycle::Stopped(_) => self.phase = RunPhase::Stopped,
+                UiLifecycle::Draining => self.phase = RunPhase::Draining,
             }
         }
     }
 
     /// # Panics
-    /// Name > LINK_NAME_LEN bytes (Engine::start rejects before spawning).
+    /// When a name is longer than `LINK_NAME_LEN` bytes, which the engine refuses at startup before
+    /// this can run.
     fn build_catalog_frames(&mut self, catalog: &UiCatalog, now: TsUs) {
         let catalog_ts_us = now;
         self.catalog_frames.clear();
@@ -146,7 +147,8 @@ impl Actor {
         LinkDatagram { envelope, body }.encode(&mut self.buffer)
     }
 
-    /// try_send_to: saturated peer mustn't stall other subscribers; far side reads drops as seq gaps.
+    /// Never waits, so a peer whose socket is full cannot stall the others. A dropped send is
+    /// counted, and the far side sees it as a sequence gap.
     fn transmit(&mut self, address: SocketAddr, len: usize) {
         if self
             .socket

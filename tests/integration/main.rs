@@ -1,12 +1,10 @@
-//! Integration suite: real venue, real time, real serialisation, and one spawned local process
-//! (the bridge) — never CI. Every test is `#[ignore]` and agent-run deliberately
-//! (`cargo test --test integration -- --ignored`). Grouped as one target so the ignored set runs
-//! together, the same way the fitness tests share one target. The bulk run covers read-only checks
-//! only; none of these tests places an order.
+//! Integration suite: real venue, real time, real serialisation — never CI. Every test is `#[ignore]`
+//! and agent-run deliberately (`cargo test --test integration -- --ignored`). Grouped as one target
+//! so the ignored set runs together, the same way the fitness tests share one target. The bulk run
+//! covers read-only checks only; none of these tests places an order.
 
 mod binance_scale;
 mod binance_signed;
-mod bridge_process;
 mod observer;
 mod poly_rotation;
 mod rest_check;

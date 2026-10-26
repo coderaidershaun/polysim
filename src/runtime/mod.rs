@@ -2,9 +2,9 @@
 //! under a watchdog deadline.
 //!
 //! Every submodule is either a PHASE of one run — `prepare`, `run`, `drain`, in that order — or the
-//! bring-up of ONE subsystem, named for it: `exec`, `link`, `persist`, `metrics`, `timer`, `queues`.
-//! The rest are leaves those two lean on: `error`, `exec_identity`. Which venue a run talks to is
-//! decided by the adapters, never here.
+//! bring-up of ONE subsystem, named for it: `exec`, `link`, `persist`, `metrics`, `timer`,
+//! `queues`. The rest are leaves those two lean on: `error`, `exec_identity`. Which venue a run
+//! talks to is decided by the adapters, never here.
 
 mod drain;
 mod error;
@@ -40,9 +40,9 @@ use crate::hot::strategy::Strategy;
 use crate::link::{LinkActor, LinkActorSetup, OutboundLink};
 use crate::log::{self, LogConfig, LogHandle, LogRecord};
 use crate::msg::persist::RotationRow;
-use crate::msg::ui::{UiCatalog, UiLifecycle, ui_channel};
+use crate::msg::ui::{UiCatalog, UiLifecycle, UiWiring, ui_channel};
 use crate::persist::PersistHandle;
-use crate::shutdown::{DrainSignal, FatalSignal, RunControlGate, ShutdownRequest, TaskHandle};
+use crate::shutdown::{DrainSignal, FatalSignal, RunControlGate, TaskHandle};
 use crate::sink::{LinkSink, MetricsSink, StrategyLogSink};
 use crate::time::{DurationUs, EngineClock};
 use crate::{error, info};
@@ -56,6 +56,9 @@ use prepare::{Prepared, prepare};
 use queues::{InputQueues, build_input_queues};
 use timer::spawn_timer;
 
+// SMELL: `decide_exit` and `check_symbol_order_capacity` are public only because the fitness
+// suite calls them. A test is not a reason to make an item public, so their checks should move
+// onto a public entry point and these two should go back to crate visibility.
 pub use drain::decide_exit;
 pub use error::EngineError;
 pub use exec_identity::ExecutionLease;
@@ -100,7 +103,6 @@ struct Engine {
     metrics: MetricsHandle,
     fatal: FatalSignal,
     drain: DrainSignal,
-    shutdown: ShutdownRequest,
     lifecycle: SyncSender<UiLifecycle>,
     drain_deadline: Duration,
 }
@@ -116,11 +118,10 @@ impl Engine {
         config: Config<P>,
         strategy: Box<dyn Strategy>,
     ) -> Result<Engine, EngineError> {
-        // The UI seam is built here; its consuming end goes to the link actor, the only
-        // place that knows about it.
+        // The workstation feed is built here. Its receiving end goes to the link actor, which is
+        // the only reader.
         let (wiring, ui_channels) = ui_channel();
-        let crate::msg::ui::UiWiring {
-            shutdown,
+        let UiWiring {
             lifecycle,
             books: ui_book_sink,
             events: ui_event_sink,
@@ -283,7 +284,6 @@ impl Engine {
             }
         };
 
-        // Hot engine gets typed sinks, not raw producers.
         let metrics_sink = MetricsSink::new(metrics_producer);
         let mut hot_engine = HotEngine::new(HotEngineSetup {
             exec: exec_wiring,
@@ -335,8 +335,8 @@ impl Engine {
             config.engine.spin_interval_us
         );
 
-        // Hands the UI its catalog and feature names so the monitor can label columns.
-        // Uses try_send only.
+        // The catalog carries the feature names so the monitor can label its columns. It is sent
+        // with try_send, so it can never block startup.
         let catalog = UiCatalog::from_registry(
             &identity.strategy_id,
             mode,
@@ -384,7 +384,6 @@ impl Engine {
             metrics,
             fatal,
             drain,
-            shutdown,
             lifecycle,
             drain_deadline,
         })

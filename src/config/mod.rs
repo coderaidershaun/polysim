@@ -35,7 +35,9 @@ pub use tracker::{
     TrackerSpec, VolumeBarsSpec, VolumeThreshold, WindowsSpec,
 };
 
-pub(crate) use execution::{DEFAULT_QUOTE_STOP_MARGIN_MS, validated_mantissa};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use execution::DEFAULT_QUOTE_STOP_MARGIN_MS;
+pub(crate) use execution::validated_mantissa;
 pub(crate) use tracker::TARGET_WINDOW_CANDLES;
 
 const MAX_OPERATIONAL_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;

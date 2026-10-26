@@ -1,7 +1,7 @@
-//! The shutdown latches: `FatalSignal` stops NOW, `DrainSignal` finishes the input then stops, and
-//! `ShutdownRequest` is the external graceful trigger. `TaskHandle` stops a spawned task, and
-//! `WriterThread` lets a blocking file writer finish before exit. `RunStateCell` is a TWO-WAY
-//! toggle for trading on and off rather than an ending; SIGINT remains the only real exit.
+//! The shutdown latches: `FatalSignal` stops NOW, and `DrainSignal` finishes the input then stops.
+//! `TaskHandle` stops a spawned task, and `WriterThread` lets a blocking file writer finish before
+//! exit. `RunStateCell` is a TWO-WAY toggle for trading on and off rather than an ending; SIGINT or
+//! SIGTERM remains the only graceful exit.
 
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -55,30 +55,6 @@ pub struct DrainSignal {
 }
 
 impl DrainSignal {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn request(&self) {
-        self.requested.store(true, Ordering::Release);
-    }
-
-    #[inline]
-    pub fn is_requested(&self) -> bool {
-        self.requested.load(Ordering::Acquire)
-    }
-}
-
-/// An in-process graceful shutdown request that arrives without a signal. It is observed the same
-/// way as SIGINT or SIGTERM, so it takes the same drain and flush path. Distinct from `DrainSignal`,
-/// which is internal and post-trigger, and from `FatalSignal`, which means corrupt state and a
-/// non-zero exit.
-#[derive(Clone, Default)]
-pub struct ShutdownRequest {
-    requested: Arc<AtomicBool>,
-}
-
-impl ShutdownRequest {
     pub fn new() -> Self {
         Self::default()
     }

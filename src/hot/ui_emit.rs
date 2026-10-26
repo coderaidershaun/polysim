@@ -1,4 +1,5 @@
-//! UI output lane: copy committed book state into fixed-size snapshots + strategy events to desktop rings. Fixed arrays only, no allocation.
+//! The hot thread's feed for the workstation. Committed book state and strategy events are copied
+//! into fixed-size records, so nothing here allocates, and the link sends them on from the rings.
 
 use crate::hot::book::{Book, BookState};
 use crate::hot::exec::{Balance, ExecHalt, Fill, OrderReject, OrderUpdate, WorkingOrderView};

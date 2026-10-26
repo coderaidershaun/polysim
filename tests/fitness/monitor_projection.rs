@@ -11,11 +11,6 @@
 use proptest::prelude::*;
 
 use polysim::config::ExecutionMode;
-use polysim::desktop::format::{MISSING, write_bps_delta, write_opt_bps_delta};
-use polysim::desktop::model::UiModel;
-use polysim::desktop::monitor::{Channel, MonitorUiState};
-use polysim::desktop::monitor_model::{FeatureCell, OrderEvent, SystemEvent};
-use polysim::desktop::monitor_view::{FeatureRowView, account, feature_rows, quote_summary};
 use polysim::hot::exec::{CloseReason, ExecHalt, HaltReason, OrderState, RejectOrigin};
 use polysim::ids::{AssetId, ClientOrderId, InstrumentId, Price, Qty, Side};
 use polysim::msg::exec::RejectClass;
@@ -24,8 +19,14 @@ use polysim::msg::ui::{
     UiInstrument, UiWorkingOrder,
 };
 use polysim::time::{DurationUs, TsUs};
+use polysim::workstation::format::{MISSING, write_bps_delta, write_opt_bps_delta};
+use polysim::workstation::model::UiModel;
+use polysim::workstation::monitor::model::{FeatureCell, OrderEvent, SystemEvent};
+use polysim::workstation::monitor::view::{
+    Channel, FeatureRowView, MonitorUiState, account, feature_rows, quote_summary,
+};
 
-use crate::desktop_support::{BookFixture, NamedCase, book_snapshot};
+use crate::workstation_support::{BookFixture, NamedCase, book_snapshot};
 
 /// One-mantissa tick, so a price reads directly as its tick index in the assertions.
 const TICK: Price = Price(1);
@@ -784,14 +785,14 @@ fn an_event_gap_demotes_pre_gap_orders_before_counting_a_replacement() {
             .iter()
             .find(|order| order.client_id == ClientOrderId(11))
             .map(|order| order.status),
-        Some(polysim::desktop::exec_model::OrderStatus::Lost)
+        Some(polysim::workstation::exec_model::OrderStatus::Lost)
     );
     assert_eq!(
         orders
             .iter()
             .find(|order| order.client_id == ClientOrderId(12))
             .map(|order| order.status),
-        Some(polysim::desktop::exec_model::OrderStatus::Confirmed)
+        Some(polysim::workstation::exec_model::OrderStatus::Confirmed)
     );
 }
 
@@ -880,7 +881,7 @@ fn snapshot_healing_cases() {
         );
         assert_eq!(
             retained[0].status,
-            polysim::desktop::exec_model::OrderStatus::Lost,
+            polysim::workstation::exec_model::OrderStatus::Lost,
             "{name}: invalid authoritative input preserves possible exposure but cannot leave it \
              confirmed"
         );

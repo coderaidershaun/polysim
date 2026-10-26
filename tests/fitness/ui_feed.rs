@@ -13,8 +13,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use polysim::config::{RecordedTables, TableKind};
-#[cfg(feature = "ui")]
-use polysim::desktop::model::UiModel;
 use polysim::hot::dispatch::{HotEngine, HotEngineSetup};
 use polysim::hot::exec::{CloseReason, DesiredQuote, ExecHalt, OrderState, QuoteLevel};
 use polysim::hot::strategy::{DomQuote, Registration, Strategy, StrategyCtx};
@@ -24,6 +22,7 @@ use polysim::msg::inbound::{InboundMessage, SpinTick};
 use polysim::msg::persist::FeatureId;
 use polysim::msg::ui::{UiBookSnapshot, UiBookState, UiEvent, UiLatencySummary};
 use polysim::time::{DurationUs, TsUs};
+use polysim::workstation::model::UiModel;
 use rtrb::Consumer;
 
 use crate::engine_support::{
@@ -647,7 +646,7 @@ fn the_execution_gate_tee_reflects_whether_a_command_ring_is_wired() {
     );
 }
 
-/// FITNESS: the engine tees its own timing once per spin, on the ONE lane, and the desktop model
+/// FITNESS: the engine tees its own timing once per spin, on the ONE lane, and the workstation model
 /// keeps the latest.
 ///
 /// It rides the event lane rather than a channel of its own so that a UI which has fallen behind
@@ -692,37 +691,34 @@ fn spins_tee_engine_latency_on_the_one_lane() {
         "a spin's own processing is measured before it reports"
     );
 
-    #[cfg(feature = "ui")]
-    {
-        let mut model = UiModel::with_capacity(1, DurationUs::from_micros(100_000));
-        assert_eq!(
-            model.latency(),
-            None,
-            "a model that has seen no spin reports no timing rather than an empty one"
-        );
-        for event in &evs {
-            model.apply_event(*event);
-        }
-        assert_eq!(model.latency(), Some(latest), "the newest spin wins");
-        assert_eq!(model.event_gaps(), 0);
-
-        let skipped = UiEvent::Latency {
-            seq: evs.len() as u64 + 2,
-            event_ts_us: ts(999),
-            summary: UiLatencySummary::default(),
-        };
-        model.apply_event(skipped);
-        assert_eq!(
-            model.event_gaps(),
-            2,
-            "a Latency frame is gap-counted on the one lane like every other kind"
-        );
-        assert_eq!(
-            model.latency(),
-            Some(UiLatencySummary::default()),
-            "and the latest still wins across the gap"
-        );
+    let mut model = UiModel::with_capacity(1, DurationUs::from_micros(100_000));
+    assert_eq!(
+        model.latency(),
+        None,
+        "a model that has seen no spin reports no timing rather than an empty one"
+    );
+    for event in &evs {
+        model.apply_event(*event);
     }
+    assert_eq!(model.latency(), Some(latest), "the newest spin wins");
+    assert_eq!(model.event_gaps(), 0);
+
+    let skipped = UiEvent::Latency {
+        seq: evs.len() as u64 + 2,
+        event_ts_us: ts(999),
+        summary: UiLatencySummary::default(),
+    };
+    model.apply_event(skipped);
+    assert_eq!(
+        model.event_gaps(),
+        2,
+        "a Latency frame is gap-counted on the one lane like every other kind"
+    );
+    assert_eq!(
+        model.latency(),
+        Some(UiLatencySummary::default()),
+        "and the latest still wins across the gap"
+    );
 }
 
 /// One venue fill tees its resulting absolute OrderUpdate and exactly one Fill event carrying THAT
@@ -813,27 +809,24 @@ fn a_partial_fill_updates_the_working_order_then_tees_one_fill() {
     assert_eq!(commission_asset, AssetId::UNKNOWN);
     assert_eq!(liquidity, Some(Liquidity::Maker));
 
-    #[cfg(feature = "ui")]
-    {
-        let mut model = UiModel::with_capacity(1, DurationUs::from_micros(100_000));
-        for event in evs {
-            model.apply_event(event);
-        }
-        let working = model.exec().working(InstrumentId(0), Side::Buy);
-        assert_eq!(
-            working.len(),
-            1,
-            "a partial fill updates the existing BID; it must not retire it or create a duplicate"
-        );
-        assert_eq!(working[0].filled, Qty(ONE));
+    let mut model = UiModel::with_capacity(1, DurationUs::from_micros(100_000));
+    for event in evs {
+        model.apply_event(event);
     }
+    let working = model.exec().working(InstrumentId(0), Side::Buy);
+    assert_eq!(
+        working.len(),
+        1,
+        "a partial fill updates the existing BID; it must not retire it or create a duplicate"
+    );
+    assert_eq!(working[0].filled, Qty(ONE));
 }
 
 /// FITNESS: a full fill retires the UI's working order on the fill's own message sequence.
 ///
 /// The defect it guards against is a workstation reporting OPEN 2 BID: if the execution core closes
 /// the first bid but the feed emits only a Fill tape event, the model retains the old live cell and
-/// counts the next genuine bid beside it. Driving the hot engine and then the desktop fold together
+/// counts the next genuine bid beside it. Driving the hot engine and then the workstation fold together
 /// pins the whole path rather than merely checking that some event was sent.
 #[test]
 fn a_full_fill_retires_the_working_order_in_the_ui_model() {
@@ -902,17 +895,14 @@ fn a_full_fill_retires_the_working_order_in_the_ui_model() {
         "only the adoption earns a strategy order-update callback; the fill's second projection is UI-only"
     );
 
-    #[cfg(feature = "ui")]
-    {
-        let mut model = UiModel::with_capacity(1, DurationUs::from_micros(100_000));
-        for event in evs {
-            model.apply_event(event);
-        }
-        assert!(
-            model.exec().working(InstrumentId(0), Side::Buy).is_empty(),
-            "a fully-filled bid must be absent before any replacement bid can be counted"
-        );
+    let mut model = UiModel::with_capacity(1, DurationUs::from_micros(100_000));
+    for event in evs {
+        model.apply_event(event);
     }
+    assert!(
+        model.exec().working(InstrumentId(0), Side::Buy).is_empty(),
+        "a fully-filled bid must be absent before any replacement bid can be counted"
+    );
 }
 
 /// FITNESS: a venue that said NOTHING about liquidity arrives as `None`, never as `Some(Maker)`.

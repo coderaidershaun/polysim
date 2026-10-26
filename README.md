@@ -22,9 +22,16 @@ mv .env.example .env
 cargo run --release --bin strat-micro-recorder-te-binance-spot-btcusdt
 cargo run --release --bin strat-micro-recorder-te-polymarket-btc-updown-5m
 
-# Desktop workstation — attaches to running engines over UDP, needs the `ui` feature.
-cargo run --release --features ui --bin polysim-ui -- --strategy strat-micro-recorder --link 127.0.0.1:9310
-cargo run --release --features ui --bin polysim-ui -- --strategy strat-micro-recorder --link 127.0.0.1:9311
+# Browser workstation, one-time setup — the wasm32 target comes from rust-toolchain.toml.
+cargo install --locked trunk
+
+# Browser workstation, build and serve — Trunk fetches the wasm-bindgen and wasm-opt tools it needs
+# on the first build. polysim-web attaches to running engines over UDP and needs the `web` feature.
+# --link is repeatable: the page switches between the engines from its link bar.
+(cd browser && trunk build --release)
+cargo run --release --features web --bin polysim-web -- --strategy strat-micro-recorder --link 127.0.0.1:9310 --link 127.0.0.1:9311
+# Add --mcp http://127.0.0.1:8765/mcp so the app descriptor also names the agent control plane below.
+# Then open http://127.0.0.1:7879/ — or host the page in Jet: /app add 7879 "Polysim"
 
 # Agent control plane — an MCP server over stdio by default, or over loopback HTTP with --http.
 # Needs the `mcp` feature. Build it first: a cold release build can outlast an MCP host's start-up
@@ -34,12 +41,15 @@ cargo run -q --release --features mcp --bin polysim-mcp
 cargo run -q --release --features mcp --bin polysim-mcp -- --http 8765
 # A parent passes --watch-stdin and holds a stdin pipe open, so the server and engines end with it.
 
-# Gate — all five must pass before anything merges
+# Gate — all six must pass before anything merges, and both Trunk builds must succeed
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --target wasm32-unknown-unknown --lib --bin polysim-ui --bin dom-fixture -- -D warnings
 cargo test
 cargo test --all-features
+(cd browser && trunk build --release)
+(cd tools/dom-fixture && trunk build --release)
 
 # ARM64 Linux binary for deployment, built in Docker, lands in dist/
 ./scripts/build-strategy.sh strat-micro-recorder-te-binance-spot-btcusdt
@@ -54,7 +64,7 @@ docker buildx build \
 
 `polysim-mcp` gives an agent four tools: `list_strategies`, `start_strategy`, `stop_strategy` and `set_execution_mode`. It starts each engine as a child process from its prebuilt release binary, and stops every engine it started when it exits. The `.mcp.json` at the repo root registers it for Claude Code.
 
-A stdio server lives only as long as the client that spawned it, and stops every engine it started when that client exits. Use `--http <port>` when engines must outlive one client: the desktop UI and every `claude -p` reply then share one long-lived server and its engines. Start it once, then register it under the same name the tracked `.mcp.json` uses, so it replaces the stdio entry instead of sitting beside it:
+A stdio server lives only as long as the client that spawned it, and stops every engine it started when that client exits. Use `--http <port>` when engines must outlive one client: the workstation and every `claude -p` reply then share one long-lived server and its engines. Start it once, then register it under the same name the tracked `.mcp.json` uses, so it replaces the stdio entry instead of sitting beside it:
 
 ```shell
 claude mcp add --transport http polysim http://127.0.0.1:8765/mcp
@@ -62,52 +72,29 @@ claude mcp add --transport http polysim http://127.0.0.1:8765/mcp
 
 That registration has local scope, which overrides the project entry. Under any other name every reply still spawns its own stdio server, and an engine started through that server dies with the reply. Ctrl-C or SIGTERM ends the HTTP server and stops every engine it started. It listens on 127.0.0.1 only, has no auth, and refuses requests from browser pages. `--engines <dir>` points either transport at another folder of prebuilt engine binaries.
 
-## Workstation bridge
+## Browser workstation
 
-`polysim-bridge` is the workstation without the window. It attaches to one running trading engine over the same UDP link `polysim-ui` uses, folds the feed into the same model, and writes what the window would show as JSON lines on stdout, so a web page can paint it. It reads the page's choices and link commands as JSON lines on stdin. It builds without the `ui` feature and links no graphics stack. Closing stdin ends it and stops nothing on the engine.
+The workstation is one egui app compiled to WebAssembly (bin `polysim-ui`, built by Trunk in `browser/`). It runs in a browser tab or in a Jet frame, with nothing to install. `polysim-web` is the small server in front of it. It listens on 127.0.0.1 only, on port 7879 unless `--port` says otherwise (`--port 0` lets the operating system pick), and serves three things:
 
-```shell
-cargo run --release --bin polysim-bridge -- --strategy strat-micro-recorder --link 127.0.0.1:9310
-# --tick-ms <1..1000> sets how often changed sections are written (default 16); --token and a repeated --link work as in polysim-ui
-```
+- `/jet-app.json` — the app descriptor Jet reads. The UI uses relative paths only, so it works at `/` and behind Jet's `/apps/{id}/` proxy. `--mcp <url>` adds the address of `polysim-mcp` to it.
+- The Trunk bundle from `browser/dist` (or `--bundle <dir>`), read into memory at start. The server refuses to start when there is no `index.html` there.
+- `/api/link?peer=<n>` — a WebSocket to engine number `n` of the `--link` list.
 
-Stdout carries protocol lines and nothing else. Usage and errors go to stderr, and the log goes to stderr in debug builds and a file in release builds.
+The server never reads a link frame. Each open tab is an ordinary link subscriber whose UDP socket lives in the server, so the engine's own link guard, sequence gate and catalog apply to a tab as they do to any other subscriber. The relay protocol:
 
-**Lines out**, one JSON object each, `kind` first, in this order within one pass of the bridge:
+1. A tab opens `api/link?peer=<n>`, relative to the page. A peer outside the `--link` list is a 404. To move to the next engine, the tab closes its socket and opens the next index.
+2. The first message is text: `{"strategy":…,"peers":[…],"tokenHash":…}`. It carries the hash of the link token, never the token.
+3. After that, every binary message in either direction is exactly one link datagram, passed through untouched.
+4. The server connects one UDP socket per tab to the engine, so the operating system drops datagrams from anyone else. A message longer than a link datagram (1,200 bytes) closes the socket. An engine that is down is not an error: the refusals are counted and the relay stays open. When a tab closes, one stderr line gives the counts.
 
-| kind | when | key fields |
-| --- | --- | --- |
-| `hello` | once, first | `protocol`, `bridge`, `polysim`, `tickMs`, `groupings` (the ladder's tick and bps groupings with labels), `levels` (`min`, `max`, `default`), `channels` (label and empty note for system, orders, trades, fills) |
-| `link` | on change, never before the first link status | `peer`, `peerIndex`, `peerCount`, `session`, `chips` (`text`, `tone`), `peerClickable`, `button` (`label`, `assert`), `connection` |
-| `lifecycle` | on change; back to `starting` when the session changes | `session`, `screen`, `title`, `titleTone`, `detail`, `detailTone` (a `live` screen has empty `title` and `detail`) |
-| `catalog` | once per session, and again after `resync` | `session`, `strategyId`, `title`, `badge`, `spinIntervalUs`, `instruments` (`id`, `display`, `base`, `quote`, `tick`), `featureNames` |
-| `tick` | when a section changed, never before the session's catalog | `session`, `seq`, then any of `view`, `ladder`, `summary`, `account`, `features`, `channels`, `latency`, `chart`, `risk`, `gaps`, in that order |
-| `bye` | last | `reason`: `stdin closed` or `stdin failed` |
+The relay carries START and STOP with no login, so every request, WebSocket or not, passes a guard first. It needs exactly one `Host` header naming `127.0.0.1`, `localhost` or `[::1]` on the port the server really bound, which stops DNS rebinding. It allows at most one `Origin` header, which must be `http://` plus that same host, which stops another website from opening the relay (`null` is refused). Jet's proxy rewrites `Host`, and `Origin` when the browser sends one, so framed traffic passes. A frame load carries no `Origin`, so every response also allows only a same-origin parent to frame the page (`frame-ancestors 'self'`): another site cannot lay a decoy over START or STOP. Jet frames the page from its own origin, so it is unaffected.
 
-Display numbers are strings the bridge has already formatted (`"118000.005"`, `"0.05000"`); geometry values (half-ticks, tick indexes, bucket indexes) are integers. Colours are tone names (`text`, `text2`, `bid`, `ask`, `sellFill`, `positive`, `negative`, `warning`, `invalid`, `stale`, `selected`) that the page maps to its own palette. A value shown as `null` is sent as `null`; only whole tick sections are left out when unchanged. `ladder`, `summary`, `account`, `features`, `latency` and `gaps` are whole snapshots. `chart` and `risk` carry only the buckets (and fills) the page has not seen, plus the newest bucket again while it is still growing. Each `channels` entry carries `appended` and the rows added since the last tick, newest first, with `full: true` when the page should replace its ring instead of prepending. `generation` (on `chart` and `risk`) bumps on a session change, an instrument change and `resync`; the tick that carries a new generation carries every section whole. `seq` counts tick lines and never resets, so a jump means the page missed one and should send `resync`.
+Good to know:
 
-Three things this bridge adds to that shape: `hello.channels`, the `full` flag on each `channels` entry, and `catalog.instruments[].tick` (the tick size as a decimal string, or `null`). `account.gate` is `null` until the first execution frame, a channel row's `detail` is the full record the window shows on hover, and `chart.axis` and `risk.axis` use ceilings of 9 and 5 ticks until the page has sent `chart_ticks`.
-
-**Commands in**, one JSON object per line; a line the bridge cannot use is logged and changes nothing:
-
-```text
-{"cmd":"select","instrument":0}
-{"cmd":"chart_mode","mode":"line|candles"}
-{"cmd":"dom_unit","unit":"ticks|bps"}
-{"cmd":"dom_grouping","unit":"bps","numerator":1,"denominator":20}
-{"cmd":"dom_grouping","unit":"ticks","perBucket":5}
-{"cmd":"dom_levels","levels":24}
-{"cmd":"dom_fit","rows":18}
-{"cmd":"chart_ticks","mid":9,"risk":5}
-{"cmd":"risk_series","series":"exposure|pnl"}
-{"cmd":"assert","state":"running|idle"}
-{"cmd":"next_peer"}
-{"cmd":"resync"}
-{"cmd":"pause"}
-{"cmd":"resume"}
-```
-
-`select`, `chart_mode`, `dom_unit`, `dom_grouping`, `dom_levels` and `risk_series` change what is shown and never reach the engine; `dom_fit` and `chart_ticks` say how much the page has room for; `assert` and `next_peer` are the link bar's controls; `pause` stops tick lines (link and lifecycle lines still flow) and `resume` implies `resync`.
+- **Hidden tabs stay connected.** The link loop runs from the WebSocket's message callback and a one-second timer, so a hidden tab (or a hidden Jet frame) keeps its subscription and its data current. Only painting waits. Known limit: after about five minutes hidden, Chrome throttles that timer to about once a minute. A live link keeps itself going through incoming messages, but re-attaching after an engine restart can then take up to a minute.
+- **A page opened in a hidden tab starts when it is first shown**, link included. eframe 0.35 loses the first frame's textures when it draws while hidden. eframe 0.36 fixes that and needs Rust 1.95, and this repo pins 1.92.
+- **Esc closes nothing now**, because a page cannot close itself. The old 1200×700 minimum window is zoom-to-fit instead: a smaller page scales the layout down, to half size at most.
+- **Each tab is its own subscriber and its own controller**, as two windows were. START or STOP in one tab takes control from the other, which then shows "control LOST to epoch N".
 
 ## Post Trade Analysis
 

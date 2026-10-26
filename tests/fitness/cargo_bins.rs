@@ -1,4 +1,4 @@
-//! Three manifest invariants that no amount of Rust source can express.
+//! Manifest invariants that no amount of Rust source can express.
 //!
 //! Identity is two-part, so the "folder == bin == id" invariant needs enforcing rather than
 //! hoping: every trading-engine `[[bin]]` must be named `<strategy-id>-<te-id>` and live at
@@ -6,29 +6,34 @@
 //! `--config`-less default path resolvable from the bin name alone, and stops a trading engine from
 //! silently writing into a sibling's data tree.
 //!
-//! And a headless trading engine must not need wgpu/winit/X11 merely to BUILD. An ungated
-//! eframe target fails the build loudly, but making `eframe` non-optional — or letting any feature
-//! pull `ui` in by default — puts the whole GUI stack back into every deployment with every gate
-//! still green. That is the silent loss this pins.
+//! And no native build may link the GUI. `eframe` is declared only under the wasm32 target table,
+//! so a trading engine never builds a renderer, winit or X11. Moving it into the plain
+//! `[dependencies]` table — or letting any feature pull it in — puts the whole GUI stack back into
+//! every deployment with every gate still green. That is the silent loss this pins.
 //!
 //! And the same holds for the agent's MCP server: a trading engine must never build its protocol
 //! stack, so `rmcp`, `rustix`, `hyper` and `hyper-util` stay optional behind feature `mcp` and only
 //! the `polysim-mcp` bin asks for it.
+//!
+//! And for the browser workstation's server: `hyper`, `hyper-util` and `http-body-util` stay
+//! optional behind feature `web`, so a trading engine never builds an HTTP server it does not run.
 
 use std::path::Path;
 
-/// Targets outside `strategies/` that name no eframe type, and so must NOT gate on `ui` — gating
-/// them would make an operator pass `--features ui` to run a headless tool, building the whole GUI
-/// stack to do it. `polysim-bridge` is the headless renderer of the workstation: the same model, as
-/// protocol lines instead of a window.
+/// Trunk builds the page and its fixture with no feature flags, so a feature declared on either
+/// would leave it unbuildable there.
+const PAGE_TARGETS: [&str; 2] = ["polysim-ui", "dom-fixture"];
+
+/// Targets outside `strategies/` that gate on a feature, with the exact `required-features` value
+/// each must declare. Every other non-strategy target declares none.
 ///
 /// Named one at a time on purpose. The guard below exists so that a new target cannot quietly
-/// re-link eframe everywhere, and any rule shaped like "examples are exempt" would hand that back.
-const NON_UI_TARGETS: [&str; 2] = ["poly-probe", "polysim-bridge"];
+/// pull a heavy dependency stack into every build, and any rule shaped like "servers are exempt"
+/// would hand that back.
+const FEATURE_GATED_TARGETS: [(&str, &str); 2] =
+    [("polysim-mcp", r#"["mcp"]"#), ("polysim-web", r#"["web"]"#)];
 
-/// Targets outside `strategies/` that gate on a feature other than `ui`, with the exact
-/// `required-features` value each must declare. Every other non-strategy target names eframe.
-const OTHER_FEATURE_TARGETS: [(&str, &str); 1] = [("polysim-mcp", r#"["mcp"]"#)];
+const WASM_TABLE: &str = r#"[target.'cfg(target_arch = "wasm32")'.dependencies]"#;
 
 /// Parsed straight from the manifest text — pulling in a toml crate to read two tables would be a
 /// new dependency earned for nothing.
@@ -82,39 +87,43 @@ fn every_trading_engine_bin_is_named_and_placed_by_its_two_part_identity() {
 #[test]
 fn the_default_build_links_no_eframe() {
     let manifest = read_manifest();
+    let headers = manifest
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('['));
+    for header in headers.filter(|header| *header != WASM_TABLE) {
+        assert!(
+            !header.contains("eframe")
+                && section_lines(&manifest, header).all(|line| value_of(line, "eframe").is_none()),
+            "eframe must not sit in {header}: a native build would link the whole GUI stack again"
+        );
+    }
+    let eframe = section_lines(&manifest, WASM_TABLE)
+        .find_map(|line| value_of(line, "eframe"))
+        .expect("the wasm32 table declares eframe: the browser workstation paints with it");
     assert!(
-        dependency_line(&manifest, "eframe").contains("optional = true"),
-        "eframe must stay optional, or every headless deployment builds wgpu/winit again"
-    );
-    assert_eq!(
-        feature_definition(&manifest, "ui"),
-        r#"["dep:eframe"]"#,
-        "feature ui must map to dep:eframe alone"
+        eframe.contains(r#"version = "=0.35.0""#) && eframe.contains("default-features = false"),
+        "eframe must stay pinned to one version with its default features off: {eframe}"
     );
     assert!(
-        feature_names(&manifest)
+        !feature_names(&manifest)
             .iter()
-            .all(|feature| feature != "default"),
-        "no default feature may exist: one that reached ui would re-link eframe everywhere"
+            .any(|feature| feature == "default" || feature == "ui"),
+        "no default or ui feature may exist: one that reached eframe would re-link it everywhere"
     );
 
     let gated: Vec<TargetDeclaration> = declared_targets()
         .into_iter()
         .filter(|target| !target.path.starts_with("strategies/"))
         .collect();
-    assert!(
-        !gated.is_empty(),
-        "the ui bin and the dom-fixture example are declared targets — an empty set means the \
-         parser stopped seeing them, not that the invariant holds"
-    );
-    let tabled = NON_UI_TARGETS
+    let tabled = PAGE_TARGETS
         .into_iter()
-        .chain(OTHER_FEATURE_TARGETS.map(|(name, _)| name));
-    for exempt in tabled {
+        .chain(FEATURE_GATED_TARGETS.map(|(name, _)| name));
+    for named in tabled {
         assert!(
-            gated.iter().any(|target| target.name == exempt),
-            "{exempt} is exempted from the ui gate but is no longer a declared target — a stale \
-             exemption is how the next target slips through"
+            gated.iter().any(|target| target.name == named),
+            "{named} is named by this test but is no longer a declared target — a stale name is \
+             how the next target slips through"
         );
     }
 
@@ -122,8 +131,8 @@ fn the_default_build_links_no_eframe() {
         let expected = required_features_for(&target.name);
         assert_eq!(
             target.required_features, expected,
-            "{} {} must declare required-features = {expected:?}: a headless tool declares none, \
-             the agent server gates on mcp, and every other target names eframe and gates on ui",
+            "{} {} must declare required-features = {expected:?}: the agent server gates on mcp, \
+             the web server on web, and every other target declares none",
             target.kind, target.name
         );
     }
@@ -160,15 +169,38 @@ fn the_default_build_links_no_rmcp() {
     );
 }
 
-/// A target in neither table gets the ui gate, so a new non-strategy target is gated by default.
-fn required_features_for(name: &str) -> &'static str {
-    if NON_UI_TARGETS.contains(&name) {
-        return "";
+#[test]
+fn the_default_build_links_no_web_server() {
+    let manifest = read_manifest();
+    for crate_name in ["http-body-util", "hyper", "hyper-util"] {
+        assert!(
+            dependency_line(&manifest, crate_name).contains("optional = true"),
+            "{crate_name} must stay optional, or every trading engine builds the web server's \
+             dependencies"
+        );
     }
-    OTHER_FEATURE_TARGETS
+    assert_eq!(
+        feature_definition(&manifest, "web"),
+        r#"["dep:hyper", "dep:hyper-util", "dep:http-body-util"]"#,
+        "feature web must map to the web server's optional dependencies alone"
+    );
+    let server = declared_targets()
+        .into_iter()
+        .find(|target| target.name == "polysim-web")
+        .expect("Cargo.toml declares the polysim-web bin");
+    assert_eq!(
+        server.required_features, r#"["web"]"#,
+        "the web server is the only target allowed to need the web feature"
+    );
+}
+
+/// A target outside the table declares no feature, so a new non-strategy target is ungated by
+/// default and must be named here to carry a gate.
+fn required_features_for(name: &str) -> &'static str {
+    FEATURE_GATED_TARGETS
         .iter()
         .find(|(target, _)| *target == name)
-        .map_or(r#"["ui"]"#, |(_, features)| features)
+        .map_or("", |(_, features)| features)
 }
 
 /// The `(strategy-id, te-id)` pair the path claims, taken from the path so name and path are checked

@@ -1,5 +1,8 @@
-//! Bespoke logging: three levels, per-thread lock-free rings, drain thread. Producers never block on push; error! ships backtrace.
+//! Logging that never blocks a producer: a lock-free ring per thread feeds one drain thread. In the
+//! browser build the same macros print straight to the console instead.
 
+#[cfg(target_arch = "wasm32")]
+mod console;
 mod drain;
 mod output;
 mod producer;
@@ -10,12 +13,21 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
+#[cfg(target_arch = "wasm32")]
+pub use console::register_thread;
+#[cfg(not(target_arch = "wasm32"))]
 pub use producer::register_thread;
 pub use record::{Level, LogRecord};
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use producer::{register_external_ring, tag_task};
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use record::MSG_CAPACITY;
 
+#[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
+pub use console::{error_message, info_message, warn_message};
+#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub use producer::{error_message, info_message, warn_message};
 
@@ -23,9 +35,10 @@ const DEFAULT_FILE_STEM: &str = "polysim";
 
 #[derive(Debug, Clone)]
 pub struct LogConfig {
-    /// Log file directory (release only; debug -> stderr).
+    /// Where the log file goes in a release build. A debug build logs to stderr instead.
     pub dir: PathBuf,
-    /// File stem for `{file_stem}-YYYY-MM-DD.log`; engine sets the two-part run identity.
+    /// The log file is `{file_stem}-YYYY-MM-DD.log`. The engine sets it from its strategy and
+    /// engine ids, with `-sim` added for a simulated run.
     pub file_stem: Box<str>,
 }
 
@@ -38,7 +51,7 @@ impl Default for LogConfig {
     }
 }
 
-/// Call drain() to flush + stop (drop alone is not enough).
+/// Call `drain` to flush and stop the log thread. Dropping the handle does neither.
 #[derive(Debug)]
 pub struct LogHandle {
     drain: Arc<AtomicBool>,
@@ -57,7 +70,8 @@ impl LogHandle {
 /// Call at startup, before any thread logs.
 ///
 /// # Panics
-/// Panics if called more than once in a process.
+/// Panics if called more than once in a process, and in the browser build, which can start no
+/// drain thread. The browser needs no init: there the macros print straight to the console.
 pub fn init(config: &LogConfig) -> LogHandle {
     let channels = producer::install();
     let output = output::Output::open(config);
@@ -70,7 +84,7 @@ pub fn init(config: &LogConfig) -> LogHandle {
     LogHandle { drain, join }
 }
 
-/// Logs at INFO (format-arg syntax like std::format).
+/// Logs at INFO. It takes the same arguments as `format!`.
 #[macro_export]
 macro_rules! info {
     ($($arg:tt)*) => {
@@ -83,7 +97,7 @@ macro_rules! info {
     };
 }
 
-/// Logs at WARN (flushed immediately).
+/// Logs at WARN, flushed at once.
 #[macro_export]
 macro_rules! warn {
     ($($arg:tt)*) => {
@@ -96,9 +110,9 @@ macro_rules! warn {
     };
 }
 
-/// Counts a repeating fault and logs at WARN on the 1st, 2nd, 4th, 8th … occurrence — a fault that
-/// recurs per datagram must not become the log. A macro rather than a fn so [`warn`]'s file/line
-/// stays on the caller.
+/// Counts a repeating fault and logs at WARN on the 1st, 2nd, 4th, 8th … occurrence, so a fault
+/// that recurs on every datagram cannot flood the log. It is a macro rather than a function so the
+/// file and line logged are the caller's.
 #[macro_export]
 macro_rules! warn_repeating {
     ($counter:expr, $($arg:tt)*) => {{
@@ -109,7 +123,7 @@ macro_rules! warn_repeating {
     }};
 }
 
-/// Logs at ERROR (captures backtrace, flushes immediately).
+/// Logs at ERROR with a backtrace, flushed at once. The browser build prints no backtrace.
 #[macro_export]
 macro_rules! error {
     ($($arg:tt)*) => {

@@ -1,5 +1,5 @@
-//! Framework-free vocabulary: lifecycle phases, instrument catalog, live book/quote feed.
-//! Zero egui -> engine independent of GUI toolkit. Transport types live here, survive out-of-process workstation.
+//! What the engine tells a workstation: its lifecycle, its instrument catalog, and the live book
+//! and event feed. Nothing here names a GUI toolkit, so the engine never depends on one.
 
 mod latency;
 
@@ -14,54 +14,60 @@ use crate::msg::exec::Liquidity;
 use crate::msg::inbound::Level;
 use crate::msg::persist::FeatureId;
 use crate::registry::Registry;
-use crate::runtime::ExitReport;
-use crate::shutdown::ShutdownRequest;
 use crate::sink::{UiBookSink, UiEventSink};
 use crate::time::TsUs;
 
 pub use latency::{UiLatencyCell, UiLatencyRow, UiLatencySummary};
 
-/// Lifecycle messages handful per run; small ring absorbs burst. UiWiring try_sends -> full drops not stalls.
+/// A run sends only a handful of lifecycle messages, and each is sent with `try_send`, so a full
+/// channel drops a message instead of stalling the engine.
 const LIFECYCLE_CAPACITY: usize = 16;
 
-/// Book levels per side. DOM shows 12/side but grouped rows aggregate ticks; 16-level feed shows half-empty.
+/// Book levels per side. The ladder shows 12 rows a side, but a grouped row sums several ticks, so
+/// a 16-level feed would leave a grouped ladder half empty.
 pub const UI_BOOK_LEVELS: usize = 32;
 
-/// Desired quote levels per side, mirrors execution ladder hard capacity.
+/// Quote levels per side, equal to the execution ladder's fixed capacity.
 pub const UI_QUOTE_LEVELS: usize = 8;
 
-/// Detailed working orders in one atomic snapshot, matches execution ladder capacity. Invariant breach still reported.
+/// How many working orders one snapshot lists in full, one per quote level. A side holding more
+/// still reports its true total, so the excess stays visible.
 pub const UI_ORDER_SNAPSHOT_CAPACITY: usize = UI_QUOTE_LEVELS;
 
-/// Defensive max per side total_working: 32 current-run + 256 prior-run repair slots. Normal one per side.
+/// The most working orders one side can report: 32 from this run plus 256 repair slots for orders
+/// left by an earlier run. A side normally holds one.
 pub const UI_ORDER_SNAPSHOT_MAX_TOTAL: u16 = 288;
 
-/// Book-snapshot ring: ~tens commits/s per 5-min run. Full = drop+count, not stall.
+// SMELL: the two ring capacities below are public only because the fitness suite builds an engine
+// with the real ring sizes. A test is not a reason to make an item public.
+/// The book ring takes tens of commits a second. When it is full a snapshot is dropped and counted,
+/// so the hot thread never stalls.
 pub const UI_BOOK_RING_CAPACITY: usize = 1024;
 
-/// Event ring: per-print trades + per-spin features (≥63/spin) hundreds events/s. Full = drop+count.
+/// The event ring takes every public trade plus at least 63 features a spin, which is hundreds of
+/// events a second. When it is full an event is dropped and counted.
 pub const UI_EVENT_RING_CAPACITY: usize = 16_384;
 
-/// Rare transitions; engine reports on itself. Draining/Stopped carry engine's drain reason + ExitReport.
-/// No startup phase: UI attaches to running engine.
+/// The engine's own rare state changes. There is no starting phase, because a workstation only ever
+/// attaches to an engine that is already running.
 #[derive(Debug, Clone)]
 pub(crate) enum UiLifecycle {
     Ready(UiCatalog),
-    Draining { reason: Box<str> },
-    Stopped(ExitReport),
+    Draining,
 }
 
-/// Static run shape snapshotted from frozen Registry post-preflight. Public: out-of-process workstation
-/// rebuilds from link frames, fitness suite drives assembly.
+/// The fixed shape of a run, copied from the registry once preflight has frozen it. Public because
+/// a workstation rebuilds it from link frames.
 #[derive(Debug, Clone)]
 pub struct UiCatalog {
     pub strategy_id: Box<str>,
     pub window_title: Box<str>,
-    /// Drives the local and linked execution-mode badge.
+    /// Drives the execution-mode badge.
     pub execution_mode: Option<ExecutionMode>,
     pub spin_interval_us: u64,
     pub instruments: Vec<UiInstrument>,
-    /// Feature names indexed by dense FeatureId, source strategy startup. Monitor labels features.
+    /// Indexed by `FeatureId`, as the strategy declared them at startup, so the monitor can label
+    /// each feature.
     pub feature_names: Vec<Box<str>>,
 }
 
@@ -72,7 +78,8 @@ impl UiCatalog {
             .find(|candidate| candidate.instrument_id == instrument)
     }
 
-    /// Snapshot frozen registry post-preflight. feature_names = strategy dense-id dict, read pre-engine.
+    /// Takes `feature_names` as given, because by the time the catalog is built the strategy has
+    /// moved into the hot engine.
     pub(crate) fn from_registry(
         strategy_id: &StrategyId,
         execution_mode: Option<ExecutionMode>,
@@ -106,8 +113,9 @@ impl UiCatalog {
     }
 }
 
-/// Registry row reduced to what UI renders. tick_size/lot_size None until venue stamps (preflight/later).
-/// base_asset/quote_asset index Balance lane.
+/// A registry row cut down to what a workstation shows. `tick_size` and `lot_size` stay `None`
+/// until the venue reports them. `base_asset` and `quote_asset` say which balance events are this
+/// instrument's.
 #[derive(Debug, Clone)]
 pub struct UiInstrument {
     pub instrument_id: InstrumentId,
@@ -121,14 +129,16 @@ pub struct UiInstrument {
     pub qty_scale: i64,
 }
 
-/// Book reconstructability. Mirrors engine state so UI dims awaiting snapshot.
+/// Whether the book can be trusted yet. It mirrors the engine's own state, so a workstation can dim
+/// a book that is still waiting for its snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UiBookState {
     AwaitingSnapshot,
     Valid,
 }
 
-/// Top-of-book copied at commit, fixed-size+Copy for hot ring stamp, no alloc. seq = per-instrument lane counter.
+/// The top of the book, copied at each commit. It is fixed size and `Copy`, so the hot thread
+/// writes it to the ring without allocating. `seq` counts per instrument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UiBookSnapshot {
     pub instrument: InstrumentId,
@@ -141,11 +151,12 @@ pub struct UiBookSnapshot {
     pub asks: [Level; UI_BOOK_LEVELS],
 }
 
-// Copy cost bounded; 32-level cap keeps it here.
+// The 32-level cap is what keeps the cost of each copy bounded.
 const _: () = assert!(size_of::<UiBookSnapshot>() <= 1048);
 
-/// Desired ladder for one instrument. Array index = stable quote level; None = withdraw.
-/// Desire ≠ truth: OrderUpdate arrives when venue confirms. Shown apart.
+/// The ladder the strategy wants for one instrument. The array index is the stable quote level, and
+/// `None` withdraws that level. This is intent, not fact: an `OrderUpdate` arrives once the venue
+/// confirms, and the two are shown apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DomQuote {
     pub bids: [Option<(Price, Qty)>; UI_QUOTE_LEVELS],
@@ -153,7 +164,6 @@ pub struct DomQuote {
 }
 
 impl DomQuote {
-    /// Construct one-level ladder without partial wire init.
     #[inline]
     pub fn top(bid: Option<(Price, Qty)>, ask: Option<(Price, Qty)>) -> Self {
         let mut quote = Self::default();
@@ -163,7 +173,8 @@ impl DomQuote {
     }
 }
 
-/// Detailed row in atomic working-order snapshot. quote_level optional for inherited orders.
+/// One order in a working-order snapshot. `quote_level` is `None` for an order inherited from an
+/// earlier run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UiWorkingOrder {
     pub client_id: ClientOrderId,
@@ -185,8 +196,9 @@ impl UiWorkingOrder {
     };
 }
 
-/// Engine→UI event on ordered lane. seq = lane-wide monotonic counter across all kinds.
-/// Pure function of message sequence. Not Eq: Feature + Position carry f64.
+/// An event for the workstation, in engine order. `seq` rises by one across every kind, and each
+/// event is a pure function of the engine's input sequence. Not `Eq`, because `Feature` and
+/// `Position` carry an `f64`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UiEvent {
     Quote {
@@ -195,7 +207,7 @@ pub enum UiEvent {
         event_ts_us: TsUs,
         quote: DomQuote,
     },
-    /// Public print, teed pre-warmup gate.
+    /// A public trade. It is copied out ahead of the warmup gate, so trades show during warmup too.
     Trade {
         instrument: InstrumentId,
         seq: u64,
@@ -204,13 +216,14 @@ pub enum UiEvent {
         price: Price,
         qty: Qty,
     },
-    /// Engine order after venue event. state = engine table not wire: distinguishes venue-confirmed vs in-flight.
+    /// An engine order after a venue event. `state` comes from the engine's own order table, not
+    /// the wire, so it tells an order the venue confirmed from one still in flight.
     OrderUpdate {
         instrument: InstrumentId,
         seq: u64,
         event_ts_us: TsUs,
         client_id: ClientOrderId,
-        /// Stable strategy ladder level; absent for inherited/adopted orders that predate this run.
+        /// The strategy's stable ladder level. `None` for an order inherited from an earlier run.
         quote_level: Option<QuoteLevel>,
         side: Side,
         state: OrderState,
@@ -218,8 +231,9 @@ pub enum UiEvent {
         qty: Qty,
         filled: Qty,
     },
-    /// One side's complete order set at spin boundary. Detailed prefix bounded; total_working exact.
-    /// One event = one datagram -> no partial snapshot loss. Previous persists until next atomic cut.
+    /// One side's complete order set at the end of a spin. Only the first orders are listed in
+    /// full, but `total_working` is exact. It fits in one datagram, so it is never half lost, and
+    /// the previous snapshot stands until the next arrives.
     OrderSnapshot {
         instrument: InstrumentId,
         seq: u64,
@@ -229,7 +243,8 @@ pub enum UiEvent {
         total_working: u16,
         orders: [UiWorkingOrder; UI_ORDER_SNAPSHOT_CAPACITY],
     },
-    /// Feature row teed off persist lane; monitor shows value landing in Parquet.
+    /// A feature value, copied from the same row that Parquet records, so the monitor shows exactly
+    /// the recorded value.
     Feature {
         instrument: InstrumentId,
         seq: u64,
@@ -237,22 +252,25 @@ pub enum UiEvent {
         feature: FeatureId,
         value: f64,
     },
-    /// Real execution on engine order. price/qty = fill not order. commission in commission_asset (≠quote).
+    /// A real execution against an engine order. `price` and `qty` are the fill's, not the order's,
+    /// and `commission` is in `commission_asset`, which need not be the quote asset.
     Fill {
         instrument: InstrumentId,
         seq: u64,
         event_ts_us: TsUs,
-        /// Stable strategy ladder level; absent when the filled order was inherited/adopted.
+        /// The strategy's stable ladder level. `None` when the filled order was inherited from an
+        /// earlier run.
         quote_level: Option<QuoteLevel>,
         side: Side,
         price: Price,
         qty: Qty,
         commission: i64,
         commission_asset: AssetId,
-        /// None if venue didn't say. Absent ≠ "taker".
+        /// `None` when the venue did not say. Absent does not mean taker.
         liquidity: Option<Liquidity>,
     },
-    /// Asset absolute balance at venue, re-sent whole on move. Never delta: loss = permanent money wrong.
+    /// An asset's absolute balance at the venue, sent whole whenever it moves. Never a delta,
+    /// because one lost delta would leave the balance wrong for good.
     Balance {
         asset: AssetId,
         seq: u64,
@@ -260,7 +278,8 @@ pub enum UiEvent {
         free: i64,
         locked: i64,
     },
-    /// Refused quote; engine gate or venue. Separate kind: refusal ≠ order transition.
+    /// A quote refused by the engine's gate or by the venue. It has its own kind because a refusal
+    /// is not an order transition.
     Reject {
         instrument: InstrumentId,
         seq: u64,
@@ -268,7 +287,8 @@ pub enum UiEvent {
         side: Side,
         origin: RejectOrigin,
     },
-    /// Execution kill switch, re-sent every spin when wired. Absolute state: dropped frame heals next spin.
+    /// The execution kill switch, sent every spin while execution is wired. It is absolute state,
+    /// so a dropped frame heals on the next spin.
     Execution {
         seq: u64,
         event_ts_us: TsUs,
@@ -280,8 +300,9 @@ pub enum UiEvent {
         seq: u64,
         event_ts_us: TsUs,
     },
-    /// Instrument mark state, re-sent every spin. ABSOLUTE not increments: drop = never sent.
-    /// f64: display quantities only; exact mantissas stay in engine.
+    /// An instrument's marked position, sent every spin. It is ABSOLUTE, not an increment, so a
+    /// dropped frame is as if never sent. The `f64` values are for display only; the exact amounts
+    /// stay in the engine.
     Position {
         instrument: InstrumentId,
         seq: u64,
@@ -289,7 +310,8 @@ pub enum UiEvent {
         exposure_quote: f64,
         pnl_quote: f64,
     },
-    /// Engine self-timing, re-sent every spin. Absolute rollups: a dropped frame heals next spin.
+    /// The engine's timing of itself, sent every spin. The figures are absolute, so a dropped frame
+    /// heals on the next spin.
     Latency {
         seq: u64,
         event_ts_us: TsUs,
@@ -316,7 +338,7 @@ macro_rules! every_ui_event {
 }
 
 impl UiEvent {
-    /// Lane-wide sequence across kinds. Consumer tracks drop gaps; reads seq before variant.
+    /// The sequence shared by every kind, which a consumer reads to count dropped events.
     #[inline]
     pub fn seq(&self) -> u64 {
         match self {
@@ -324,8 +346,8 @@ impl UiEvent {
         }
     }
 
-    /// Restamp a replayed event onto the consumer's lane. Fixtures build events kind-first and
-    /// number them afterwards; without this they rebuild every variant to move one field.
+    /// The fixture page builds events by kind and numbers them afterwards. Without this it would
+    /// rebuild every variant to change one field.
     #[inline]
     pub fn set_seq(&mut self, seq: u64) {
         let slot = match self {
@@ -334,7 +356,7 @@ impl UiEvent {
         *slot = seq;
     }
 
-    /// Event time regardless of kind. Read to stamp gap notes when sequence jumps.
+    /// Event time for any kind, read to stamp a note when the sequence jumps.
     #[inline]
     pub fn event_ts_us(&self) -> TsUs {
         match self {
@@ -343,32 +365,31 @@ impl UiEvent {
     }
 }
 
-// Quote is widest variant: 16 levels cost more but bounded publication + alloc-free complete ladder.
+// Quote is the widest variant. Its 16 levels make it large, but they publish the whole ladder at a
+// fixed size without allocating.
 const _: () = assert!(size_of::<UiEvent>() <= 416);
 
-/// Engine end of UI seam: shutdown latch, lifecycle sender, two hot→UI feed producers.
+/// The engine's end of the workstation feed.
 pub(crate) struct UiWiring {
-    pub shutdown: ShutdownRequest,
     pub lifecycle: SyncSender<UiLifecycle>,
     pub books: UiBookSink,
     pub events: UiEventSink,
 }
 
-/// Consumer end of UI seam: lifecycle receiver + two consumers. No ShutdownRequest (out-of-process).
+/// The link actor's end of the workstation feed.
 pub(crate) struct UiChannels {
     pub lifecycle: Receiver<UiLifecycle>,
     pub books: Consumer<UiBookSnapshot>,
     pub events: Consumer<UiEvent>,
 }
 
-/// Build paired ends of UI seam: lifecycle channel, two pre-allocated hot→UI rings, shutdown latch.
+/// Both rings are allocated here at startup, so the hot thread never allocates to publish.
 pub(crate) fn ui_channel() -> (UiWiring, UiChannels) {
     let (lifecycle_tx, lifecycle_rx) = sync_channel(LIFECYCLE_CAPACITY);
     let (book_producer, book_consumer) = RingBuffer::<UiBookSnapshot>::new(UI_BOOK_RING_CAPACITY);
     let (event_producer, event_consumer) = RingBuffer::<UiEvent>::new(UI_EVENT_RING_CAPACITY);
     (
         UiWiring {
-            shutdown: ShutdownRequest::new(),
             lifecycle: lifecycle_tx,
             books: UiBookSink::new(book_producer),
             events: UiEventSink::new(event_producer),

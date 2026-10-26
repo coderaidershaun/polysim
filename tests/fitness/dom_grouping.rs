@@ -13,20 +13,20 @@
 
 use std::collections::HashMap;
 
-use polysim::desktop::dom_view::{
-    DomGrouping, DomOverlay, DomUnit, DomView, DomViewInput, FeedStatus, MAX_ROWS_PER_SIDE,
-    QuotePlacement, ask_anchor, bid_anchor, bucket_low_edge, build_dom_view,
-};
-use polysim::desktop::format::{
-    MISSING, price_decimals, write_opt_venue_mid, write_venue_mid, write_venue_price,
-};
-use polysim::desktop::model::UiModel;
 use polysim::ids::{FIXED_SCALE, Price, Qty};
 use polysim::msg::ui::{DomQuote, UiBookSnapshot, UiBookState};
 use polysim::time::DurationUs;
+use polysim::workstation::dom_view::{
+    DomGrouping, DomOverlay, DomUnit, DomView, DomViewInput, FeedStatus, MAX_ROWS_PER_SIDE,
+    QuotePlacement, ask_anchor, bid_anchor, bucket_low_edge, build_dom_view,
+};
+use polysim::workstation::format::{
+    MISSING, price_decimals, write_opt_venue_mid, write_venue_mid, write_venue_price,
+};
+use polysim::workstation::model::UiModel;
 use proptest::prelude::*;
 
-use crate::desktop_support::{BookFixture, book_snapshot, overlay};
+use crate::workstation_support::{BookFixture, book_snapshot, overlay};
 
 /// A one-mantissa tick, so a price mantissa reads directly as its tick index and the bucket math is
 /// legible in the assertions.

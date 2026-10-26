@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Polysim</title>
+    <base data-trunk-public-url />
+    <link data-trunk rel="rust" href="../Cargo.toml" data-bin="polysim-ui" data-wasm-opt="2" />
+    <style>
+        html,
+        body,
+        canvas {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #0a0d12;
+        }
+
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="workstation"></canvas>
+</body>
+</html>

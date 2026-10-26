@@ -241,8 +241,9 @@ WHY: strategy telemetry is research output, not engine noise.
 WHY: eframe pulls the `log` facade deeper into the graph. The no-framework rule needs an explicit
 carve-out.
 
-- [ ] `log` = transitive-only (already via reqwest/tungstenite, now also eframe/winit/wgpu), never
-  a polysim choice.
+- [ ] `log` = transitive-only (via reqwest/tungstenite in a native build, via eframe/egui in the
+  browser build), never a polysim choice. Amended 2026-10-26: winit and wgpu left the graph with the
+  native window.
 - [ ] A polysim module must not call `log`.
 - [ ] Bespoke subsystem stays the ONLY polysim logging API.
 - [ ] No `log` logger is installed. Thus dependency facade emissions route nowhere: they drop at
@@ -284,6 +285,18 @@ session.
 - [ ] `tracing` = transitive-only, exactly like `log`. It arrives via reqwest -> hyper-util, and
   now via rmcp. No subscriber is installed. Thus its emissions drop.
 - [ ] A polysim module must not call `tracing`.
+
+### Amended 2026-10-26: the browser logs to the console, `polysim-web` to stderr
+
+WHY: a browser tab has no thread to drain a ring, no file to open and no terminal. The log macros
+still have to work in code that the engine and the tab share.
+
+- [ ] On wasm32 the three log macros print one line each to the browser console, at the matching
+  console level. No lanes, no drain thread, no backtrace. Every line still carries call-site file
+  and line.
+- [ ] The macros stay the ONLY polysim logging API (2026-07-23). Only the sink differs by target.
+- [ ] `polysim-web` installs no bespoke log. Its diagnostics are plain lines on stderr, like
+  `polysim-mcp`'s. Steady state emits one line per closed tab, never one per datagram.
 
 ## 8. Code Organisation
 
@@ -382,18 +395,74 @@ place where engine state lives.
 - [ ] Amended 2026-10-15: `--http <port>` serves the same tools on 127.0.0.1 only, with no auth:
   on a single-operator host, loopback is the auth. A request that carries an `Origin` header is
   refused (the MCP spec requires Origin validation), so no browser quirk around the CORS preflight
-  can reach the tools. WHY: one long-lived server is shared by the desktop UI and every agent
+  can reach the tools. WHY: one long-lived server is shared by the workstation and every agent
   reply, so an engine started from chat outlives the reply.
 
-### Amended 2026-10-14: the `polysim-bridge` binary
+### Amended 2026-10-14: the `polysim-bridge` binary (WITHDRAWN 2026-10-26)
 
-WHY: Jet paints the workstation in a web page. The bridge keeps the link and the egui-free model in
-Rust and hands the page JSON lines, so no second model can drift from the one the egui window folds.
+Not in force. Record only.
 
-- [ ] `polysim-bridge` declares no required-features and links no eframe. It only composes.
-- [ ] Its stdout carries protocol JSON lines and nothing else. Usage text and errors go to stderr.
-  Diagnostics go through the bespoke log (§7): stderr in debug, file in release.
-- [ ] The gate stays the two configurations of §14; the bridge builds in both.
+- WHY then: Jet painted the workstation in a web page. The bridge kept the link and the egui-free
+  model in Rust and handed the page JSON lines, so no second model could drift from the one the
+  egui window folded.
+- Text then: `polysim-bridge` declared no required-features and linked no eframe, so it only
+  composed. Its stdout carried protocol JSON lines and nothing else. Usage text and errors went to
+  stderr. Diagnostics went through the bespoke log (§7): stderr in debug, file in release. The
+  gate stayed the two configurations of §14, and the bridge built in both.
+- WHY withdrawn: Jet now hosts an app only by HTTP, and embeds that app's own UI. The bridge had
+  no reader left, so the workstation itself runs in the browser (below).
+
+### Amended 2026-10-26: the `polysim-web` binary
+
+WHY: Jet hosts an app only by HTTP, so the workstation runs in a browser tab and needs a loopback
+server. That server must not become a second place where link or market state lives.
+
+- [ ] `polysim-web` (`src/web/`, bin `polysim-web`, `required-features = ["web"]`) only composes:
+  parse arguments, call `serve`. The substance stays in the lib.
+- [ ] It listens on 127.0.0.1 only. No flag binds another address. `--port 0` lets the OS pick.
+- [ ] It relays link datagrams BYTE FOR BYTE: one binary WebSocket message = one datagram, both
+  ways. It decodes nothing, holds no market state, and no hot-path type derives serde for it. Thus
+  a tab is an ordinary link subscriber. The link's own guard, sequence gate and STATE-not-deltas
+  contract (§6, 2026-07-25) apply to it unchanged.
+- [ ] The guard runs before every route. A request needs exactly one `Host` header that names
+  `127.0.0.1`, `localhost` or `[::1]` on the port actually bound. It carries at most one `Origin`
+  header, and a present one must equal `http://<Host>`. `Origin: null` is refused. WHY: the relay
+  carries START/STOP run control with no login. `Host` stops DNS rebinding. `Origin` stops another
+  site from opening the relay. A page always sends `Origin` when it opens a WebSocket, so a
+  request without one cannot be another site opening the relay.
+- [ ] Stopping it stops nothing on the engines.
+- [ ] Diagnostics go to stderr, like `polysim-mcp` (§7, 2026-10-26).
+- [ ] The app descriptor (`/jet-app.json`) advertises the MCP server when `--mcp <url>` is given.
+  `polysim-web` only repeats that address. It never starts, stops or calls the server.
+
+### Amended 2026-10-26: the workstation's link seam and the web surface are `pub` on merit
+
+WHY: §12 (2026-07-28) forbids `pub` for a test's sake. Each item below has a caller that is not a
+test: another target, another bin, or another program.
+
+- [ ] The workstation's link seam is `pub`: `LinkSession`, `LinkTarget`, `Delivery`,
+  `LinkSessionError`, `LinkStatus`, `ConnectionState` and `ControlVerdict`. Bytes and time go in.
+  Deliveries, status and subscribe bytes come out. The session owns no socket, clock, thread or
+  randomness, so the browser shell and any native caller drive it the same way. `CatalogAssembly`
+  and `Controller` stay `pub(crate)`.
+- [ ] `workstation::browser::{start, start_in_canvas}` are `pub`: the ONE boot path, with two
+  callers in two compile roots. `polysim-ui` calls `start`, which calls `start_in_canvas`.
+  `dom-fixture` calls `start_in_canvas` itself.
+- [ ] `web::{WebConfig, ArgumentError, serve, WebError}` are `pub`: the surface that the
+  `polysim-web` bin composes. `ArgumentError` is `pub` because `WebConfig::parse` returns it.
+- [ ] A fitness test that names these follows from this ruling. It is never the argument for it.
+
+### Amended 2026-10-26: `dom-fixture` is a bin that holds its own scenes
+
+WHY: Trunk builds only `[[bin]]` targets, so the fixture page could not stay an example.
+
+- [ ] `dom-fixture` (`tools/dom-fixture/`) is a `[[bin]]`, a dev page that no deployment builds.
+  Its scenes and builders live beside its entry.
+- [ ] It is the one exception to "binaries only compose". The scenes are its substance. In the lib
+  they would be `pub`, which makes fixture data a promise.
+- [ ] It declares no required-features. The fitness config-guard pins that, and pins `polysim-ui`
+  the same way: Trunk builds both with no flags.
+- [ ] On wasm32 it paints. On native it prints the risk-scene text dump.
 
 ## 9. Naming & API Ergonomics
 
@@ -474,7 +543,7 @@ WHY: agents write comments at volume, and a writer cannot proof its own tone.
 | `tokio`                                                      | ratified. See note.                                | async actor runtime              |
 | `rtrb`                                                       | ratified                                           | SPSC rings                       |
 | `serde` + `serde_json`                                       | ratified                                           | exchange payload deserialization + edge DTO serialisation |
-| `thiserror`                                                  | ratified                                           | library error types              |
+| `thiserror`                                                  | ratified. See note.                                | library error types              |
 | `anyhow`                                                     | ratified (binaries only)                           | binary error context             |
 | `parquet` (`arrow`, `zstd`) + `arrow-array` + `arrow-schema` | ratified 2026-07-18. See note.                     | persistence                      |
 | `proptest`                                                   | ratified (dev)                                     | fitness suite                    |
@@ -483,14 +552,19 @@ WHY: agents write comments at volume, and a writer cannot proof its own tone.
 | `futures-util`                                               | ratified 2026-07-18. See note.                     | WS stream/sink combinators       |
 | `serde-saphyr`                                               | ratified 2026-07-18. See note.                     | configuration                    |
 | `core_affinity`                                              | ratified 2026-07-18. See note.                     | pinning                          |
-| `eframe` (`wgpu`, `accesskit`, `default_fonts`)              | ratified 2026-07-23, amended 2026-07-25. See note. | desktop GUI (feature `ui`)       |
+| `eframe` (`glow`, `default_fonts`)                           | ratified 2026-07-23, amended 2026-10-26. See note. | browser GUI (wasm32 only)        |
 | `ring`                                                       | ratified 2026-07-27. See note.                     | request signing                  |
 | `k256`                                                       | ratified 2026-08-07. See note.                     | secp256k1 signing                |
 | `tiny-keccak`                                                | ratified 2026-08-07. See note.                     | keccak256                        |
 | `rmcp`                                                       | ratified 2026-10-14. See note.                     | MCP server (feature `mcp`)       |
 | `rustix`                                                     | ratified 2026-10-14. See note.                     | SIGTERM (feature `mcp`)          |
-| `hyper`                                                      | ratified 2026-10-15. See note.                     | MCP HTTP server (feature `mcp`)  |
-| `hyper-util`                                                 | ratified 2026-10-15. See note.                     | MCP HTTP server (feature `mcp`)  |
+| `hyper`                                                      | ratified 2026-10-15, amended 2026-10-26. See note. | HTTP server (`mcp`, `web`)       |
+| `hyper-util`                                                 | ratified 2026-10-15, amended 2026-10-26. See note. | HTTP server (`mcp`, `web`)       |
+| `http-body-util`                                             | ratified 2026-10-26. See note.                     | response bodies (feature `web`)  |
+| `web-sys`                                                    | ratified 2026-10-26. See note.                     | browser APIs (wasm32 only)       |
+| `js-sys`                                                     | ratified 2026-10-26. See note.                     | JS values (wasm32 only)          |
+| `wasm-bindgen-futures`                                       | ratified 2026-10-26. See note.                     | browser task spawn (wasm32 only) |
+| `web-time`                                                   | ratified 2026-10-26. See note.                     | wasm32 clock (wasm32 only)       |
 | `smol_str`                                                   | candidate: only on demonstrated ergonomic need     | edge string handling             |
 | `criterion`                                                  | candidate (dev): only if benchmark warranted       | measurement                      |
 
@@ -509,6 +583,16 @@ Each note = justification + limits of that crate's row. Same force as the row.
     polysim adds no tokio feature itself.
   - Amended 2026-10-15: test builds gain `fs`, through reqwest 0.13's `stream` feature in rmcp's
     client. Non-test builds gain nothing. polysim adds no tokio feature itself.
+  - Amended 2026-10-26: features split by target. Every target takes `rt` only. The native table
+    adds `macros`, `net`, `rt-multi-thread`, `signal` and `time`. WHY: the lib now builds for
+    wasm32 in a browser tab, which has no sockets, signals or worker threads to run them on, so
+    only the native build asks for them. `polysim-web` adds no tokio feature: its current-thread
+    runtime uses the native set.
+- `thiserror`
+  - `default-features = false` + `std` only.
+  - Amended 2026-10-26. WHY: an error in the lib formats a `PathBuf`, which needs `std`. The
+    native build only compiled because another crate had switched the feature on. A feature the
+    lib needs is declared by the lib, never left to unification.
 - `parquet` (`arrow`, `zstd`) + `arrow-array` + `arrow-schema`
   - M09: arrow-rs 59.1.0.
   - For: ArrowWriter batched append + footer KV + explicit row-group flush + arrow reader for M12
@@ -541,20 +625,34 @@ Each note = justification + limits of that crate's row. Same force as the row.
   - Per-OS implementations.
   - `set_for_current` needs no unsafe on our side.
   - macOS: best-effort no-op.
-- `eframe` (`wgpu`, `accesskit`, `default_fonts`)
-  - Native macOS trading GUI. PINNED `=0.35.0`.
-  - `wgpu`: Metal renderer. `accesskit`: native accessibility.
-  - `default_fonts` = TEMPORARY until repo-owned faces are embedded. Then drop it.
+- `eframe` (`glow`, `default_fonts`)
+  - Browser workstation GUI. PINNED `=0.35.0`. `default-features = false`.
+  - `glow`: the WebGL2 renderer. `default_fonts` = TEMPORARY until repo-owned faces are embedded.
+    Then drop it.
   - egui/eframe types are UI-thread only. They never cross the hot-path boundary (§2).
   - No `egui_plot`/docking/table/theme crate. No direct `wgpu` dep.
   - Upgrades deliberate: egui breaks APIs between minors. Re-verify the handbook on any bump.
-  - `optional = true` behind feature `ui`.
-    - Amended 2026-07-25. WHY: a headless trading engine deployed in another region must not need
-      wgpu/winit/X11/wayland merely to BUILD.
-    - `desktop/` is `#[cfg(feature = "ui")]`. Amended 2026-10-14: only its painters and window; see
-      the amendment below.
-    - The `polysim-ui` bin + the `dom-fixture` example carry `required-features = ["ui"]`.
-    - The §14 gate consequence binds.
+  - Declared ONLY under `[target.'cfg(target_arch = "wasm32")'.dependencies]`.
+    - Amended 2026-10-26. WHY: the workstation is a browser page that Jet hosts, so no native
+      build has a use for a renderer. Thus a trading engine, `polysim-mcp` and `polysim-web` never
+      build eframe, winit or X11/wayland, and no feature can reach it.
+    - The fitness config-guard pins it: eframe sits in no other table, its version stays
+      `=0.35.0` with default features off, and no `default` or `ui` feature exists.
+  - Hidden-boot quirk: eframe 0.35 drops the texture uploads of a frame that is drawn while the
+    page is hidden, and the canvas then stays black for good. Thus the app starts, link included,
+    when the page is first shown. Fixed upstream in eframe 0.36, which needs Rust 1.95. This repo
+    pins 1.92, so 0.36 waits for a deliberate toolchain bump (§14).
+  - Honest lock delta, measured over the whole move to the browser: 541 -> 449 packages. New: cgl,
+    egui_glow, glutin, glutin-winit, glutin_egl_sys. Gone: 97 entries: the wgpu/naga/ash stack,
+    accesskit with its zbus/atspi/async-* stack, the windows family, and eight duplicate
+    versions. Only egui_glow compiles, and only for wasm32. The lock names the other four and no
+    target builds them.
+  - Replaced 2026-10-26: eframe was the native macOS trading GUI. `wgpu` was the Metal renderer
+    and `accesskit` the native accessibility. It was `optional = true` behind feature `ui`.
+    - Amended 2026-07-25. WHY then: a headless trading engine deployed in another region must not
+      need wgpu/winit/X11/wayland merely to BUILD.
+    - `desktop/` was `#[cfg(feature = "ui")]` (amended 2026-10-14: only its painters and window).
+      The `polysim-ui` bin and the `dom-fixture` example carried `required-features = ["ui"]`.
 - `ring`
   - HMAC-SHA256 signing of Binance private WS-API + REST requests.
   - ALREADY transitive in the lock via rustls' ring stack, reached from both `reqwest` and
@@ -615,9 +713,11 @@ Each note = justification + limits of that crate's row. Same force as the row.
   - 1.1.5 = latest stable at adoption. `default-features = false` + `process` only.
   - The only safe-Rust way to send SIGTERM under `forbid(unsafe_code)`. std's `Child::kill` sends
     only SIGKILL, which skips the engine's drain. SIGKILL still goes through std.
-  - Honest cost: it was in the lock at 1.1.4 only through eframe -> zbus/accesskit_unix, which is
-    Linux-only. Thus a macOS build or an mcp-only build compiles it for the first time. This is
-    not the `ring` precedent.
+  - Honest cost: the lock still names it for eframe's native windowing stack (wayland, x11,
+    polling). eframe builds for wasm32 only, so that stack never compiles, and feature `mcp` is the
+    one thing that builds rustix, on every target. Thus a macOS build or an mcp-only build compiles
+    it for the first time. This is not the `ring` precedent. Amended 2026-10-26: it was reached
+    through eframe -> zbus/accesskit_unix, a Linux-only route that left with the native window.
   - `optional = true` behind feature `mcp`.
 - `hyper` + `hyper-util`
   - Serve rmcp's streamable-HTTP service on one loopback listener: `hyper::server::conn::http1`
@@ -631,26 +731,76 @@ Each note = justification + limits of that crate's row. Same force as the row.
   - HTTP/2 is out: `server-auto` adds h2 + fnv for no MCP client.
   - axum rejected: a router framework for one route.
   - `optional = true` behind feature `mcp`. Thus a trading engine never builds the server half.
+  - Amended 2026-10-26: feature `web` shares both, for `polysim-web`'s loopback server and its
+    WebSocket upgrade. No new feature of either crate, and the same `http1`-only rule holds. The
+    relay's WebSocket is the ratified `tokio-tungstenite` over the upgraded connection. Thus the
+    trading engine still builds neither crate, since the features are `optional = true` and only
+    the `polysim-mcp` and `polysim-web` bins ask for them.
+- `http-body-util`
+  - 0.1.5 = latest stable at adoption. `default-features = false`, NO features.
+  - `Full` is the response body of `polysim-web`.
+  - Already in the lock via reqwest 0.12 (also rmcp and sse-stream). This is the `ring`
+    precedent: the direct dep adds no crate. Adopting it moved the shared entry 0.1.4 -> 0.1.5,
+    semver-compatible.
+  - `optional = true` behind feature `web`. Thus a trading engine never builds it.
+- `web-sys`
+  - 0.3.106 = latest stable at adoption. `default-features = false` + the feature gates the
+    workstation names: `AddEventListenerOptions`, `BinaryType`, `Document`, `HtmlCanvasElement`,
+    `Location`, `MessageEvent`, `Url`, `WebSocket`, `Window`, `console`.
+  - For: the relay WebSocket, the document and canvas, the page title, the console log sink.
+  - wasm32 table only. Already in the lock via eframe. This is the `ring` precedent: no new
+    crate, only the feature gates above.
+  - No `#[wasm_bindgen]` attribute in polysim: its expansion contains `unsafe`, and the crate is
+    `forbid(unsafe_code)` (§14). The `wasm_bindgen` types come re-exported through `web_sys`.
+  - web-sys, js-sys and wasm-bindgen-futures are one family: they move together, with the
+    `wasm-bindgen` crates under them (0.2.126 -> 0.2.129, semver-compatible, and the macro crate
+    now builds on the `syn` 3 that the lock already held). The `wasm-bindgen` command-line tool
+    that Trunk fetches must match the lock's version, and Trunk reads it there.
+- `js-sys`
+  - 0.3.106 = latest stable at adoption. `default-features = false`, NO features.
+  - For: `ArrayBuffer` and `Uint8Array` on the relay socket, and `Math::random` for the
+    workstation's sender nonce.
+  - wasm32 table only. Already in the lock via eframe. Moves with web-sys.
+- `wasm-bindgen-futures`
+  - 0.4.79 = latest stable at adoption. `default-features = false`, NO features.
+  - For: `spawn_local`, which runs eframe's async start on the page.
+  - wasm32 table only. Already in the lock via eframe. Moves with web-sys.
+  - Honest cost: its lock entry names `tokio`, behind a cfg (emscripten with an unstable flag)
+    that no polysim target meets. No tokio code is built through it.
+- `web-time`
+  - 1.1.0 = latest stable at adoption. `default-features = false`, NO features.
+  - For: `Instant`, `SystemTime` and `UNIX_EPOCH` on wasm32, where std's clock panics. The lib's
+    `time` module switches the import by target, so no caller notices.
+  - wasm32 table only. Already in the lock via eframe.
 
-### Amended 2026-10-14: the egui-free half of `desktop/` compiles in every build
+### Amended 2026-10-26: the egui-free half of the workstation compiles in every build
 
-WHY: the workstation bridge renders the same model headless. The model, view, text and link files
-name no egui type, so gating them on `ui` would make a headless renderer build the GUI stack it never
-draws with.
+WHY: the model, view, text and link-session files name no egui type. Gating them behind the
+renderer would make a native build, and the fitness suite with it, stop checking them.
 
-- [ ] Only files that name an egui/eframe type are `#[cfg(feature = "ui")]`: the painters, the window
-  and `run_desktop`.
-- [ ] The words and colour roles the window shows live in the egui-free `desktop/text/`, and the
-  painters read them there. Thus the window and the bridge cannot say different things.
-- [ ] Rule intact: a build without `ui` links no eframe, wgpu or winit.
+- [ ] Only files that name an egui/eframe/web-sys type live in `workstation/browser/`. That folder
+  compiles only for wasm32: the painters, the app, the relay socket and the boot path.
+- [ ] Everything else under `workstation/` compiles for every target and is fitness-tested
+  natively: the link session, attachment, models, views and `text/`.
+- [ ] The words and colour roles the page shows live in the toolkit-free `workstation/text/`, and
+  the painters read them there. Thus a native test can pin what the page says.
+- [ ] Each target lints the half it runs. The wasm32 clippy command (§14) is what lints
+  `browser/`, and it is the target that warns on dead workstation code.
+- [ ] Rule intact: a native build links no eframe, wgpu or winit.
+- Replaced 2026-10-26: Amended 2026-10-14, the same rule for `desktop/` with feature `ui`. WHY then:
+  the workstation bridge rendered the same model headless, so the egui-free files could not wait
+  on the GUI stack. Only files naming an egui/eframe type were `#[cfg(feature = "ui")]`: the
+  painters, the window and `run_desktop`. The words and colour roles lived in `desktop/text/`, so
+  the window and the bridge could not say different things.
 
 ### Amended 2026-10-14: serde serialises edge DTOs
 
-WHY: the bridge writes its protocol lines through `serde_json`. A hand-written JSON writer would be a
-second serializer with its own escaping bugs, for a crate already in the tree.
+WHY: edges write JSON through `serde_json`. A hand-written JSON writer would be a second
+serializer with its own escaping bugs, for a crate already in the tree.
 
 - [ ] The `serde` + `serde_json` role widens from exchange payload deserialization to edge DTO
-  serialisation: venue request bodies, the exposure file, the bridge protocol lines.
+  serialisation: venue request bodies, the exposure file, the relay hello and the app descriptor
+  that `polysim-web` writes. Amended 2026-10-26: these last two replace the bridge protocol lines.
 - [ ] No new crate and no new feature: `derive` + `std` already cover it.
 - [ ] DTOs stay at the edge. A hot-path type never derives `Serialize`.
 
@@ -668,6 +818,7 @@ second serializer with its own escaping bugs, for a crate already in the tree.
   - adapter parse/sequencing vs recorded WS + REST payloads
   - link wire format (amended 2026-07-25)
   - quant leaf-math pins (amended 2026-07-28)
+  - web server guard + relay (amended 2026-10-26)
 - [ ] Live-network tests: `tests/integration/`, gated `#[ignore]`. Never CI. The agent runs them
   deliberately.
   - Amended 2026-07-18. WHY: user directive. Agent runs ALL tests, live-network included. Network
@@ -721,18 +872,42 @@ in ONE place.
   - `hot::quant::optimise`: every sibling calculator module was `pub` already. It was the lone
     exception.
 
-### Amended 2026-10-14: the bridge wire format is a cross-process pin
+### Amended 2026-10-14: the bridge wire format is a cross-process pin (WITHDRAWN 2026-10-26)
 
-WHY: Jet's page reads the bridge's JSON lines from another process and another repository. A
-renamed or reshaped field breaks the page silently, which is the same failure the link wire format
-amendment guards.
+Not in force. Record only.
 
-- [ ] Fitness gains the bridge wire format: a fixed scene encodes to a checked-in snapshot, and the
-  encoder's change and append rules are pinned through its public API.
-- [ ] The process-level check (spawn the bin, read stdout to `bye`) opens a socket, so it lives in
-  `tests/integration/`, `#[ignore]`d like the rest of that suite.
-- [ ] Ruled on merit, not for a test: the bridge's encoder and command types are `pub`, because the
-  wire they produce and read is a promise to another program.
+- WHY then: Jet's page read the bridge's JSON lines from another process and another repository. A
+  renamed or reshaped field broke the page silently, which is the same failure the link wire
+  format amendment guards.
+- Text then: fitness gained the bridge wire format: a fixed scene encoded to a checked-in
+  snapshot, and the encoder's change and append rules were pinned through its public API. The
+  process-level check (spawn the bin, read stdout to `bye`) opened a socket, so it lived in
+  `tests/integration/`, `#[ignore]`d like the rest of that suite. The bridge's encoder and command
+  types were `pub` on merit, because the wire they produced and read was a promise to another
+  program.
+- WHY withdrawn: the bridge, its wire and its page are gone (§8, 2026-10-26).
+
+### Amended 2026-10-26: the web server is pinned in fitness, through real sockets
+
+WHY: the guard is the only thing between a web page and unauthenticated run control. A guard that
+a refactor could loosen with every gate green is a remote-start primitive for any site the
+operator visits.
+
+- [ ] `tests/fitness/web_http.rs` is in fitness. It spawns `polysim-web` as its own process, with a
+  temporary bundle and a fake engine on a loopback UDP socket, and pins:
+  - the descriptor bytes and content type, with and without `--mcp`
+  - the bundle served from memory, with each file's own type, and nothing outside it
+  - a missing bundle stops the process with the Trunk hint
+  - the guard: a foreign `Origin`, `Origin: null`, a non-loopback `Host`, and a missing or
+    repeated `Host` are refused before any route, and an unknown peer is a 404
+  - the relay: the hello comes first, one datagram crosses each way byte for byte, a frame over
+    the datagram limit closes the socket and reaches no engine, and a down engine does not end
+    the relay
+- [ ] This OVERRIDES the 2026-07-25 text that keeps socket-level behaviour out of fitness, as the
+  MCP server's `tests/fitness/mcp_http.rs` already does in practice. The charter stays
+  architectural: the pinned thing is an exposure boundary, not socket plumbing.
+- [ ] The test drives real sockets with hand-written requests. A client library would tidy away
+  the very headers under test.
 
 ## 13. Performance
 
@@ -760,14 +935,23 @@ amendment guards.
 ## 14. Toolchain & Gates
 
 - [ ] Toolchain: pinned stable via `rust-toolchain.toml`. Edition 2024. Upgrades deliberate.
-- [ ] Gate every change: `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` +
-  `cargo test`. All green or no merge.
-- [ ] Run clippy + test in BOTH configurations: no features, and `--all-features` (`ui` + `mcp`).
-  - Amended 2026-07-25. WHY: `eframe` is optional behind feature `ui` (§11), and a single-config
-    gate rots the path it never compiles.
-  - Amended 2026-10-14. WHY: `mcp` joins `ui` as an optional feature, and one `--all-features` run
-    compiles both gated paths.
-  - Replaced 2026-10-14: the second configuration was `--features ui`.
+- [ ] Gate every change with six commands. All green or no merge:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets -- -D warnings`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo clippy --target wasm32-unknown-unknown --lib --bin polysim-ui --bin dom-fixture -- -D warnings`
+  - `cargo test`
+  - `cargo test --all-features`
+  - Amended 2026-10-26. WHY: the browser workstation compiles only for wasm32, so a gate that
+    lints only the native target never reads it. `--all-features` (`mcp` + `web`) covers the
+    gated native paths. A single-config gate rots the path it never compiles.
+  - Replaced 2026-10-26: the gate was `cargo fmt --check` + clippy + `cargo test`, with clippy and
+    test run in BOTH configurations: no features, and `--all-features` (`ui` + `mcp`).
+    - Amended 2026-07-25. WHY: `eframe` is optional behind feature `ui` (§11), and a
+      single-config gate rots the path it never compiles.
+    - Amended 2026-10-14. WHY: `mcp` joins `ui` as an optional feature, and one `--all-features`
+      run compiles both gated paths.
+    - Replaced 2026-10-14: the second configuration was `--features ui`.
 - [ ] `#[allow]` requires inline WHY.
 - [ ] `#![forbid(unsafe_code)]` at crate root. An amendment requires a benchmark that proves safe
   implementation cannot meet measured requirement.

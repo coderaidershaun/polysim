@@ -1,8 +1,5 @@
-//! Monitor driver: Feed pushes frames through pipeline.
+//! Builds the monitor scenes by feeding ordered events through the real model, as the link would.
 
-use polysim::desktop::model::UiModel;
-use polysim::desktop::monitor::MonitorUiState;
-use polysim::desktop::monitor_model::SystemNote;
 use polysim::hot::exec::{CloseReason, OrderState, RejectOrigin};
 use polysim::ids::{AssetId, ClientOrderId};
 use polysim::ids::{FIXED_SCALE, InstrumentId, Price, Qty, Side};
@@ -11,6 +8,9 @@ use polysim::msg::persist::FeatureId;
 use polysim::msg::ui::{DomQuote, UiBookState, UiEvent};
 use polysim::time::DurationUs;
 use polysim::time::TsUs;
+use polysim::workstation::model::UiModel;
+use polysim::workstation::monitor::model::SystemNote;
+use polysim::workstation::monitor::view::MonitorUiState;
 
 use crate::fixture::{BASE_TS, book, levels, px, qm};
 
@@ -29,10 +29,9 @@ pub struct MonitorScene {
     pub state: MonitorUiState,
 }
 
-/// Commission at 1e-8: realistic, not round.
+/// A commission in units of 1e-8, picked to look real rather than round.
 const FILL_COMMISSION: i64 = 944_000;
 
-/// Drives real UiModel, faithful ordered stream.
 pub struct Feed {
     model: UiModel,
     seq: u64,

@@ -1,8 +1,8 @@
 //! Shutdown exit-status truth table: a fatal trip — the trigger OR one that occurs while the
 //! queues drain (a hot-thread panic caught by the panic hook) — must never be reported as a
 //! graceful (exit-0) shutdown, and a fatal dominates a drain error. `decide_exit` is the pure
-//! decision `run_until_shutdown` wires through; one case per row of its truth table. An external
-//! graceful trigger flows through the same path as a signal (reason "shutdown request").
+//! decision `run_until_shutdown` wires through; one case per row of its truth table. It sees a
+//! graceful trigger only as a name, so the last case passes a name that is not a signal's.
 
 use polysim::runtime::decide_exit;
 
@@ -54,9 +54,9 @@ fn fatal_is_never_reported_graceful() {
             graceful: false,
             reason: "panic X",
         },
-        // The UI shutdown request is a clean trigger, reported graceful like a signal. It reaches
-        // `decide_exit` as the trigger string and nothing else, so the fatal and drain-error rows
-        // above already cover what happens when one lands on top of it.
+        // A trigger reaches `decide_exit` as its name and nothing else, so any name is reported
+        // graceful, not only a signal's. The fatal and drain-error rows above already cover what
+        // happens when one lands on top of it.
         Case {
             signal: Some("shutdown request"),
             fatal: None,

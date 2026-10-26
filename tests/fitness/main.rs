@@ -14,13 +14,10 @@ mod binance_parse;
 mod binance_rest_plan;
 mod binance_sign;
 mod book_reconstruction;
-mod bridge;
 mod cargo_bins;
 mod chart_axis;
 mod chart_projection;
 mod config_guards;
-mod desktop_format;
-mod desktop_support;
 mod dispatch_replay;
 mod dom_grouping;
 mod dom_projection;
@@ -56,9 +53,9 @@ mod hawkes_alloc;
 mod ingress_order;
 mod kyles_lambda_alloc;
 mod latency_metrics;
-mod link_client;
 mod link_control;
 mod link_ingress;
+mod link_session;
 mod link_wire;
 mod log_lane_ownership;
 mod loss_gate;
@@ -75,10 +72,6 @@ mod mcp_tools;
 /// include point only — a second would mint a distinct `MicroRecorder` type.
 #[path = "../../strategies/strat-micro-recorder/te-binance-spot-btcusdt/strategy.rs"]
 mod micro_strategy;
-/// `monitor_projection` names the `monitor` painter module, which only exists under feature `ui`.
-/// The other desktop suites read the toolkit-free half of `polysim::desktop`, which every build
-/// compiles.
-#[cfg(feature = "ui")]
 mod monitor_projection;
 mod parquet_readback;
 mod persist_drain;
@@ -128,6 +121,11 @@ mod suite_integrity;
 mod tracker;
 mod ui_feed;
 mod volume_bars;
+/// These drive `polysim::web` and its binary, which exist only under feature `web`.
+#[cfg(feature = "web")]
+mod web_http;
+mod workstation_format;
+mod workstation_support;
 mod zero_alloc;
 
 thread_local! {

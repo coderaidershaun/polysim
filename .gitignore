@@ -1,6 +1,8 @@
 # Build output
 /target
 /dist
+/browser/dist
+/tools/dom-fixture/dist
 
 # Run output
 /logs

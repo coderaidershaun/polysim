@@ -803,7 +803,7 @@ proptest! {
 /// skewed wire version and a peer from someone else's run present the identical symptom — nothing
 /// decodes — so each has to name its own cause or an operator is left guessing which of them is
 /// happening. The book-length cases matter most: `bid_len`/`ask_len` are read straight off the wire
-/// and the UI slices its fixed `[Level; UI_BOOK_LEVELS]` arrays by them (`desktop::dom_view`), so a
+/// and the UI slices its fixed `[Level; UI_BOOK_LEVELS]` arrays by them (`workstation::dom_view`), so a
 /// forged length is a remote abort of the UI for anyone who can reach the port — the link's producer
 /// is UNTRUSTED by design rather than by assumption. The order-snapshot counts are the same hazard
 /// one body further in, and are refused before any of it reaches projection.

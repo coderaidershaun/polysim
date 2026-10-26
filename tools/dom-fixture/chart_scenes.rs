@@ -1,10 +1,11 @@
-//! Deterministic chart scenes: ONLY place fabricated data lives. No RNG -> reproducible.
+//! The chart scenes, built from fixed waves rather than random numbers, so every run draws the
+//! same.
 
-use polysim::desktop::chart_model::{BookContinuity, ChartModel};
 use polysim::ids::{FIXED_SCALE, InstrumentId, Price, Qty, Side};
 use polysim::msg::inbound::Level;
 use polysim::msg::ui::UiBookState;
 use polysim::time::DurationUs;
+use polysim::workstation::chart::model::{BookContinuity, ChartModel};
 
 use crate::fixture::{self, BASE_TS, INSTRUMENT, book, px, unit};
 
@@ -19,7 +20,7 @@ const COMMITS_PER_BUCKET: i64 = 4;
 const TICK: Price = Price(FIXED_SCALE);
 const BASE_BID: i64 = 65_990;
 
-/// Scene: model, instrument, grid. tick = Price(0) if no venue grid.
+/// `tick` is `Price(0)` for an instrument with no venue grid.
 pub struct ChartScene {
     pub name: &'static str,
     pub chart: ChartModel,
@@ -41,7 +42,8 @@ pub fn chart_scenes() -> Vec<ChartScene> {
     ]
 }
 
-/// Grows left edge (grow-then-slide). Candles = full_window width.
+/// A series still filling its window, so it grows from the left before it slides. The window is
+/// fixed from the start, so the candles are as wide as in the full window.
 fn growing() -> ChartScene {
     let mut feed = Feed::new(Some(TICK));
     feed.walk(0..90);
@@ -50,7 +52,7 @@ fn growing() -> ChartScene {
     feed.finish("growing — 90 s of 300")
 }
 
-/// 5-min window past: domain slides, hairline density.
+/// More than five minutes of data, so the window slides and the line is at its densest.
 fn full_window() -> ChartScene {
     let mut feed = Feed::new(Some(TICK));
     feed.walk(0..WINDOW_BUCKETS + 120);
@@ -60,7 +62,7 @@ fn full_window() -> ChartScene {
     feed.finish("full window — sliding")
 }
 
-/// Two indistinguishable breaks: no mid, lane-lost snapshots.
+/// Two kinds of break that must look the same: spins with no mid, and snapshots lost on the way.
 fn holes() -> ChartScene {
     let mut feed = Feed::new(Some(TICK));
     feed.walk(0..120);
@@ -70,7 +72,7 @@ fn holes() -> ChartScene {
     feed.finish("holes — missing seconds + lane gap")
 }
 
-/// Flat series: guard expands equal high/low (avoids zero-div).
+/// A flat series, whose equal high and low the bounds must widen rather than divide by zero.
 fn flat() -> ChartScene {
     let mut feed = Feed::new(Some(TICK));
     for step in 0..240 {
@@ -79,7 +81,7 @@ fn flat() -> ChartScene {
     feed.finish("flat series")
 }
 
-/// Bid-only: no mid, chart reports it.
+/// A book with bids only, so there is no mid and the chart says so.
 fn one_sided() -> ChartScene {
     let mut feed = Feed::new(Some(TICK));
     for step in 0..120 {
@@ -88,7 +90,7 @@ fn one_sided() -> ChartScene {
     feed.finish("one-sided book — no mid")
 }
 
-/// Polymarket: no tick, no grid.
+/// An instrument with no tick grid, as on Polymarket.
 fn no_tick_grid() -> ChartScene {
     let mut feed = Feed::new(None);
     feed.walk(0..120);
@@ -100,7 +102,7 @@ fn no_tick_grid() -> ChartScene {
     }
 }
 
-/// Fills both sides: markers separable from mid.
+/// Fills on both sides every spin, to check the markers stay distinct from the mid line.
 fn dense_fills() -> ChartScene {
     let mut feed = Feed::new(Some(TICK));
     feed.walk(0..120);
@@ -111,7 +113,7 @@ fn dense_fills() -> ChartScene {
     feed.finish("dense fills both sides")
 }
 
-/// Fills outside mid range: bounds union -> markers on-screen.
+/// Fills far outside the mid's range. The bounds take them in, so every marker stays on screen.
 fn fill_off_mid() -> ChartScene {
     let mut feed = Feed::new(Some(TICK));
     feed.walk(0..200);
@@ -121,7 +123,7 @@ fn fill_off_mid() -> ChartScene {
     feed.finish("fills outside the mid range")
 }
 
-/// Full window at COARSE: legible body/wicks, period retuning compare.
+/// A full window at a 15 second spin, so the candle bodies and wicks are wide enough to read.
 fn coarse_buckets() -> ChartScene {
     let mut feed = Feed::with_spin(Some(TICK), COARSE_SPIN);
     feed.walk(0..COARSE_WINDOW_BUCKETS);
@@ -134,7 +136,7 @@ struct Feed {
     chart: ChartModel,
     spin: DurationUs,
     seq: u64,
-    gap_next: bool,
+    is_gap_pending: bool,
 }
 
 impl Feed {
@@ -149,7 +151,7 @@ impl Feed {
             chart,
             spin,
             seq: 0,
-            gap_next: false,
+            is_gap_pending: false,
         }
     }
 
@@ -172,7 +174,7 @@ impl Feed {
         }
     }
 
-    /// Degenerate candle: open == high == low == close, tests bounds guard on zero-span series.
+    /// A candle whose open, high, low and close are equal, which the bounds must widen.
     fn still(&mut self, step: i64, bid: i64) {
         let continuity = self.take_continuity();
         self.commit(self.at(step, 0), &[unit(bid)], &[unit(bid + 2)], continuity);
@@ -188,11 +190,11 @@ impl Feed {
     }
 
     fn gap(&mut self) {
-        self.gap_next = true;
+        self.is_gap_pending = true;
     }
 
     fn take_continuity(&mut self) -> BookContinuity {
-        if std::mem::take(&mut self.gap_next) {
+        if std::mem::take(&mut self.is_gap_pending) {
             BookContinuity::GapBefore
         } else {
             BookContinuity::Continuous

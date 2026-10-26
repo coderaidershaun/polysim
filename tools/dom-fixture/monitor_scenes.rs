@@ -1,11 +1,11 @@
-//! Deterministic monitor scenes: ONLY place fabricated data lives.
+//! The monitor scenes: fixed event streams, the same on every run.
 
-use polysim::desktop::monitor::{Channel, MonitorUiState};
-use polysim::desktop::monitor_model::SystemNote;
 use polysim::hot::exec::{CloseReason, OrderState, RejectOrigin};
 use polysim::ids::Side;
 use polysim::msg::exec::RejectClass;
 use polysim::msg::ui::UiBookState;
+use polysim::workstation::monitor::model::SystemNote;
+use polysim::workstation::monitor::view::{Channel, MonitorUiState};
 
 use crate::monitor_feed::{Feed, MonitorScene, QUOTE_QTY_MILLI, SPIN};
 
@@ -13,14 +13,15 @@ pub fn monitor_scenes() -> Vec<MonitorScene> {
     vec![full(), warmup(), long_values(), unseen()]
 }
 
-/// A live monitor: valid book + quote (BID Δ2 · MID 65992 · ASK Δ3), features with a recently-changed
-/// row, a stale row, a legitimate zero and normal rows, and content in all four channels.
+/// A live monitor: a valid book and quote (bid delta 2, mid 65992, ask delta 3), features with a
+/// recently changed row, a stale row, a real zero and normal rows, and content in all four
+/// channels.
 fn full() -> MonitorScene {
     let mut feed = Feed::new(1, FULL_FEATURES.len());
     feed.lifecycle(SystemNote::Starting);
     feed.lifecycle(SystemNote::Ready);
 
-    // Reset -> System carries transitions.
+    // Start valid, so the awaiting-then-valid pair below shows as one resync row.
     restate_touch(&mut feed, UiBookState::Valid, 1_000_000);
 
     feed.feature(2, 1_000_000, 2.0000);
@@ -33,17 +34,17 @@ fn full() -> MonitorScene {
     feed.feature(9, 1_000_000, 1.8000);
     feed.feature(10, 1_000_000, 0.9200);
     feed.feature(11, 1_050_000, 0.0000);
-    // Stale: -7 spins.
+    // Stale: seven spins older than the freshest event.
     feed.feature(1, 600_000, 42.0000);
 
     feed.trade(1_100_000, Side::Buy, 65994, 512);
     restate_touch(&mut feed, UiBookState::AwaitingSnapshot, 1_100_000);
-    // Confirmed bid + in-flight ask: two distinguishable states on screen together.
+    // A confirmed bid and an in-flight ask, two states that must look different side by side.
     feed.order(1_200_000, 1, Side::Buy, 65990, OrderState::Live);
     feed.order(1_200_000, 2, Side::Sell, 65995, OrderState::PendingNew);
     feed.trade(1_150_000, Side::Sell, 65990, 1_240);
 
-    // Changed feature: re-emitted with different value at freshest time.
+    // Re-emitted with a different value at the freshest time, so the row shows as changed.
     feed.feature(0, 1_290_000, -0.5000);
     feed.feature(0, 1_300_000, -0.8000);
     restate_touch(&mut feed, UiBookState::Valid, 1_300_000);
@@ -58,7 +59,7 @@ fn full() -> MonitorScene {
         65990,
         OrderState::Closed(CloseReason::Filled),
     );
-    // Post-only cross: routine for maker, shown as normal not alarm.
+    // A routine refusal, which must read as normal rather than as an alarm.
     feed.refusal(
         1_265_000,
         Side::Sell,
@@ -69,7 +70,7 @@ fn full() -> MonitorScene {
     );
     feed.rotation(1_290_000);
     feed.trade(1_250_000, Side::Buy, 65995, 88);
-    // Deliberate gap -> System shows events-lost note.
+    // Skip three sequence numbers, so the System channel shows an events-lost row.
     feed.skip(3);
     feed.trade(1_300_000, Side::Sell, 65989, 2_100);
 
@@ -80,7 +81,7 @@ fn restate_touch(feed: &mut Feed, state: UiBookState, ts: i64) {
     feed.book(state, ts, &[(65990, 640)], &[(65994, 512)]);
 }
 
-/// Warmup: all values —.
+/// Before any reading arrives, so every cell shows as missing.
 fn warmup() -> MonitorScene {
     let mut feed = Feed::new(1, FULL_FEATURES.len());
     feed.lifecycle(SystemNote::Starting);
@@ -92,7 +93,7 @@ fn warmup() -> MonitorScene {
     )
 }
 
-/// Long names, extremes: stable.
+/// Long feature names and extreme values, which must not break the layout.
 fn long_values() -> MonitorScene {
     let mut feed = Feed::new(1, LONG_FEATURES.len());
     feed.lifecycle(SystemNote::Ready);
@@ -108,7 +109,7 @@ fn long_values() -> MonitorScene {
     feed.finish("long names / values", LONG_FEATURES, MonitorUiState::new())
 }
 
-/// Scrolled away: badge shows count.
+/// The System channel scrolled away, so the badge counts the rows not yet seen.
 fn unseen() -> MonitorScene {
     let mut feed = Feed::new(1, FULL_FEATURES.len());
     feed.lifecycle(SystemNote::Starting);

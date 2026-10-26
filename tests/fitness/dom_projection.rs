@@ -7,20 +7,20 @@
 //! as `65991.5`. The fit half pins the one geometry rule that can fail silently: asking for more
 //! rows than the panel holds costs rows, never legibility.
 
-use polysim::desktop::dom_view::{
+use polysim::ids::{ClientOrderId, FIXED_SCALE, InstrumentId, Price, Qty};
+use polysim::msg::ui::{DomQuote, UiBookSnapshot, UiBookState, UiEvent};
+use polysim::time::{DurationUs, TsUs};
+use polysim::workstation::dom_view::{
     DEFAULT_ROWS_PER_SIDE, DomGrouping, DomOverlay, DomRow, DomStatus, DomViewInput, FeedStatus,
     MAX_ROWS_PER_SIDE, MIN_ROWS_PER_SIDE, QuotePlacement, ask_anchor, bid_anchor, build_dom_view,
     fit_rows, mid_half_ticks, price_for_row, tick_index,
 };
-use polysim::desktop::exec_model::{OrderCell, OrderStatus};
-use polysim::desktop::format::{MISSING, write_mid, write_opt_qty, write_qty};
-use polysim::desktop::model::UiModel;
-use polysim::ids::{ClientOrderId, FIXED_SCALE, InstrumentId, Price, Qty};
-use polysim::msg::ui::{DomQuote, UiBookSnapshot, UiBookState, UiEvent};
-use polysim::time::{DurationUs, TsUs};
+use polysim::workstation::exec_model::{OrderCell, OrderStatus};
+use polysim::workstation::format::{MISSING, write_mid, write_opt_qty, write_qty};
+use polysim::workstation::model::UiModel;
 use proptest::prelude::*;
 
-use crate::desktop_support::{BookFixture, NamedCase, book_snapshot, overlay};
+use crate::workstation_support::{BookFixture, NamedCase, book_snapshot, overlay};
 
 /// A one-mantissa tick, so a price mantissa reads directly as its tick index and the ladder math is
 /// legible in the assertions.

@@ -1,18 +1,18 @@
-//! Harness overlay. Split for line cap.
+//! The text band over the left panel: which scene each panel shows, and the keys that step them.
 
 use eframe::egui;
 
-use polysim::desktop::chart_view::ChartMode;
-use polysim::desktop::monitor::Channel;
-use polysim::desktop::position_chart_view::RiskSeries;
+use polysim::workstation::chart::position_view::RiskSeries;
+use polysim::workstation::chart::view::ChartMode;
+use polysim::workstation::monitor::view::Channel;
 
-use crate::LeftPanel;
+use crate::app::LeftPanel;
 use crate::scenes::Scene;
 
 const TEXT: egui::Color32 = egui::Color32::from_rgb(145, 157, 174);
 const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(96, 106, 120);
 
-/// Band at top, charts below -> no overlap.
+/// The charts start below this band, so the two never overlap.
 pub const HEIGHT: f32 = 140.0;
 
 pub struct Hud<'a> {
@@ -86,7 +86,8 @@ pub fn paint(painter: &egui::Painter, hud: &Hud<'_>) {
     );
 }
 
-/// Below HUD: empty on short, never inverted.
+/// The left panel under the band. A panel shorter than the band gives an empty rect, never an
+/// inverted one.
 pub fn below(left: egui::Rect) -> egui::Rect {
     let top = (left.top() + HEIGHT).min(left.bottom());
     egui::Rect::from_min_max(egui::pos2(left.left(), top), left.max)

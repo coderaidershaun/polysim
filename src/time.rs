@@ -1,7 +1,11 @@
-//! Microsecond time types + monotonic engine clock: every timestamp µs-since-epoch in typed wrapper.
+//! Microsecond time types and the engine's monotonic clock. Every timestamp is microseconds since
+//! the Unix epoch inside a typed wrapper, so a bare integer never passes for a time.
 
 use core::ops::{Add, Sub};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+#[cfg(target_arch = "wasm32")]
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Microseconds since the Unix epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -53,7 +57,7 @@ pub(crate) struct CivilTime {
     pub(crate) micros: i64,
 }
 
-/// Signed span in microseconds. Latency uses DurationUs, no third type.
+/// A signed span in microseconds. Latency uses it too, so there is no third time type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DurationUs(i64);
 
@@ -107,7 +111,8 @@ impl Sub<DurationUs> for TsUs {
     }
 }
 
-/// Monotonic clock: wall-clock anchor at start + Instant elapsed. Immune to NTP steps, stays comparable to venue.
+/// One wall-clock reading taken at start, plus the monotonic time elapsed since. A step in the
+/// system clock cannot move it, and it stays comparable with venue timestamps.
 #[derive(Debug, Clone)]
 pub struct EngineClock {
     wall_anchor_ts_us: i64,
@@ -126,7 +131,7 @@ impl EngineClock {
         }
     }
 
-    /// Called twice per hot-path message; small monotonic read folds into caller.
+    /// Called twice for every hot-path message, and small enough to inline into the caller.
     #[inline]
     pub fn now(&self) -> TsUs {
         let elapsed_us = self.mono_anchor.elapsed().as_micros() as i64;
@@ -134,8 +139,9 @@ impl EngineClock {
     }
 }
 
-/// Wall-clock µs at call: names run (link restart, controller epoch base, Parquet disambiguator).
-/// Not engine state -> plain clock read OK. Pre-epoch -> 0 not panic.
+/// The wall clock now, for stamps that never become engine state, so a plain clock read is fine:
+/// the link's restart marker, the base of the controller epoch, and log and file timestamps. A
+/// clock set before the epoch gives 0 rather than a panic.
 pub(crate) fn boot_stamp_us() -> TsUs {
     let micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -143,8 +149,9 @@ pub(crate) fn boot_stamp_us() -> TsUs {
     TsUs::from_micros(micros)
 }
 
-/// Hinnant civil_from_days: proleptic Gregorian (year,month,day) from signed day count since Unix epoch.
-/// Exact arithmetic across full range. Shared by log+Parquet -> no calendar crate needed.
+/// Howard Hinnant's `civil_from_days`: the Gregorian year, month and day for a signed count of days
+/// since the Unix epoch, exact over the whole range. Every place that spells a date out uses it, so
+/// no calendar crate is needed.
 pub(crate) fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
     let shifted = days_since_epoch + 719_468;
     let era = shifted.div_euclid(146_097);

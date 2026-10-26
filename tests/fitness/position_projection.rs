@@ -5,16 +5,18 @@
 //! both series bucket one event time identically, the window is never derived here, and a wire value
 //! becomes the exact quote mantissa the engine's ledger held.
 
-use polysim::desktop::chart_model::ChartModel;
-use polysim::desktop::chart_view::{ChartDomain, domain, x_fraction};
-use polysim::desktop::position_chart_model::{PositionBucket, PositionModel};
-use polysim::desktop::position_chart_view::{RiskSeries, bounds, visible_buckets};
 use polysim::ids::{FIXED_SCALE, InstrumentId};
 use polysim::msg::ui::UiEvent;
 use polysim::time::{DurationUs, TsUs};
+use polysim::workstation::chart::model::ChartModel;
+use polysim::workstation::chart::position_model::{PositionBucket, PositionModel};
+use polysim::workstation::chart::position_view::{RiskSeries, bounds, visible_buckets};
+use polysim::workstation::chart::view::{ChartDomain, domain, x_fraction};
 use proptest::prelude::*;
 
-use crate::desktop_support::{CAPACITY, SPIN, TICK, at, chart_model, commit_at, rotation_event};
+use crate::workstation_support::{
+    CAPACITY, SPIN, TICK, at, chart_model, commit_at, rotation_event,
+};
 
 fn positions(instruments: usize) -> PositionModel {
     PositionModel::with_capacity(instruments, SPIN)

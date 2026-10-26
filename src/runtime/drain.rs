@@ -1,5 +1,5 @@
-//! Shutdown and drain: waits for a signal, a fatal trip, or a shutdown request, tears
-//! everything down under a watchdog, catches panics, and decides the process exit.
+//! Shutdown and drain: waits for a signal or a fatal trip, tears everything down under a
+//! watchdog, catches panics, and decides the process exit.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,13 +11,12 @@ use tokio::signal::unix::{SignalKind, signal};
 use crate::adapters::exec::EdgeHandle;
 use crate::hot::spawn::SimTapGate;
 use crate::msg::ui::UiLifecycle;
-use crate::shutdown::{FatalSignal, ShutdownRequest, TaskHandle, panic_text};
+use crate::shutdown::{FatalSignal, TaskHandle, panic_text};
 use crate::{error, info, warn};
 
 use super::{Engine, ExitReport};
 
-/// The poll frequency for latches that cannot be awaited directly, such as a fatal trip
-/// or a shutdown request.
+/// How often the fatal latch is polled, since it cannot be awaited directly.
 const LATCH_POLL: Duration = Duration::from_millis(20);
 
 enum Trigger {
@@ -26,8 +25,8 @@ enum Trigger {
 }
 
 impl Engine {
-    /// Blocks until a signal, a shutdown request, or a fatal trip, then drains under a
-    /// hard deadline enforced by a watchdog.
+    /// Blocks until a signal or a fatal trip, then drains under a hard deadline enforced by a
+    /// watchdog.
     pub(super) fn run_until_shutdown(self) -> ExitReport {
         let Engine {
             _execution_lease: execution_lease,
@@ -44,31 +43,22 @@ impl Engine {
             metrics,
             fatal,
             drain,
-            shutdown,
             lifecycle,
             drain_deadline,
         } = self;
 
-        let trigger = runtime.block_on(wait_for_shutdown(&fatal, &shutdown));
-        let drain_reason: Box<str> = match &trigger {
-            Trigger::Signal(name) => {
-                info!("received {name} — draining");
-                format!("received {name}").into()
-            }
+        let trigger = runtime.block_on(wait_for_shutdown(&fatal));
+        match &trigger {
+            Trigger::Signal(name) => info!("received {name} — draining"),
             Trigger::Fatal => {
                 let reason = fatal
                     .reason()
                     .unwrap_or_else(|| Box::<str>::from("fatal signal tripped"));
                 error!("fatal: {reason} — draining");
-                reason
             }
-        };
+        }
         // Uses try_send only, so a dead receiver never blocks the drain.
-        lifecycle
-            .try_send(UiLifecycle::Draining {
-                reason: drain_reason,
-            })
-            .ok();
+        lifecycle.try_send(UiLifecycle::Draining).ok();
 
         let done = Arc::new(AtomicBool::new(false));
         spawn_watchdog(drain_deadline, Arc::clone(&done));
@@ -104,11 +94,6 @@ impl Engine {
             "drain complete ({})",
             if report.graceful { "graceful" } else { "fatal" }
         );
-        // The last word to the UI is the authoritative exit report, sent with try_send so
-        // a gone receiver simply drops it.
-        lifecycle
-            .try_send(UiLifecycle::Stopped(report.clone()))
-            .ok();
         log_handle.drain();
         done.store(true, Ordering::Release);
         // Released only after every order-related component has stopped, so a replacement
@@ -130,12 +115,11 @@ pub(super) fn install_panic_hook(fatal: FatalSignal) {
     }));
 }
 
-async fn wait_for_shutdown(fatal: &FatalSignal, shutdown: &ShutdownRequest) -> Trigger {
+async fn wait_for_shutdown(fatal: &FatalSignal) -> Trigger {
     tokio::select! {
         () = wait_sigint() => Trigger::Signal("SIGINT"),
         () = wait_sigterm() => Trigger::Signal("SIGTERM"),
         () = poll_fatal(fatal) => Trigger::Fatal,
-        () = poll_shutdown_request(shutdown) => Trigger::Signal("shutdown request"),
     }
 }
 
@@ -166,12 +150,6 @@ async fn never() {
 
 async fn poll_fatal(fatal: &FatalSignal) {
     while !fatal.is_tripped() {
-        tokio::time::sleep(LATCH_POLL).await;
-    }
-}
-
-async fn poll_shutdown_request(shutdown: &ShutdownRequest) {
-    while !shutdown.is_requested() {
         tokio::time::sleep(LATCH_POLL).await;
     }
 }

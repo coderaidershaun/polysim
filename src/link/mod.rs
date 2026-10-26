@@ -1,5 +1,7 @@
-//! UDP link: fixed-size frames (universal envelope). Engine + UI reject wire skew early.
+//! The UDP link between engines and workstations. Every frame shares one envelope, so either end
+//! refuses a frame from a mismatched build before it reads the body.
 
+#[cfg(not(target_arch = "wasm32"))]
 mod actor;
 mod control;
 mod envelope;
@@ -8,6 +10,7 @@ mod frame;
 mod subscribers;
 mod wire;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use actor::{LinkActor, LinkActorSetup, PeerFeed};
 
 pub use control::{
@@ -27,10 +30,10 @@ pub use subscribers::{
     RefreshOutcome, SequenceGate, SubscriberTable,
 };
 
-/// Hash + name length check (truncate = mislabel).
+/// Checks every name's length before hashing, because a truncated name would label the wrong field.
 ///
 /// # Panics
-/// If name > [`LINK_NAME_LEN`] bytes.
+/// When a name is longer than [`LINK_NAME_LEN`] bytes.
 pub fn schema_hash_of_fields(names: &[&str]) -> LinkHash {
     for name in names {
         assert!(

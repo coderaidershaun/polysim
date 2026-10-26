@@ -1,13 +1,13 @@
-//! Deterministic books: ONLY place fabricated data lives.
+//! The ladder scenes: fixed books, quotes and orders, the same on every run.
 
-use polysim::desktop::dom_view::{DomGrouping, FeedStatus};
-use polysim::desktop::exec_model::{OrderCell, OrderStatus};
-use polysim::desktop::format::price_decimals;
 use polysim::ids::{ClientOrderId, FIXED_SCALE, Price, Qty};
 use polysim::msg::inbound::Level;
 use polysim::msg::ui::{DomQuote, UiBookSnapshot, UiBookState};
 use polysim::time::DurationUs;
 use polysim::time::TsUs;
+use polysim::workstation::dom_view::{DomGrouping, FeedStatus};
+use polysim::workstation::exec_model::{OrderCell, OrderStatus};
+use polysim::workstation::format::price_decimals;
 
 use crate::fixture::{book, levels, px, qm};
 
@@ -15,7 +15,7 @@ const TICK: Price = Price(FIXED_SCALE);
 const QTY_SCALE: i64 = FIXED_SCALE;
 const QUOTE_QTY_MILLI: i64 = 9_000;
 
-/// Grouped: 0.01 tick, 1 bps = 1180 ticks (11.80/row).
+/// The grouped scene's grid: a 0.01 tick on a 118,000 mid, so 1 bp is 1,180 ticks, or 11.80 a row.
 const GROUPED_TICK: Price = Price(FIXED_SCALE / 100);
 const GROUPED_MID_TICK: i64 = 11_800_000;
 const GROUPED_QUOTE_QTY_MILLI: i64 = 250;
@@ -124,15 +124,17 @@ fn sparse() -> Variant {
     let bids = levels(&[(65990, 600), (65988, 1_100), (65985, 900), (65980, 3_300)]);
     Variant {
         label: "gaps keep grid + price",
-        // The ask quote rests on an otherwise-empty tick: strategy-only row, blank public cell.
+        // The ask quote rests on an otherwise empty tick, so its row has a strategy cell and a
+        // blank public cell.
         quote: Some(DomQuote::top(None, Some((px(65996), qm(QUOTE_QTY_MILLI))))),
         ..valid(&bids, &asks)
     }
 }
 
-/// The same gappy book at five ticks a row: the blank ticks between levels fold away, the quote's
-/// lone tick joins the depth around it, and — the one that needs signing off — both sides' nearest
-/// rows are the same mid-straddling bucket, so 65990 labels a row above AND below the separator.
+/// The same gappy book at five ticks a row: the blank ticks between levels fold away, and the
+/// quote's lone tick joins the depth around it. Both sides' nearest rows are the same bucket
+/// straddling the mid, so 65990 labels a row above and below the separator; that is the case to
+/// check by eye.
 fn sparse_grouped() -> Variant {
     Variant {
         label: "ticks x5 - gaps merge, mid bucket shared",
@@ -233,7 +235,8 @@ fn locked() -> Variant {
     }
 }
 
-/// BTC book: grouping compare alone. Ungrouped: 12 rows 0.12 off-screen. x10 back. 1 bps carries depth.
+/// A BTC-sized book where only the grouping changes. Ungrouped, twelve rows cover 0.12 and the
+/// quotes sit off screen. At x10 they come back, and at 1 bp each row carries real depth.
 fn grouped(label: &'static str, grouping: DomGrouping) -> Variant {
     let asks = grouped_levels(&[
         (1, 85),
@@ -313,7 +316,7 @@ fn scene(name: &'static str, variants: Vec<Variant>) -> Scene {
     Scene { name, variants }
 }
 
-/// Confirmed bid, in-flight ask, desired quote: distinguish live/sent/want.
+/// A confirmed bid, an in-flight ask and a desired quote, so live, sent and want show side by side.
 fn working_orders() -> Variant {
     let asks = levels(&[(65992, 500), (65993, 1_250), (65994, 800), (65996, 2_000)]);
     let bids = levels(&[(65990, 600), (65989, 1_100), (65988, 900), (65986, 3_300)]);
@@ -329,7 +332,8 @@ fn working_orders() -> Variant {
     }
 }
 
-/// Lost off-screen: chevron shows ORDER (live exposure not intention).
+/// A lost order off screen. The chevron points at the order rather than the desired quote, because
+/// the order is real exposure and the quote only an intention.
 fn order_off_screen() -> Variant {
     Variant {
         label: "lost order off-screen outranks want",
@@ -338,7 +342,6 @@ fn order_off_screen() -> Variant {
     }
 }
 
-/// Venue-acknowledged order, distinct from quote.
 fn order(id: u64, tick: i64, milli: i64, status: OrderStatus) -> OrderCell {
     OrderCell {
         client_id: ClientOrderId(id),
