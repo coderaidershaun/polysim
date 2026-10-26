@@ -3,25 +3,75 @@
 
 use eframe::egui;
 
-use super::ladder::{DomFrame, DomLayout};
+use super::geometry::DomLayout;
+// SMELL: the overlay uses the ladder's frame type and the ladder calls the overlay, so each depends
+// on the other. The frame type stays beside the ladder's paint function because other code names
+// it there. Moving it into a module of its own would end the loop.
+use super::ladder::DomFrame;
 use crate::workstation::browser::theme::{DARK, METRICS};
 use crate::workstation::dom_view::{DomRow, DomView, QuotePlacement};
 use crate::workstation::format;
 use crate::workstation::text;
 
-pub(crate) fn paint_offscreen(painter: &egui::Painter, layout: &DomLayout, view: &DomView) {
-    let ask = text::offscreen_of(view.ask_order_placement, view.ask_placement);
-    let bid = text::offscreen_of(view.bid_order_placement, view.bid_placement);
-    for placement in [ask, bid] {
-        match placement {
-            QuotePlacement::OffScreenAbove { delta_half_ticks } => {
-                chevron(painter, layout, Direction::Up, delta_half_ticks);
+pub(super) struct OverlayPainter<'a> {
+    pub(super) painter: &'a egui::Painter,
+    pub(super) layout: &'a DomLayout,
+    pub(super) view: &'a DomView,
+    pub(super) frame: &'a DomFrame<'a>,
+}
+
+impl OverlayPainter<'_> {
+    /// Returns the bottom edge of the chevron at the top of the ladder, if one was painted, so the
+    /// status badge can sit below it instead of on it.
+    pub(super) fn paint_offscreen(&self) -> Option<f32> {
+        let view = self.view;
+        let ask = text::offscreen_of(view.ask_order_placement, view.ask_placement);
+        let bid = text::offscreen_of(view.bid_order_placement, view.bid_placement);
+        let mut top_chevron_bottom = None;
+        for placement in [ask, bid] {
+            match placement {
+                QuotePlacement::OffScreenAbove { delta_half_ticks } => {
+                    let pill = chevron(self.painter, self.layout, Direction::Up, delta_half_ticks);
+                    top_chevron_bottom = Some(pill.bottom());
+                }
+                QuotePlacement::OffScreenBelow { delta_half_ticks } => {
+                    chevron(self.painter, self.layout, Direction::Down, delta_half_ticks);
+                }
+                QuotePlacement::Visible | QuotePlacement::None => {}
             }
-            QuotePlacement::OffScreenBelow { delta_half_ticks } => {
-                chevron(painter, layout, Direction::Down, delta_half_ticks);
-            }
-            QuotePlacement::Visible | QuotePlacement::None => {}
         }
+        top_chevron_bottom
+    }
+
+    pub(super) fn paint_hover(&self, pointer: Option<egui::Pos2>) {
+        let Some(pointer) = pointer else { return };
+        let Some((row_rect, row)) = self.layout.row_at(self.view, pointer) else { return };
+        self.painter
+            .rect_filled(row_rect, 0.0, DARK.selected.gamma_multiply(0.12));
+        let detail = row_detail(row, self.frame);
+        readout(self.painter, self.layout, pointer, &detail);
+    }
+
+    pub(super) fn paint_status(&self, top_chevron_bottom: Option<f32>) {
+        let Some((label, tone)) = text::status_pill(self.view.status, self.frame.stale_age) else {
+            return;
+        };
+        let color = DARK.tone(tone);
+        let galley = self.painter.layout_no_wrap(
+            label,
+            egui::FontId::proportional(METRICS.dom_qty_font),
+            color,
+        );
+        let pad = METRICS.dom_cell_pad;
+        let size = egui::vec2(galley.size().x + 2.0 * pad, galley.size().y + pad);
+        let top = top_chevron_bottom.map_or(self.layout.rect.top() + size.y / 2.0, |bottom| {
+            bottom + METRICS.space_1
+        });
+        let left = self.layout.rect.center().x - size.x / 2.0;
+        let pill = egui::Rect::from_min_size(egui::pos2(left, top), size);
+        fill_pill(self.painter, pill, color);
+        self.painter
+            .galley(pill.min + egui::vec2(pad, pad / 2.0), galley, color);
     }
 }
 
@@ -36,7 +86,7 @@ fn chevron(
     layout: &DomLayout,
     direction: Direction,
     delta_half_ticks: i64,
-) {
+) -> egui::Rect {
     // The triangle beside the number is what says "delta": every `format::write_*` opens by clearing
     // the buffer, so a prefix written here would be discarded.
     let label = format::render(|out| format::write_mid(out, delta_half_ticks));
@@ -69,6 +119,7 @@ fn chevron(
         galley,
         DARK.focus,
     );
+    pill
 }
 
 /// Painted as a shape rather than set as a glyph: the bundled default fonts have no face for the
@@ -95,48 +146,11 @@ pub(crate) fn triangle(
     egui::Shape::convex_polygon(points, color, egui::Stroke::NONE)
 }
 
-pub(crate) fn paint_hover(
-    painter: &egui::Painter,
-    layout: &DomLayout,
-    view: &DomView,
-    frame: &DomFrame<'_>,
-    pointer: Option<egui::Pos2>,
-) {
-    let Some(pointer) = pointer else { return };
-    let Some((row_rect, detail)) = hovered_row(layout, view, frame, pointer) else {
-        return;
-    };
-    painter.rect_filled(row_rect, 0.0, DARK.selected.gamma_multiply(0.12));
-    readout(painter, layout, pointer, &detail);
-}
-
 struct RowDetail {
     price: String,
     public: String,
     order: String,
     desired: String,
-}
-
-fn hovered_row(
-    layout: &DomLayout,
-    view: &DomView,
-    frame: &DomFrame<'_>,
-    pointer: egui::Pos2,
-) -> Option<(egui::Rect, RowDetail)> {
-    if !layout.rect.contains(pointer) {
-        return None;
-    }
-    if pointer.y < layout.separator.top() {
-        let index = ((layout.separator.top() - pointer.y) / layout.row_height).floor() as usize;
-        let row = view.ask_rows().get(index)?;
-        return Some((layout.ask_row(index), row_detail(row, frame)));
-    }
-    if pointer.y > layout.separator.bottom() {
-        let index = ((pointer.y - layout.separator.bottom()) / layout.row_height).floor() as usize;
-        let row = view.bid_rows().get(index)?;
-        return Some((layout.bid_row(index), row_detail(row, frame)));
-    }
-    None
 }
 
 fn row_detail(row: &DomRow, frame: &DomFrame<'_>) -> RowDetail {
@@ -196,29 +210,6 @@ fn readout(painter: &egui::Painter, layout: &DomLayout, pointer: egui::Pos2, det
             DARK.text_primary,
         );
     }
-}
-
-pub(crate) fn paint_status(
-    painter: &egui::Painter,
-    layout: &DomLayout,
-    view: &DomView,
-    frame: &DomFrame<'_>,
-) {
-    let Some((label, tone)) = text::status_pill(view.status, frame.stale_age) else {
-        return;
-    };
-    let color = DARK.tone(tone);
-    let galley = painter.layout_no_wrap(
-        label,
-        egui::FontId::proportional(METRICS.dom_qty_font),
-        color,
-    );
-    let pad = METRICS.dom_cell_pad;
-    let size = egui::vec2(galley.size().x + 2.0 * pad, galley.size().y + pad);
-    let center = egui::pos2(layout.rect.center().x, layout.rect.top() + size.y);
-    let pill = egui::Rect::from_center_size(center, size);
-    fill_pill(painter, pill, color);
-    painter.galley(pill.min + egui::vec2(pad, pad / 2.0), galley, color);
 }
 
 pub(crate) fn fill_pill(painter: &egui::Painter, rect: egui::Rect, border: egui::Color32) {

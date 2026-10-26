@@ -2,18 +2,23 @@
 //! read public, price, strategy. The strategy column shows real orders or desired quotes and never
 //! merges the two.
 
+use std::sync::Arc;
+
 use eframe::egui;
 
 use crate::ids::Price;
 use crate::msg::ui::UiBookSnapshot;
 
-use super::overlay;
+use super::geometry::DomLayout;
+pub(crate) use super::geometry::rows_that_fit;
+use super::overlay::OverlayPainter;
+use super::pin;
 use crate::ids::Qty;
 use crate::time::DurationUs;
 use crate::workstation::browser::theme::{self, DARK, METRICS};
 use crate::workstation::dom_view::{
-    DomGrouping, DomOverlay, DomRow, DomStatus, DomView, DomViewInput, FeedStatus,
-    MAX_ROWS_PER_SIDE, StrategyCell, build_dom_view, fit_rows,
+    DomGrouping, DomOverlay, DomRow, DomStatus, DomView, DomViewInput, FeedStatus, StrategyCell,
+    build_dom_view,
 };
 use crate::workstation::exec_model::OrderStatus;
 use crate::workstation::format;
@@ -21,6 +26,10 @@ use crate::workstation::text::{self, Ring};
 
 /// Floor on the row-rule fade: below it the ladder loses its structure rather than its noise.
 const MIN_GRID_FADE: f32 = 0.35;
+
+/// Text that does not fit its cell shrinks in steps of this size. The font cache keeps separate
+/// glyphs for every size, so fixed steps stop a resize from adding new glyphs on every frame.
+const FONT_STEP: f32 = 0.5;
 
 pub struct DomFrame<'a> {
     pub snapshot: Option<&'a UiBookSnapshot>,
@@ -43,93 +52,6 @@ impl DomFrame<'_> {
     }
 }
 
-pub(crate) struct DomLayout {
-    pub rect: egui::Rect,
-    pub separator: egui::Rect,
-    pub column_width: f32,
-    pub rows_per_side: usize,
-    pub row_height: f32,
-    fonts: RowFonts,
-    /// This row's height against the reference row. Everything sized per row shrinks by it.
-    scale: f32,
-}
-
-/// Row fonts shrink with the row so a dense ladder stays legible rather than overlapping. `tag` is
-/// `None` once the status word would fall under the legible floor: colour and the quote ring still
-/// carry status there, and the hover readout still spells it out in words.
-struct RowFonts {
-    price: f32,
-    qty: f32,
-    tag: Option<f32>,
-}
-
-impl RowFonts {
-    fn at(scale: f32) -> Self {
-        let scaled = |size: f32| (size * scale).max(METRICS.dom_min_font);
-        Self {
-            price: scaled(METRICS.dom_price_font),
-            qty: scaled(METRICS.dom_qty_font),
-            tag: Some(METRICS.dom_tag_font * scale).filter(|size| *size >= METRICS.dom_min_font),
-        }
-    }
-}
-
-fn separator_of(rect: egui::Rect) -> egui::Rect {
-    let height = rect.height() * METRICS.dom_separator_fraction;
-    let center_y = rect.center().y;
-    rect.with_min_y(center_y - height / 2.0)
-        .with_max_y(center_y + height / 2.0)
-}
-
-fn side_height(rect: egui::Rect) -> f32 {
-    (separator_of(rect).top() - rect.top()).max(0.0)
-}
-
-/// Rows per side `body` can paint without going under the legibility floor. The header's level
-/// control reports this when it is below the operator's choice, so a clamped ladder is visible
-/// rather than silently short.
-pub(crate) fn rows_that_fit(body: egui::Rect) -> usize {
-    fit_rows(
-        side_height(body),
-        MAX_ROWS_PER_SIDE,
-        METRICS.dom_row_height_floor,
-    )
-    .rows
-}
-
-impl DomLayout {
-    fn new(rect: egui::Rect, levels: usize) -> Self {
-        let fit = fit_rows(side_height(rect), levels, METRICS.dom_row_height_floor);
-        let scale = (fit.row_height / METRICS.dom_row_height).min(1.0);
-        Self {
-            rect,
-            separator: separator_of(rect),
-            column_width: rect.width() / 3.0,
-            rows_per_side: fit.rows,
-            row_height: fit.row_height,
-            fonts: RowFonts::at(scale),
-            scale,
-        }
-    }
-
-    pub(crate) fn ask_row(&self, index: usize) -> egui::Rect {
-        let bottom = self.separator.top() - index as f32 * self.row_height;
-        self.rect
-            .with_min_y(bottom - self.row_height)
-            .with_max_y(bottom)
-    }
-
-    pub(crate) fn bid_row(&self, index: usize) -> egui::Rect {
-        let top = self.separator.bottom() + index as f32 * self.row_height;
-        self.rect.with_min_y(top).with_max_y(top + self.row_height)
-    }
-
-    pub(crate) fn cell(&self, row: egui::Rect, column: usize) -> egui::Rect {
-        let left = self.rect.left() + column as f32 * self.column_width;
-        row.with_min_x(left).with_max_x(left + self.column_width)
-    }
-}
-
 pub fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &DomFrame<'_>) -> egui::Response {
     let response = ui.interact(rect, egui::Id::new("polysim-dom"), egui::Sense::hover());
     let painter = ui.painter().with_clip_rect(rect);
@@ -144,7 +66,7 @@ pub fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &DomFrame<'_>) -> egui:
     });
 
     painter.rect_filled(rect, 0.0, DARK.panel);
-    paint_grid(&painter, &layout);
+    paint_grid(&painter, &layout, rect);
     let mut ladder = LadderPainter {
         painter: &painter,
         layout: &layout,
@@ -156,15 +78,25 @@ pub fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &DomFrame<'_>) -> egui:
     paint_quote_rings(&painter, &layout, &view);
     ladder.separator(&view);
 
-    overlay::paint_offscreen(&painter, &layout, &view);
-    overlay::paint_hover(&painter, &layout, &view, frame, response.hover_pos());
-    overlay::paint_status(&painter, &layout, &view, frame);
+    let overlay = OverlayPainter {
+        painter: &painter,
+        layout: &layout,
+        view: &view,
+        frame,
+    };
+    let top_chevron_bottom = overlay.paint_offscreen();
+    let pinned = pin::pinned_point(&response, &layout, &view);
+    overlay.paint_hover(response.hover_pos().or(pinned));
+    overlay.paint_status(top_chevron_bottom);
 
     response
 }
 
-fn paint_grid(painter: &egui::Painter, layout: &DomLayout) {
-    let columns = (1..3).map(|column| layout.rect.left() + column as f32 * layout.column_width);
+fn paint_grid(painter: &egui::Painter, layout: &DomLayout, body: egui::Rect) {
+    // A ladder narrower than its body gets a rule on both outer edges, so it reads as one block.
+    let is_inset = layout.rect.width() < body.width();
+    let rules = if is_inset { 0..=3 } else { 1..=2 };
+    let columns = rules.map(|column| layout.rect.left() + column as f32 * layout.column_width);
     theme::rules_v(painter, columns, layout.rect.y_range());
     // A ladder at the height floor rules twice the lines one at the reference row does; at full
     // strength that many read as hatching, so the row rules fade as the rows compress.
@@ -210,14 +142,10 @@ impl LadderPainter<'_> {
 
     fn price(&mut self, row_rect: egui::Rect, tick_index: i64) {
         self.frame.write_row_price(&mut self.scratch, tick_index);
-        let center = self.layout.cell(row_rect, 1).center();
-        self.painter.text(
-            egui::pos2(center.x, theme::crisp(self.painter, center.y)),
-            egui::Align2::CENTER_CENTER,
-            self.scratch.as_str(),
-            egui::FontId::monospace(self.layout.fonts.price),
-            at_status(DARK.text_primary, self.status),
-        );
+        let cell = self.layout.cell(row_rect, 1);
+        let color = at_status(DARK.text_primary, self.status);
+        let galley = self.fitted(self.layout.fonts.price, cell, color);
+        self.put(galley, cell, (cell.center().x, egui::Align2::CENTER_CENTER));
     }
 
     fn public(&mut self, cell: egui::Rect, row: &DomRow, color: egui::Color32, edge: Edge) {
@@ -236,17 +164,17 @@ impl LadderPainter<'_> {
         };
         let color = at_status(color, self.status);
         self.write_qty(qty);
-        self.edge_qty(cell, color, edge);
+        let qty_width = self.edge_qty(cell, color, edge);
         let Some(size) = self.layout.fonts.tag else { return };
+        let tag =
+            self.painter
+                .layout_no_wrap(word.to_owned(), egui::FontId::proportional(size), color);
+        // The colour and the quote ring still show the status when the tag does not fit.
+        if qty_width + METRICS.space_1 + tag.size().x > room_of(cell) {
+            return;
+        }
         // The tag sits at the cell's far edge, opposite its quantity.
-        let (x, align) = edge.flip().anchor(cell);
-        self.painter.text(
-            egui::pos2(x, theme::crisp(self.painter, cell.center().y)),
-            align,
-            word,
-            egui::FontId::proportional(size),
-            color,
-        );
+        self.put(tag, cell, edge.flip().anchor(cell));
     }
 
     fn separator(&mut self, view: &DomView) {
@@ -258,24 +186,26 @@ impl LadderPainter<'_> {
                 .hline(separator.x_range(), theme::crisp(self.painter, y), border);
         }
 
-        format::write_opt_venue_mid(&mut self.scratch, view.mid_half_ticks, self.frame.tick);
-        let color = DARK.tone(text::mid_tone(view.mid_half_ticks));
-        let center = separator.center();
-        let y = theme::crisp(self.painter, center.y);
-        self.painter.text(
-            egui::pos2(center.x, y),
-            egui::Align2::CENTER_CENTER,
-            self.scratch.as_str(),
-            egui::FontId::monospace(METRICS.dom_mid_font),
-            color,
-        );
-        self.painter.text(
-            egui::pos2(separator.left() + METRICS.dom_cell_pad, y),
-            egui::Align2::LEFT_CENTER,
-            "MID",
+        let label = self.painter.layout_no_wrap(
+            "MID".to_owned(),
             egui::FontId::proportional(METRICS.dom_tag_font),
             DARK.text_secondary,
         );
+        // The mid is centred, so it leaves the label's width free on both sides.
+        let mid_cell = separator.shrink2(egui::vec2(METRICS.dom_cell_pad + label.size().x, 0.0));
+        format::write_opt_venue_mid(&mut self.scratch, view.mid_half_ticks, self.frame.tick);
+        let color = DARK.tone(text::mid_tone(view.mid_half_ticks));
+        let mid = self.fitted(METRICS.dom_mid_font, mid_cell, color);
+        self.put(
+            mid,
+            mid_cell,
+            (mid_cell.center().x, egui::Align2::CENTER_CENTER),
+        );
+        let label_anchor = (
+            separator.left() + METRICS.dom_cell_pad,
+            egui::Align2::LEFT_CENTER,
+        );
+        self.put(label, separator, label_anchor);
     }
 
     fn write_qty(&mut self, qty: Qty) {
@@ -287,16 +217,64 @@ impl LadderPainter<'_> {
         );
     }
 
-    fn edge_qty(&self, cell: egui::Rect, color: egui::Color32, edge: Edge) {
-        let (x, align) = edge.anchor(cell);
-        self.painter.text(
-            egui::pos2(x, theme::crisp(self.painter, cell.center().y)),
-            align,
-            self.scratch.as_str(),
-            egui::FontId::monospace(self.layout.fonts.qty),
-            color,
-        );
+    /// Paints the quantity in the scratch buffer at `edge` of `cell` and returns the width it took.
+    fn edge_qty(&self, cell: egui::Rect, color: egui::Color32, edge: Edge) -> f32 {
+        let galley = self.fitted(self.layout.fonts.qty, cell, color);
+        let width = galley.size().x;
+        self.put(galley, cell, edge.anchor(cell));
+        width
     }
+
+    /// Lays out the scratch text in monospace at `size`, or at the largest smaller step that fits
+    /// between `cell`'s paddings. It never goes below the legibility floor, so the text it returns
+    /// can still be too wide.
+    fn fitted(&self, size: f32, cell: egui::Rect, color: egui::Color32) -> Arc<egui::Galley> {
+        let room = room_of(cell);
+        let lay_out = |size: f32| {
+            self.painter
+                .layout_no_wrap(self.scratch.clone(), egui::FontId::monospace(size), color)
+        };
+        let galley = lay_out(size);
+        let width = galley.size().x;
+        if width <= room {
+            return galley;
+        }
+        let mut size = (size * room / width / FONT_STEP).floor() * FONT_STEP;
+        loop {
+            size = size.max(METRICS.dom_min_font);
+            let galley = lay_out(size);
+            if galley.size().x <= room || size <= METRICS.dom_min_font {
+                return galley;
+            }
+            size -= FONT_STEP;
+        }
+    }
+
+    /// Paints `galley` at `anchor`, centred vertically on `cell`.
+    fn put(&self, galley: Arc<egui::Galley>, cell: egui::Rect, anchor: (f32, egui::Align2)) {
+        let (x, align) = anchor;
+        let y = theme::crisp(self.painter, cell.center().y);
+        if galley.size().x <= room_of(cell) {
+            let rect = align.anchor_size(egui::pos2(x, y), galley.size());
+            self.painter
+                .galley(rect.min, galley, egui::Color32::PLACEHOLDER);
+            return;
+        }
+        // The text is too wide even at the smallest font. Keep the leading digits and cut the end
+        // at the cell edge, because a number without its first digits reads as a much smaller one.
+        let start = egui::pos2(
+            cell.left() + METRICS.dom_cell_pad,
+            y - galley.size().y / 2.0,
+        );
+        let clip = egui::Rect::from_x_y_ranges(cell.x_range(), self.painter.clip_rect().y_range());
+        self.painter
+            .with_clip_rect(clip)
+            .galley(start, galley, egui::Color32::PLACEHOLDER);
+    }
+}
+
+fn room_of(cell: egui::Rect) -> f32 {
+    (cell.width() - 2.0 * METRICS.dom_cell_pad).max(0.0)
 }
 
 #[derive(Clone, Copy)]

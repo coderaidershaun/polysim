@@ -76,6 +76,14 @@ pub fn scenes() -> Vec<Scene> {
                 grouped("bps 0.01 (0.11/row)", bps(100)),
             ],
         ),
+        scene(
+            "narrow stress - BTC",
+            vec![
+                narrow_stress(),
+                narrow_stale_off_screen(),
+                narrow_five_decimals(),
+            ],
+        ),
     ]
 }
 
@@ -326,8 +334,8 @@ fn working_orders() -> Variant {
             Some((px(65987), qm(QUOTE_QTY_MILLI))),
             Some((px(65995), qm(QUOTE_QTY_MILLI))),
         )),
-        bid_orders: vec![order(1, 65989, QUOTE_QTY_MILLI, OrderStatus::Confirmed)],
-        ask_orders: vec![order(2, 65993, QUOTE_QTY_MILLI, OrderStatus::InFlight)],
+        bid_orders: vec![order(1, px(65989), QUOTE_QTY_MILLI, OrderStatus::Confirmed)],
+        ask_orders: vec![order(2, px(65993), QUOTE_QTY_MILLI, OrderStatus::InFlight)],
         ..valid(&bids, &asks)
     }
 }
@@ -337,16 +345,16 @@ fn working_orders() -> Variant {
 fn order_off_screen() -> Variant {
     Variant {
         label: "lost order off-screen outranks want",
-        bid_orders: vec![order(3, 65950, QUOTE_QTY_MILLI, OrderStatus::Lost)],
+        bid_orders: vec![order(3, px(65950), QUOTE_QTY_MILLI, OrderStatus::Lost)],
         ..working_orders()
     }
 }
 
-fn order(id: u64, tick: i64, milli: i64, status: OrderStatus) -> OrderCell {
+fn order(id: u64, price: Price, milli: i64, status: OrderStatus) -> OrderCell {
     OrderCell {
         client_id: ClientOrderId(id),
         status,
-        price: px(tick),
+        price,
         qty: qm(milli),
         filled: Qty(0),
         at: TsUs::from_micros(0),
@@ -385,15 +393,102 @@ fn variant(snapshot: Option<UiBookSnapshot>) -> Variant {
 /// Levels on the grouped scene's 0.01 grid, written as signed tick offsets from its mid so a row
 /// reads as its distance from the touch rather than as an eight-digit tick index.
 fn grouped_levels(offsets: &[(i64, i64)]) -> Vec<Level> {
+    levels_from(GROUPED_MID_TICK, offsets)
+}
+
+fn grouped_px(offset_ticks: i64) -> Price {
+    grid_px(GROUPED_MID_TICK + offset_ticks)
+}
+
+fn levels_from(base_tick: i64, offsets: &[(i64, i64)]) -> Vec<Level> {
     offsets
         .iter()
         .map(|&(offset, milli)| Level {
-            price: grouped_px(offset),
+            price: grid_px(base_tick + offset),
             qty: qm(milli),
         })
         .collect()
 }
 
-fn grouped_px(offset_ticks: i64) -> Price {
-    Price((GROUPED_MID_TICK + offset_ticks) * GROUPED_TICK.0)
+fn grid_px(tick: i64) -> Price {
+    Price(tick * GROUPED_TICK.0)
+}
+
+/// The best bid and ask of a BTC-sized book on the 0.01 grid: 117234.56 and 117234.57.
+const NARROW_BID_TICK: i64 = 11_723_456;
+const NARROW_ASK_TICK: i64 = 11_723_457;
+
+/// Six-digit quantities at a BTC-sized price, the widest strings a 300-wide ladder has to hold.
+/// Orders with six, five and one whole digits show which status tags still fit beside them.
+fn narrow_stress() -> Variant {
+    let asks = levels_from(
+        NARROW_ASK_TICK,
+        &[
+            (0, 123_456_789),
+            (1, 85_000),
+            (2, 987_654_321),
+            (3, 1_250),
+            (4, 250_000_000),
+            (5, 6_400),
+            (7, 42_100),
+            (11, 98_765_432),
+        ],
+    );
+    let bids = levels_from(
+        NARROW_BID_TICK,
+        &[
+            (0, 654_321_098),
+            (-1, 7_800),
+            (-2, 123_456_789),
+            (-3, 450),
+            (-5, 250_000_000),
+            (-6, 3_300),
+            (-8, 15_000),
+            (-10, 987_654_321),
+        ],
+    );
+    let bid_px = |offset: i64| grid_px(NARROW_BID_TICK + offset);
+    let ask_px = |offset: i64| grid_px(NARROW_ASK_TICK + offset);
+    Variant {
+        label: "six-digit qty, every tag",
+        tick: GROUPED_TICK,
+        price_decimals: price_decimals(GROUPED_TICK),
+        quote: Some(DomQuote::top(
+            Some((bid_px(-4), qm(250_000))),
+            Some((ask_px(8), qm(1_500))),
+        )),
+        bid_orders: vec![
+            order(1, bid_px(-2), 123_456_789, OrderStatus::Confirmed),
+            order(3, bid_px(-6), 98_765_432, OrderStatus::Lost),
+        ],
+        ask_orders: vec![
+            order(2, ask_px(1), 9_000, OrderStatus::InFlight),
+            order(4, ask_px(4), 250, OrderStatus::Confirmed),
+        ],
+        ..valid(&bids, &asks)
+    }
+}
+
+/// A stale feed with the desired ask far above the window and the desired bid far below it, so the
+/// badge and both chevrons paint at once.
+fn narrow_stale_off_screen() -> Variant {
+    Variant {
+        label: "stale, quotes off both edges",
+        feed: FeedStatus::Stale,
+        stale_age: Some(DurationUs::from_millis(1_234)),
+        quote: Some(DomQuote::top(
+            Some((grid_px(NARROW_BID_TICK - 40), qm(250_000))),
+            Some((grid_px(NARROW_ASK_TICK + 40), qm(1_500))),
+        )),
+        ..narrow_stress()
+    }
+}
+
+/// The same book at five quantity decimals, where "123456.78900" is twelve characters long.
+fn narrow_five_decimals() -> Variant {
+    Variant {
+        label: "five qty decimals",
+        qty_decimals: 5,
+        ..narrow_stress()
+    }
 }
