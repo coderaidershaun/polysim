@@ -16,7 +16,10 @@ pub(crate) use dom::{
     status_pill,
 };
 pub(crate) use latency::{LATENCY_ROWS, LATENCY_SHORT_TITLE, LATENCY_TITLE, summary_cells};
-pub(crate) use link::{button_label, is_peer_clickable, link_chips};
+pub(crate) use link::{
+    ChipWords, NO_ENGINE, PEER_HOVER, button_label, confirm_label, connection_words, control_words,
+    is_peer_clickable, peer_words, phase_words, run_words,
+};
 pub(crate) use monitor::{
     BALANCE_DECIMALS, Lane, VALUE_DECIMALS, account_captions, account_notes, asset_label,
     cell_tone, delta_hover, feature_hover, feature_name, reject_display, summary_caption,

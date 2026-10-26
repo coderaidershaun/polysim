@@ -21,6 +21,7 @@ pub mod format;
 mod history;
 pub mod link_model;
 pub mod link_session;
+pub mod link_view;
 pub mod model;
 pub mod monitor;
 pub(crate) mod text;

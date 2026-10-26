@@ -1,5 +1,5 @@
-//! The connection strip's words: the peer, connection, phase, run and control chips, and what the
-//! run button says.
+//! The connection strip's words: each chip in a full and a short form, and what the run button says
+//! before and after it is armed.
 
 use crate::link::{RunPhase, RunState};
 use crate::workstation::format::MISSING;
@@ -7,24 +7,44 @@ use crate::workstation::link_model::{ConnectionState, ControlVerdict, LinkStatus
 
 use super::tone::Tone;
 
-/// The chips in the order the link bar lays them out.
-pub(crate) fn link_chips(status: &LinkStatus) -> Vec<(String, Tone)> {
-    let mut chips = vec![(peer_label(status), Tone::Text)];
-    let (connection, tone) = connection_label(status.connection);
-    chips.push((connection.to_owned(), tone));
-    if let Some(phase) = status.phase {
-        let (label, tone) = phase_label(phase);
-        chips.push((label.to_owned(), tone));
-    }
-    chips.push((run_label(status), run_tone(status)));
-    chips.push((control_label(status), control_tone(status)));
-    chips
+pub(crate) const NO_ENGINE: &str = "no engine attached";
+pub(crate) const PEER_HOVER: &str = "attach to the next trading engine";
+
+/// One chip's text. A short form is never longer than the full one, and equals it when the chip has
+/// nothing to cut.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ChipWords {
+    pub(crate) full: String,
+    pub(crate) short: String,
+    pub(crate) tone: Tone,
 }
 
-pub(crate) fn button_label(target: RunState) -> &'static str {
+impl ChipWords {
+    fn new(full: impl Into<String>, short: impl Into<String>, tone: Tone) -> Self {
+        Self {
+            full: full.into(),
+            short: short.into(),
+            tone,
+        }
+    }
+
+    fn same(text: impl Into<String>, tone: Tone) -> Self {
+        let text = text.into();
+        Self::new(text.clone(), text, tone)
+    }
+}
+
+pub(crate) const fn button_label(target: RunState) -> &'static str {
     match target {
         RunState::Idle => "STOP",
         RunState::Running => "START",
+    }
+}
+
+pub(crate) const fn confirm_label(target: RunState) -> &'static str {
+    match target {
+        RunState::Idle => "CONFIRM STOP",
+        RunState::Running => "CONFIRM START",
     }
 }
 
@@ -32,71 +52,72 @@ pub(crate) fn is_peer_clickable(status: &LinkStatus) -> bool {
     status.peer_count >= 2
 }
 
-fn peer_label(status: &LinkStatus) -> String {
-    if status.peer_count < 2 {
-        return format!("engine {}", status.peer);
+pub(crate) fn peer_words(status: &LinkStatus) -> ChipWords {
+    let full = format!("engine {}", status.peer);
+    let short = format!(":{}", status.peer.port());
+    if !is_peer_clickable(status) {
+        return ChipWords::new(full, short, Tone::Text);
     }
-    format!(
-        "engine {} [{}/{}]",
-        status.peer,
-        status.peer_index + 1,
-        status.peer_count
+    let place = format!("[{}/{}]", status.peer_index + 1, status.peer_count);
+    ChipWords::new(
+        format!("{full} {place}"),
+        format!("{short} {place}"),
+        Tone::Text,
     )
 }
 
-fn connection_label(connection: ConnectionState) -> (&'static str, Tone) {
-    match connection {
-        ConnectionState::Connecting => ("CONNECTING", Tone::Text2),
-        ConnectionState::Live => ("LIVE", Tone::Positive),
-        ConnectionState::Stale => ("STALE", Tone::Stale),
+pub(crate) fn connection_words(status: &LinkStatus) -> ChipWords {
+    match status.connection {
+        ConnectionState::Connecting => ChipWords::new("CONNECTING", "CONN", Tone::Text2),
+        ConnectionState::Live => ChipWords::same("LIVE", Tone::Positive),
+        ConnectionState::Stale => ChipWords::same("STALE", Tone::Stale),
     }
 }
 
-fn phase_label(phase: RunPhase) -> (&'static str, Tone) {
-    match phase {
+pub(crate) fn phase_words(status: &LinkStatus) -> Option<ChipWords> {
+    let (word, tone) = match status.phase? {
         RunPhase::Starting => ("starting", Tone::Text2),
         RunPhase::Ready => ("ready", Tone::Text2),
         RunPhase::Draining => ("draining", Tone::Warning),
         RunPhase::Stopped => ("stopped", Tone::Invalid),
-    }
+    };
+    Some(ChipWords::same(word, tone))
 }
 
-fn run_label(status: &LinkStatus) -> String {
-    match status.reported_state {
-        Some(RunState::Running) => "run RUNNING".to_owned(),
-        Some(RunState::Idle) => "run IDLE".to_owned(),
-        None => format!("run {MISSING}"),
-    }
+pub(crate) fn run_words(status: &LinkStatus) -> ChipWords {
+    let Some(state) = status.reported_state else {
+        return ChipWords::same(format!("run {MISSING}"), Tone::Text2);
+    };
+    let word = state_word(state);
+    let tone = match state {
+        RunState::Running => Tone::Positive,
+        RunState::Idle => Tone::Warning,
+    };
+    ChipWords::new(format!("run {word}"), word, tone)
 }
 
-fn run_tone(status: &LinkStatus) -> Tone {
-    match status.reported_state {
-        Some(RunState::Running) => Tone::Positive,
-        Some(RunState::Idle) => Tone::Warning,
-        None => Tone::Text2,
-    }
-}
-
-fn control_label(status: &LinkStatus) -> String {
-    match (status.control, status.asserted_state) {
-        (ControlVerdict::Lost { holder_epoch }, _) => {
-            format!("control LOST to epoch {holder_epoch}")
-        }
-        (ControlVerdict::NoOpinion, _) | (_, None) => "control none".to_owned(),
-        (ControlVerdict::Applied, Some(state)) => format!("control applied {}", state_word(state)),
-        (ControlVerdict::Pending, Some(state)) => {
-            format!("control asserting {}", state_word(state))
-        }
-    }
-}
-
-fn control_tone(status: &LinkStatus) -> Tone {
-    match status.control {
+pub(crate) fn control_words(status: &LinkStatus) -> ChipWords {
+    let tone = match status.control {
         ControlVerdict::NoOpinion => Tone::Text2,
         ControlVerdict::Pending => Tone::Warning,
         ControlVerdict::Applied => Tone::Positive,
         ControlVerdict::Lost { .. } => Tone::Invalid,
+    };
+    match (status.control, status.asserted_state) {
+        (ControlVerdict::Lost { holder_epoch }, _) => ChipWords::new(
+            format!("control LOST to epoch {holder_epoch}"),
+            "control LOST",
+            tone,
+        ),
+        (ControlVerdict::NoOpinion, _) | (_, None) => ChipWords::same("control none", tone),
+        (ControlVerdict::Applied, Some(state)) => control_verb_words("applied", state, tone),
+        (ControlVerdict::Pending, Some(state)) => control_verb_words("asserting", state, tone),
     }
+}
+
+fn control_verb_words(verb: &str, state: RunState, tone: Tone) -> ChipWords {
+    let short = format!("{verb} {}", state_word(state));
+    ChipWords::new(format!("control {short}"), short, tone)
 }
 
 fn state_word(state: RunState) -> &'static str {

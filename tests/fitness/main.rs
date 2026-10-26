@@ -54,6 +54,7 @@ mod hawkes_alloc;
 mod ingress_order;
 mod kyles_lambda_alloc;
 mod latency_metrics;
+mod link_bar;
 mod link_control;
 mod link_ingress;
 mod link_session;
