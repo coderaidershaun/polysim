@@ -16,8 +16,8 @@ use crate::workstation::history::{BoundedHistory, grow_to};
 const WINDOW_US: u64 = 300_000_000;
 
 /// Caps the ring so a fast spin cannot size it by accident. 3,000 holds the whole window at a 100
-/// ms spin, about three times the 1,060 pixels the plot spans at the minimum layout width; a 1 ms
-/// spin would otherwise ask for 300,000.
+/// ms spin, which is more buckets than the widest plot has points. A 1 ms spin would otherwise ask
+/// for 300,000.
 const MAX_BUCKETS_PER_INSTRUMENT: usize = 3_000;
 
 /// Fill markers allowed per bucket, which sizes the fill ring from the bucket ring. The recorder

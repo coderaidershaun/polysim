@@ -15,7 +15,7 @@ pub(crate) use dom::{
     Ring, grouping_label, grouping_table, mid_tone, offscreen_of, order_tone, ring, row_price,
     status_pill,
 };
-pub(crate) use latency::{LATENCY_COLUMNS, LATENCY_ROWS, LATENCY_TITLE, latency_cells};
+pub(crate) use latency::{LATENCY_ROWS, LATENCY_SHORT_TITLE, LATENCY_TITLE, summary_cells};
 pub(crate) use link::{button_label, is_peer_clickable, link_chips};
 pub(crate) use monitor::{
     BALANCE_DECIMALS, Lane, VALUE_DECIMALS, account_captions, account_notes, asset_label,
@@ -28,7 +28,7 @@ pub(crate) use tone::Tone;
 
 // Only the painters name these types.
 #[cfg(target_arch = "wasm32")]
-pub(crate) use latency::Flow;
+pub(crate) use latency::{Column, Flow};
 #[cfg(target_arch = "wasm32")]
 pub(crate) use rows::TagColumn;
 #[cfg(target_arch = "wasm32")]

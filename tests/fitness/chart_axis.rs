@@ -4,7 +4,9 @@
 //! is a tick drawn outside the plotted range or a label that quietly rounds — a lie painted over live
 //! data rather than a crash, which is exactly what a fitness pin exists to catch.
 
-use polysim::workstation::chart::view::{ChartDomain, bucket_at_fraction, x_fraction};
+use polysim::workstation::chart::view::{
+    ChartBounds, ChartDomain, bucket_at_fraction, value_ticks, x_fraction, y_fraction,
+};
 use polysim::workstation::format::{
     axis_ticks, legible_tick_ceiling, quote_axis_decimals, write_quote_amount,
 };
@@ -47,10 +49,11 @@ const AXIS_FONT: f32 = 11.0;
 const IDEAL_PITCH: f32 = AXIS_FONT * 2.0;
 const MINIMUM_PITCH: f32 = AXIS_FONT * 1.2;
 
-/// The lower chart's plot in the default window: 30% of a ~400pt left-panel body, less the 30pt
-/// sub-header. This chart must show a y-axis, so the geometry it actually ships at is pinned rather
-/// than left to follow from the arithmetic.
-const EXPOSURE_PLOT_HEIGHT: f32 = 90.0;
+/// The exposure chart's plot at the smallest pane that shows the whole latency grid: a 360pt pane
+/// leaves its chart 100pt, less the frame's 10pt of padding above and below. This chart must show a
+/// y-axis, so the geometry it actually ships at is pinned rather than left to follow from the
+/// arithmetic.
+const EXPOSURE_PLOT_HEIGHT: f32 = 80.0;
 
 struct TickCase {
     name: &'static str,
@@ -160,8 +163,11 @@ fn axis_tick_generation_legibility_and_label_rendering() {
 
     // the_exposure_chart_shows_an_axis_at_its_default_height: the exposure chart at its shipped size
     // carries the axis it is required to show.
-    let ceiling = legible_tick_ceiling(EXPOSURE_PLOT_HEIGHT, IDEAL_PITCH, MINIMUM_PITCH);
-    let ticks: Vec<i64> = axis_ticks(-5_000_000, 5_000_000, ceiling).collect();
+    let exposure_bounds = ChartBounds {
+        low: -5_000_000,
+        high: 5_000_000,
+    };
+    let ticks: Vec<i64> = value_ticks(exposure_bounds, EXPOSURE_PLOT_HEIGHT, AXIS_FONT).collect();
     assert!(
         ticks.len() >= 3,
         "a {EXPOSURE_PLOT_HEIGHT}pt exposure plot drew {} label(s). This axis was ASKED FOR — \
@@ -230,6 +236,119 @@ fn a_ceiling_below_the_floor_still_draws_a_real_axis() {
             );
         }
     }
+}
+
+/// The plot height below which `value_ticks` draws no labels, computed with the painter's own
+/// expression: the f32 product is 79.200005, not the 79.2 a literal would give.
+const LEGIBLE_AXIS_HEIGHT: f32 = AXIS_FONT * 1.2 * 6.0;
+
+/// The mid and risk plot heights the pane budget gives at a spread of real pane sizes.
+const PANE_PLOT_HEIGHTS: [f32; 14] = [
+    20.0, 79.0, 80.0, 97.0, 110.0, 114.0, 179.0, 187.0, 277.0, 337.0, 397.0, 547.0, 757.0, 1037.0,
+];
+
+/// A half-tick mid window, a one-spread window, a whole-unit exposure window and the narrow window
+/// where a five-label axis spans nearly six steps.
+const AXIS_RANGES: [ChartBounds; 4] = [
+    ChartBounds {
+        low: 174,
+        high: 306,
+    },
+    ChartBounds {
+        low: 201,
+        high: 203,
+    },
+    ChartBounds {
+        low: -250_000_000,
+        high: 750_000_000,
+    },
+    ChartBounds {
+        low: -95,
+        high: 495,
+    },
+];
+
+/// How far apart, in points, the painter puts each pair of adjacent labels on a plot `height` tall.
+fn label_spacing(ticks: &[i64], bounds: ChartBounds, height: f32) -> Vec<f32> {
+    ticks
+        .windows(2)
+        .map(|pair| (y_fraction(pair[1], bounds) - y_fraction(pair[0], bounds)) * height)
+        .collect()
+}
+
+/// Draws the axis of a `height` plot over `bounds`, asserts the rules that hold at every height,
+/// and returns how many labels it drew.
+fn assert_axis_is_legible(bounds: ChartBounds, height: f32) -> usize {
+    let ticks: Vec<i64> = value_ticks(bounds, height, AXIS_FONT).collect();
+    if height < LEGIBLE_AXIS_HEIGHT {
+        assert!(
+            ticks.is_empty(),
+            "a {height}pt plot is under {LEGIBLE_AXIS_HEIGHT}pt and drew {ticks:?} over {bounds:?}"
+        );
+        return 0;
+    }
+    assert!(
+        ticks.len() >= 2,
+        "a {height}pt plot drew {} label(s) over {bounds:?}; one number reads as a broken axis",
+        ticks.len()
+    );
+    for spacing in label_spacing(&ticks, bounds, height) {
+        assert!(
+            spacing >= MINIMUM_PITCH - 1e-3,
+            "labels {spacing}pt apart on a {height}pt plot over {bounds:?}, under the \
+             {MINIMUM_PITCH}pt they need to be read"
+        );
+    }
+    ticks.len()
+}
+
+/// FITNESS: the value axis never crowds its labels and thins out as the plot shrinks. Spacing is
+/// measured the way the painter places a label (through `y_fraction`), at the plot heights the pane
+/// budget really produces and across a 0..1600pt sweep. Below six legible pitches the generator's
+/// floor of five labels could overlap, so the axis draws none; from there up it draws at least two
+/// and never fewer as the plot grows.
+#[test]
+fn value_axis_density_at_the_pane_plot_sizes() {
+    for bounds in AXIS_RANGES {
+        for height in PANE_PLOT_HEIGHTS {
+            assert_axis_is_legible(bounds, height);
+        }
+        let mut previous_count = 0;
+        for half_points in 0..=3_200u32 {
+            let height = half_points as f32 / 2.0;
+            let count = assert_axis_is_legible(bounds, height);
+            assert!(
+                count >= previous_count,
+                "a {height}pt plot drew {count} label(s) after a shorter one drew {previous_count} \
+                 over {bounds:?}"
+            );
+            previous_count = count;
+        }
+    }
+
+    let crowded = ChartBounds {
+        low: -95,
+        high: 495,
+    };
+    let generator_alone = axis_ticks(
+        crowded.low,
+        crowded.high,
+        legible_tick_ceiling(79.0, IDEAL_PITCH, MINIMUM_PITCH),
+    );
+    assert_eq!(
+        generator_alone.count(),
+        5,
+        "the range must be one where the generator alone would put five labels on a 79pt plot"
+    );
+    assert_eq!(
+        value_ticks(crowded, 79.0, AXIS_FONT).count(),
+        0,
+        "five labels on 79pt can sit 13pt apart or less, so the axis draws none"
+    );
+    assert!(
+        value_ticks(crowded, 80.0, AXIS_FONT).count() >= 2,
+        "80pt is the risk chart's plot at the smallest pane that shows the latency grid"
+    );
 }
 
 proptest! {

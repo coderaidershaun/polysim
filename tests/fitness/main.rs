@@ -16,6 +16,7 @@ mod binance_sign;
 mod book_reconstruction;
 mod cargo_bins;
 mod chart_axis;
+mod chart_pane;
 mod chart_projection;
 mod config_guards;
 mod dispatch_replay;

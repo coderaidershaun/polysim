@@ -4,7 +4,7 @@
 use crate::ids::Price;
 use crate::workstation::chart::position_view::QuoteBounds;
 use crate::workstation::chart::view::{ChartBounds, ChartDomain};
-use crate::workstation::format;
+use crate::workstation::format::{self, AxisTicks};
 
 use super::tone::Tone;
 
@@ -14,14 +14,9 @@ pub(crate) enum AxisLabels {
     QuoteAmount,
 }
 
-/// The labelled ticks of a value axis, bottom to top. The painter says how many fit; this says
-/// which values and what they read.
-pub(crate) fn axis_labels(
-    bounds: ChartBounds,
-    ceiling: usize,
-    labels: AxisLabels,
-) -> Vec<(i64, String)> {
-    let ticks = format::axis_ticks(bounds.low, bounds.high, ceiling);
+/// The labelled ticks of a value axis, bottom to top. The ticks decide which values show, and this
+/// decides how each one reads.
+pub(crate) fn axis_labels(ticks: AxisTicks, labels: AxisLabels) -> Vec<(i64, String)> {
     let decimals = format::quote_axis_decimals(ticks.step());
     ticks
         .map(|value| {

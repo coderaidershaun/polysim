@@ -13,7 +13,8 @@ use polysim::workstation::chart::model::{
     BookContinuity, ChartBucket, ChartFill, ChartModel, bucket_open_ts,
 };
 use polysim::workstation::chart::view::{
-    ChartBounds, ChartDomain, bounds, domain, segment_points, visible_fills, x_fraction, y_fraction,
+    Candle, CandleGrouping, ChartBounds, ChartDomain, bounds, domain, segment_points,
+    visible_fills, x_fraction, y_fraction,
 };
 use proptest::prelude::*;
 
@@ -564,6 +565,285 @@ fn chart_view_fills_bounds_and_fractions() {
         0.5,
         "a zero-height window reads as its own centre rather than dividing by zero"
     );
+}
+
+/// Mirrors the chart view's narrowest candle, in points.
+const MIN_CANDLE_PITCH: f64 = 4.0;
+
+/// One bucket of the candle walk: its commits in order as (bid, ask), and whether its first commit
+/// reveals a lost snapshot.
+struct WalkBucket {
+    index: u64,
+    commits: &'static [(i64, i64)],
+    has_gap_before: bool,
+}
+
+/// Three buckets to a candle at a 450 pt plot. The walk starts off a group boundary and ends on
+/// the window's last slot, so both end candles are clamped. It holds a missing spin inside a group
+/// (3004), one on a group boundary (3006), a lost snapshot revealed inside a group (3010) and a
+/// long hole before 3299.
+const WALK: [WalkBucket; 11] = [
+    WalkBucket {
+        index: 3001,
+        commits: &[(100, 102)],
+        has_gap_before: false,
+    },
+    WalkBucket {
+        index: 3002,
+        commits: &[(101, 103)],
+        has_gap_before: false,
+    },
+    WalkBucket {
+        index: 3003,
+        commits: &[(100, 102), (104, 106)],
+        has_gap_before: false,
+    },
+    WalkBucket {
+        index: 3005,
+        commits: &[(95, 97), (99, 101)],
+        has_gap_before: false,
+    },
+    WalkBucket {
+        index: 3007,
+        commits: &[(110, 112)],
+        has_gap_before: false,
+    },
+    WalkBucket {
+        index: 3008,
+        commits: &[(111, 113)],
+        has_gap_before: false,
+    },
+    WalkBucket {
+        index: 3009,
+        commits: &[(112, 114)],
+        has_gap_before: false,
+    },
+    WalkBucket {
+        index: 3010,
+        commits: &[(108, 110), (109, 111)],
+        has_gap_before: true,
+    },
+    WalkBucket {
+        index: 3011,
+        commits: &[(110, 112)],
+        has_gap_before: false,
+    },
+    WalkBucket {
+        index: 3299,
+        commits: &[(90, 92)],
+        has_gap_before: false,
+    },
+    WalkBucket {
+        index: 3300,
+        commits: &[(91, 93)],
+        has_gap_before: false,
+    },
+];
+
+const WALK_PLOT_WIDTH: f32 = 450.0;
+
+fn walked_chart() -> ChartModel {
+    let mut chart = chart_model(1);
+    for bucket in &WALK {
+        for (position, &(bid, ask)) in bucket.commits.iter().enumerate() {
+            let is_revealing = bucket.has_gap_before && position == 0;
+            let continuity =
+                if is_revealing { BookContinuity::GapBefore } else { BookContinuity::Continuous };
+            chart.apply_book(&valid_book(0, bucket.index, bid, ask), continuity);
+        }
+    }
+    chart
+}
+
+fn candles_at(chart: &ChartModel, domain: ChartDomain, plot_width: f32) -> Vec<Candle> {
+    CandleGrouping::for_plot(domain, plot_width).candles(chart, InstrumentId(0))
+}
+
+/// FITNESS: grouping buckets into candles keeps each candle at least four points wide, and no
+/// wider than it must be. Past that, a candle is the extremes and the ends of its buckets, a break
+/// is drawn before it exactly where the line would have broken, and sliding the window never
+/// changes a candle it still holds whole. A grouping that smeared candles into dots, or one that
+/// redrew history as the window slid, would paint a price the market never made.
+#[test]
+fn candles_keep_their_pitch_and_their_extremes() {
+    for width in [1u64, 2, 3, 7, 50, 299, 300, 301, 1_000, 3_000] {
+        let domain = ChartDomain {
+            first: 1_000,
+            last: 1_000 + width - 1,
+        };
+        for whole_points in 100..=2_400u32 {
+            let plot_width = whole_points as f32;
+            let per_candle = CandleGrouping::for_plot(domain, plot_width).buckets_per_candle();
+            let pitch = |buckets: u64| buckets as f64 * f64::from(plot_width) / width as f64;
+            assert!(
+                pitch(per_candle) >= MIN_CANDLE_PITCH,
+                "{per_candle} bucket(s) per candle gives {} pt at {plot_width}pt over {width} slots",
+                pitch(per_candle)
+            );
+            if pitch(1) >= MIN_CANDLE_PITCH {
+                assert_eq!(
+                    per_candle, 1,
+                    "one bucket already has the room at {plot_width}pt over {width}"
+                );
+            } else {
+                assert!(
+                    pitch(per_candle - 1) < MIN_CANDLE_PITCH,
+                    "{per_candle} per candle is more than {plot_width}pt over {width} slots needs"
+                );
+            }
+        }
+    }
+
+    let chart = walked_chart();
+    let window = domain(&chart, InstrumentId(0)).expect("a series to project");
+    assert_eq!(
+        window,
+        ChartDomain {
+            first: 3_001,
+            last: 3_300
+        }
+    );
+    let grouping = CandleGrouping::for_plot(window, WALK_PLOT_WIDTH);
+    assert_eq!(grouping.buckets_per_candle(), 3);
+
+    let candles = grouping.candles(&chart, InstrumentId(0));
+    let shapes: Vec<(u64, u64, bool)> = candles
+        .iter()
+        .map(|candle| (candle.first, candle.last, candle.has_break_before))
+        .collect();
+    assert_eq!(
+        shapes,
+        vec![
+            (3_001, 3_002, false),
+            (3_003, 3_005, false),
+            (3_006, 3_008, true),
+            (3_009, 3_011, true),
+            (3_297, 3_299, true),
+            (3_300, 3_300, false),
+        ],
+        "the window's first candle never breaks; a missing spin inside a group is absorbed; one on \
+         a group boundary, a lost snapshot inside a group and a long hole each break before it"
+    );
+    let prices: Vec<(i64, i64, i64, i64)> = candles
+        .iter()
+        .map(|candle| {
+            (
+                candle.open_half_ticks,
+                candle.high_half_ticks,
+                candle.low_half_ticks,
+                candle.close_half_ticks,
+            )
+        })
+        .collect();
+    assert_eq!(
+        prices,
+        vec![
+            (202, 204, 202, 204),
+            (202, 210, 192, 200),
+            (222, 224, 222, 224),
+            (226, 226, 218, 222),
+            (182, 182, 182, 182),
+            (184, 184, 184, 184),
+        ],
+        "open from the first bucket present, close from the last, extremes from all of them"
+    );
+
+    let visible: Vec<_> = segment_points(&chart, InstrumentId(0), window).collect();
+    for point in &visible {
+        let owners = candles
+            .iter()
+            .filter(|candle| (candle.first..=candle.last).contains(&point.bucket.index))
+            .count();
+        assert_eq!(
+            owners, 1,
+            "bucket {} must sit in exactly one candle",
+            point.bucket.index
+        );
+    }
+    for candle in &candles {
+        assert!(
+            candle.first % 3 == 0 || candle.first == window.first,
+            "a candle starts on a multiple of three or at the window's edge, got {}",
+            candle.first
+        );
+    }
+
+    let single = candles_at(&chart, window, 2_308.0);
+    assert_eq!(
+        single.len(),
+        visible.len(),
+        "with room to spare every bucket is its own candle"
+    );
+    for (position, (candle, point)) in single.iter().zip(&visible).enumerate() {
+        let bucket = point.bucket;
+        assert_eq!((candle.first, candle.last), (bucket.index, bucket.index));
+        assert_eq!(
+            (
+                candle.open_half_ticks,
+                candle.high_half_ticks,
+                candle.low_half_ticks,
+                candle.close_half_ticks
+            ),
+            (
+                bucket.open_half_ticks,
+                bucket.high_half_ticks,
+                bucket.low_half_ticks,
+                bucket.close_half_ticks
+            )
+        );
+        assert_eq!(
+            candle.has_break_before,
+            position > 0 && point.is_run_start,
+            "bucket {}: one bucket per candle breaks where the line breaks",
+            bucket.index
+        );
+    }
+
+    for slide in 1..=7u64 {
+        let slid = ChartDomain {
+            first: window.first + slide,
+            last: window.last + slide,
+        };
+        let after = candles_at(&chart, slid, WALK_PLOT_WIDTH);
+        let mut compared = 0;
+        for before in candles.iter().filter(|candle| candle.first >= slid.first) {
+            let whole = before.first % 3 == 0 && before.last == before.first + 2;
+            let Some(same) = after.iter().find(|candle| candle.first == before.first) else {
+                assert!(
+                    !whole,
+                    "a whole candle at {} vanished after sliding {slide}",
+                    before.first
+                );
+                continue;
+            };
+            if !whole {
+                continue;
+            }
+            compared += 1;
+            assert_eq!(
+                (
+                    same.last,
+                    same.open_half_ticks,
+                    same.high_half_ticks,
+                    same.low_half_ticks,
+                    same.close_half_ticks
+                ),
+                (
+                    before.last,
+                    before.open_half_ticks,
+                    before.high_half_ticks,
+                    before.low_half_ticks,
+                    before.close_half_ticks
+                ),
+                "the candle at {} changed when the window slid {slide}",
+                before.first
+            );
+        }
+        assert!(
+            compared >= 2,
+            "sliding {slide} compared only {compared} whole candle(s)"
+        );
+    }
 }
 
 proptest! {

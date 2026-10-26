@@ -3,10 +3,22 @@
 
 use super::model::{ChartBucket, ChartFill, ChartModel};
 use crate::ids::InstrumentId;
+use crate::workstation::format::{self, AxisTicks};
 
 /// Air above and below the visible extremes, as a percentage of their span, so the line never runs
 /// along the plot border.
 const PADDING_PERCENT: i128 = 5;
+
+/// The label spacing a value axis aims for, in font heights, and the tightest it stays readable at.
+const LABEL_PITCH: f32 = 2.0;
+const MIN_LABEL_PITCH: f32 = 1.2;
+
+/// The axis generator always allows at least five labels, and five labels can span almost six
+/// steps. A plot shorter than six legible pitches could therefore crowd them.
+const MIN_LABELLED_PITCHES: f32 = 6.0;
+
+/// The narrowest a candle may get, in points, and still read as a candle rather than a dot.
+const MIN_CANDLE_PITCH: f64 = 4.0;
 
 /// How the mid series is drawn. Both modes read the same buckets, so the toggle changes nothing but
 /// the geometry.
@@ -43,6 +55,90 @@ pub struct ChartBounds {
 pub struct SegmentPoint<'a> {
     pub bucket: &'a ChartBucket,
     pub is_run_start: bool,
+}
+
+/// How the visible buckets join into candles for a plot this wide, so a candle never gets thinner
+/// than it can be read. Groups sit on whole multiples of the bucket index, which keeps a candle's
+/// members the same as the window slides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CandleGrouping {
+    domain: ChartDomain,
+    buckets_per_candle: u64,
+}
+
+/// One group of consecutive buckets drawn as one candle. `first` and `last` are the span it covers
+/// on screen, clamped to the window, and need not be buckets the model holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Candle {
+    pub first: u64,
+    pub last: u64,
+    pub open_half_ticks: i64,
+    pub high_half_ticks: i64,
+    pub low_half_ticks: i64,
+    pub close_half_ticks: i64,
+    pub has_break_before: bool,
+}
+
+impl CandleGrouping {
+    /// The fewest consecutive buckets per candle that keep each candle at least four points wide.
+    pub fn for_plot(domain: ChartDomain, plot_width: f32) -> Self {
+        let width = domain.width();
+        let buckets_per_candle = if plot_width > 0.0 {
+            let needed = (width as f64 * MIN_CANDLE_PITCH / f64::from(plot_width)).ceil();
+            (needed as u64).clamp(1, width)
+        } else {
+            width
+        };
+        Self {
+            domain,
+            buckets_per_candle,
+        }
+    }
+
+    pub fn buckets_per_candle(self) -> u64 {
+        self.buckets_per_candle
+    }
+
+    /// The visible buckets as candles, oldest first. A group that holds no bucket gets no candle. A
+    /// break precedes a candle where the line would have broken before its first bucket, or where a
+    /// lost snapshot was revealed inside it. A spin missing inside a group is absorbed, and the
+    /// window's first candle never breaks.
+    pub fn candles(self, chart: &ChartModel, instrument: InstrumentId) -> Vec<Candle> {
+        let per_candle = self.buckets_per_candle;
+        let mut candles: Vec<Candle> = Vec::new();
+        for point in segment_points(chart, instrument, self.domain) {
+            let bucket = point.bucket;
+            let group = bucket.index / per_candle;
+            match candles.last_mut() {
+                Some(candle) if candle.first / per_candle == group => candle.fold(bucket),
+                _ => candles.push(Candle {
+                    first: group.saturating_mul(per_candle).max(self.domain.first),
+                    last: group
+                        .saturating_mul(per_candle)
+                        .saturating_add(per_candle - 1)
+                        .min(self.domain.last),
+                    open_half_ticks: bucket.open_half_ticks,
+                    high_half_ticks: bucket.high_half_ticks,
+                    low_half_ticks: bucket.low_half_ticks,
+                    close_half_ticks: bucket.close_half_ticks,
+                    has_break_before: point.is_run_start,
+                }),
+            }
+        }
+        if let Some(oldest) = candles.first_mut() {
+            oldest.has_break_before = false;
+        }
+        candles
+    }
+}
+
+impl Candle {
+    fn fold(&mut self, bucket: &ChartBucket) {
+        self.high_half_ticks = self.high_half_ticks.max(bucket.high_half_ticks);
+        self.low_half_ticks = self.low_half_ticks.min(bucket.low_half_ticks);
+        self.close_half_ticks = bucket.close_half_ticks;
+        self.has_break_before |= bucket.has_gap_before;
+    }
 }
 
 pub fn domain(chart: &ChartModel, instrument: InstrumentId) -> Option<ChartDomain> {
@@ -145,6 +241,21 @@ pub fn y_fraction(value: i64, bounds: ChartBounds) -> f32 {
     }
     let offset = (i128::from(value) - i128::from(bounds.low)) as f64;
     (offset / span as f64).clamp(0.0, 1.0) as f32
+}
+
+/// The ticks to label on a value axis `plot_height` points tall, in a `font`-point face. Labels aim
+/// to sit two font heights apart, and a plot shorter than six legible pitches gets none.
+///
+/// Above that height, five or fewer labels sit more than a sixth of the height apart, and more than
+/// five appear only on a taller plot, where the ideal spacing keeps them apart. A fixed height
+/// cut-off also stops the axis blinking on and off as live prices move.
+pub fn value_ticks(bounds: ChartBounds, plot_height: f32, font: f32) -> AxisTicks {
+    if plot_height < font * MIN_LABEL_PITCH * MIN_LABELLED_PITCHES {
+        return format::axis_ticks(0, 0, 0);
+    }
+    let ceiling =
+        format::legible_tick_ceiling(plot_height, font * LABEL_PITCH, font * MIN_LABEL_PITCH);
+    format::axis_ticks(bounds.low, bounds.high, ceiling)
 }
 
 pub(crate) fn pad(low: i64, high: i64) -> ChartBounds {

@@ -115,10 +115,9 @@ pub(crate) struct Metrics {
     pub monitor_intent_tag_w: f32,
     pub monitor_asset_label_w: f32,
     pub monitor_fill_tag_w: f32,
-    /// The latency grid's share of the left panel below the toolbar, sized against the exposure
-    /// chart it sits above rather than picked. That chart gets 30% of what this grid LEAVES, less
-    /// the stack's sub-header, so 0.22 is the share holding the two within 3-18% of each other
-    /// across the window's size range: a peer of the exposure chart, not competition for the mid.
+    /// The most of the chart pane the latency grid may take. The grid is only as tall as its rows
+    /// need, and when that is more than this share of the pane it folds to a one-line summary, so
+    /// the charts below keep the height their axes need.
     pub latency_fraction: f32,
     pub latency_label_col_w: f32,
     pub latency_header_font: f32,
@@ -179,7 +178,7 @@ pub(crate) const METRICS: Metrics = Metrics {
     monitor_intent_tag_w: 42.0,
     monitor_asset_label_w: 56.0,
     monitor_fill_tag_w: 30.0,
-    latency_fraction: 0.22,
+    latency_fraction: 0.25,
     latency_label_col_w: 112.0,
     latency_header_font: 10.0,
     latency_row_font: 11.0,

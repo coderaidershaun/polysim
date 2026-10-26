@@ -12,6 +12,7 @@ use super::risk::{self, PositionFrame};
 use crate::workstation::browser::controls;
 use crate::workstation::browser::theme::{self, DARK, METRICS};
 use crate::workstation::chart::model::ChartModel;
+use crate::workstation::chart::pane::StackBands;
 use crate::workstation::chart::position_model::PositionModel;
 use crate::workstation::chart::position_view::RiskSeries;
 use crate::workstation::chart::view::{self, ChartMode};
@@ -22,10 +23,7 @@ use crate::workstation::text;
 const RISK_SERIES: [(RiskSeries, &str); 2] =
     [(RiskSeries::Exposure, "EXPOSURE"), (RiskSeries::Pnl, "PNL")];
 
-/// The mid chart's share of the body. The risk chart is a companion to the price, not its equal.
-const MID_FRACTION: f32 = 0.7;
-
-/// The selector's width inside the sub-header, leaving the rest of the strip to the readout.
+/// The selector's width inside the strip, leaving the rest of it to the readout.
 const SELECTOR_WIDTH: f32 = 168.0;
 
 pub struct ChartStackFrame<'a> {
@@ -42,10 +40,9 @@ pub fn paint(
     rect: egui::Rect,
     frame: &ChartStackFrame<'_>,
 ) -> Option<RiskSeries> {
-    let split = (rect.top() + rect.height() * MID_FRACTION).round();
-    let (mid_rect, below_mid) = rect.split_top_bottom_at_y(split);
-    let (header_rect, lower_rect) =
-        below_mid.split_top_bottom_at_y(split + METRICS.dom_header_height);
+    let bands = StackBands::for_height(rect.height());
+    let (mid_rect, below_mid) = rect.split_top_bottom_at_y(rect.top() + bands.mid);
+    let (strip_rect, lower_rect) = below_mid.split_top_bottom_at_y(below_mid.top() + bands.strip);
 
     let domain = view::domain(frame.chart, frame.instrument);
 
@@ -61,7 +58,7 @@ pub fn paint(
         },
     );
 
-    let picked = paint_sub_header(ui, header_rect, frame);
+    let picked = paint_strip(ui, strip_rect, frame);
 
     let lower = risk::paint(
         ui,
@@ -74,7 +71,7 @@ pub fn paint(
         },
     );
 
-    paint_sub_header_seams(ui, rect, header_rect);
+    paint_strip_seams(ui, rect, strip_rect);
 
     crosshair::paint(
         ui,
@@ -87,7 +84,7 @@ pub fn paint(
             mid: mid.geometry,
             lower: lower.geometry,
             stack: rect,
-            pointer: mid.response.hover_pos().or(lower.response.hover_pos()),
+            hovered: mid.response.hover_pos().or(lower.response.hover_pos()),
         },
     );
     picked
@@ -97,12 +94,13 @@ pub fn paint(
 /// page's frame, so neither chart outlines itself. The painter clips to the whole stack, not the
 /// strip, because `crisp` can snap a line onto the pixel row just outside the strip, where a clip
 /// at the strip would hide it.
-fn paint_sub_header_seams(ui: &egui::Ui, stack: egui::Rect, header: egui::Rect) {
+fn paint_strip_seams(ui: &egui::Ui, stack: egui::Rect, strip: egui::Rect) {
     let painter = ui.painter_at(stack);
-    theme::rules_h(&painter, [header.top(), header.bottom()], header.x_range());
+    theme::rules_h(&painter, [strip.top(), strip.bottom()], strip.x_range());
 }
 
-fn paint_sub_header(
+/// The selector fills the strip's whole height, so the strip is the touch target.
+fn paint_strip(
     ui: &mut egui::Ui,
     rect: egui::Rect,
     frame: &ChartStackFrame<'_>,
@@ -111,8 +109,8 @@ fn paint_sub_header(
     painter.rect_filled(rect, 0.0, DARK.panel);
 
     let selector = egui::Rect::from_min_size(
-        egui::pos2(rect.left() + METRICS.space_2, rect.top() + METRICS.space_1),
-        egui::vec2(SELECTOR_WIDTH, rect.height() - 2.0 * METRICS.space_1),
+        egui::pos2(rect.left() + METRICS.space_2, rect.top()),
+        egui::vec2(SELECTOR_WIDTH, rect.height()),
     );
     let picked =
         controls::paint_segmented_toggle(ui, selector, "risk-series", &RISK_SERIES, frame.series);

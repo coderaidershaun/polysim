@@ -10,13 +10,11 @@ use eframe::egui;
 use crate::ids::{InstrumentId, Price, Side};
 
 use crate::workstation::browser::theme::{self, DARK, METRICS};
-use crate::workstation::chart::model::{ChartBucket, ChartModel};
-use crate::workstation::chart::view::{self, ChartBounds, ChartDomain, ChartMode};
-use crate::workstation::format;
+use crate::workstation::chart::model::ChartModel;
+use crate::workstation::chart::view::{
+    self, Candle, CandleGrouping, ChartBounds, ChartDomain, ChartMode,
+};
 use crate::workstation::text::{self, AxisLabels};
-
-const AXIS_LABEL_PITCH: f32 = 2.0;
-const MIN_LEGIBLE_PITCH: f32 = 1.2;
 
 pub struct ChartFrame<'a> {
     pub chart: &'a ChartModel,
@@ -144,16 +142,11 @@ pub(crate) fn paint_axis_labels(
     bounds: ChartBounds,
     labels: AxisLabels,
 ) {
-    let font = METRICS.chart_axis_font;
-    let ceiling = format::legible_tick_ceiling(
-        rect.height(),
-        font * AXIS_LABEL_PITCH,
-        font * MIN_LEGIBLE_PITCH,
-    );
+    let ticks = view::value_ticks(bounds, rect.height(), METRICS.chart_axis_font);
     let font = egui::FontId::monospace(METRICS.chart_axis_font);
     let stroke = theme::hairline(painter, DARK.grid);
     let left = rect.right() + METRICS.chart_pad;
-    for (value, label) in text::axis_labels(bounds, ceiling, labels) {
+    for (value, label) in text::axis_labels(ticks, labels) {
         let y = egui::lerp(rect.bottom()..=rect.top(), view::y_fraction(value, bounds));
         painter.hline(rect.right()..=left, theme::crisp(painter, y), stroke);
         painter.text(
@@ -192,33 +185,40 @@ pub(crate) fn flush_run(painter: &egui::Painter, run: &mut Vec<egui::Pos2>, stro
 }
 
 fn paint_candles(painter: &egui::Painter, plot: &PlotGeometry, frame: &ChartFrame<'_>) {
-    let visible_count = view::segment_points(frame.chart, frame.instrument, plot.domain).count();
+    let grouping = CandleGrouping::for_plot(plot.domain, plot.rect.width());
+    let candles = grouping.candles(frame.chart, frame.instrument);
     let mut bodies = egui::Mesh::default();
-    bodies.reserve_vertices(visible_count * 4);
-    bodies.reserve_triangles(visible_count * 2);
-    let mut wicks = Vec::with_capacity(visible_count);
+    bodies.reserve_vertices(candles.len() * 4);
+    bodies.reserve_triangles(candles.len() * 2);
+    let mut wicks = Vec::with_capacity(candles.len());
     let mut breaks = Vec::new();
-    let candle = CandleGeometry::new(painter, plot);
+    let thinnest = theme::one_physical_pixel(painter);
 
-    for (slot, point) in
-        view::segment_points(frame.chart, frame.instrument, plot.domain).enumerate()
-    {
-        let bucket = point.bucket;
-        let color = body_color(bucket);
-        let center_x = plot.x(bucket.index);
-        if point.is_run_start && slot > 0 {
+    for candle in &candles {
+        let color = body_color(candle);
+        let center_x = (plot.x(candle.first) + plot.x(candle.last)) / 2.0;
+        let span = (candle.last - candle.first + 1) as f32 * plot.slot_width();
+        if candle.has_break_before {
             breaks.push(egui::Shape::vline(
-                theme::crisp(painter, center_x - plot.slot_width() / 2.0),
+                theme::crisp(painter, center_x - span / 2.0),
                 plot.rect.y_range(),
                 theme::hairline(painter, DARK.border),
             ));
         }
-        bodies.add_colored_rect(candle.body(plot, bucket, center_x), color);
+        let half_body = (span - METRICS.chart_body_gap)
+            .max(METRICS.chart_min_body_width)
+            .max(thinnest)
+            / 2.0;
+        let body = egui::Rect::from_x_y_ranges(
+            center_x - half_body..=center_x + half_body,
+            body_y_range(plot, candle, thinnest),
+        );
+        bodies.add_colored_rect(body, color);
         wicks.push(egui::Shape::vline(
             theme::crisp(painter, center_x),
             egui::Rangef::new(
-                plot.y(bucket.high_half_ticks),
-                plot.y(bucket.low_half_ticks),
+                plot.y(candle.high_half_ticks),
+                plot.y(candle.low_half_ticks),
             ),
             egui::Stroke::new(METRICS.chart_wick_width, color),
         ));
@@ -228,36 +228,16 @@ fn paint_candles(painter: &egui::Painter, plot: &PlotGeometry, frame: &ChartFram
     painter.add(egui::Shape::mesh(bodies));
 }
 
-struct CandleGeometry {
-    body_width: f32,
-    thinnest: f32,
+fn body_y_range(plot: &PlotGeometry, candle: &Candle, thinnest: f32) -> egui::Rangef {
+    let top = plot.y(candle.open_half_ticks.max(candle.close_half_ticks));
+    let bottom = plot
+        .y(candle.open_half_ticks.min(candle.close_half_ticks))
+        .max(top + thinnest);
+    egui::Rangef::new(top, bottom)
 }
 
-impl CandleGeometry {
-    fn new(painter: &egui::Painter, plot: &PlotGeometry) -> Self {
-        let thinnest = theme::one_physical_pixel(painter);
-        Self {
-            body_width: (plot.slot_width() - METRICS.chart_body_gap)
-                .max(METRICS.chart_min_body_width)
-                .max(thinnest),
-            thinnest,
-        }
-    }
-
-    fn body(&self, plot: &PlotGeometry, bucket: &ChartBucket, center_x: f32) -> egui::Rect {
-        let top = plot.y(bucket.open_half_ticks.max(bucket.close_half_ticks));
-        let bottom = plot
-            .y(bucket.open_half_ticks.min(bucket.close_half_ticks))
-            .max(top + self.thinnest);
-        egui::Rect::from_min_max(
-            egui::pos2(center_x - self.body_width / 2.0, top),
-            egui::pos2(center_x + self.body_width / 2.0, bottom),
-        )
-    }
-}
-
-fn body_color(bucket: &ChartBucket) -> egui::Color32 {
-    match bucket.close_half_ticks.cmp(&bucket.open_half_ticks) {
+fn body_color(candle: &Candle) -> egui::Color32 {
+    match candle.close_half_ticks.cmp(&candle.open_half_ticks) {
         Ordering::Greater => DARK.bid,
         Ordering::Less => DARK.ask,
         Ordering::Equal => DARK.text_secondary,
