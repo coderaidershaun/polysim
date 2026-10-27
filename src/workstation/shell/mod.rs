@@ -4,5 +4,6 @@
 mod arrangement;
 mod navigation;
 
+pub(crate) use arrangement::TOUCH_HEIGHT;
 pub use arrangement::{Area, Arrangement, Pane, TopBar, zoom_to_fit};
 pub use navigation::{Navigation, Selection, SizeClass, View};

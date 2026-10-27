@@ -4,15 +4,15 @@
 
 use eframe::egui;
 
-use super::bands::{RowList, paint_ellipsized, paint_row_list};
 use super::pin::Pins;
+use super::row_list::{RowList, paint_row_list};
 use super::sizes::{column_widths, content_column};
 use crate::workstation::browser::controls;
-use crate::workstation::browser::dom::overlay::{Direction, triangle};
-use crate::workstation::browser::theme::{self, DARK, METRICS};
+use crate::workstation::browser::theme::{self, DARK, Direction, METRICS};
 use crate::workstation::monitor::fit::{ColumnPlan, ColumnWidths, TimeColumn, fit_columns};
 use crate::workstation::monitor::model::{FillRow, OrderRow, SystemRow, TradeRow};
 use crate::workstation::monitor::view::{Channel, MonitorDetail, MonitorFrame, MonitorUiState};
+use crate::workstation::shell::TOUCH_HEIGHT;
 use crate::workstation::text::{Cell, ChannelRow, TagColumn, record_row};
 
 /// A list scrolled less than this from the top still shows the newest row, which absorbs sub-pixel
@@ -20,8 +20,7 @@ use crate::workstation::text::{Cell, ChannelRow, TagColumn, record_row};
 const FOLLOW_EPS: f32 = 1.0;
 
 /// A finger cannot reliably hit the small pill, so on a touch screen the badge answers taps in a
-/// target this tall and this much wider than the pill on each side.
-const BADGE_TOUCH_HEIGHT: f32 = 36.0;
+/// target as tall as any touch target and this much wider than the pill on each side.
 const BADGE_TOUCH_MARGIN: f32 = 8.0;
 
 const SHORT_TIME_LEN: usize = "HH:MM:SS".len();
@@ -171,7 +170,7 @@ fn paint_unseen_badge(
         badge.left() + METRICS.space_2 + marker_size / 2.0,
         badge.center().y,
     );
-    let marker = triangle(marker_center, marker_size, Direction::Up, DARK.text_primary);
+    let marker = theme::triangle(marker_center, marker_size, Direction::Up, DARK.text_primary);
     painter.add(marker);
     painter.galley(
         egui::pos2(
@@ -197,7 +196,7 @@ fn badge_target(ui: &egui::Ui, badge: egui::Rect, channel: egui::Rect) -> egui::
         egui::pos2(badge.left() - BADGE_TOUCH_MARGIN, channel.top()),
         egui::pos2(
             badge.right() + BADGE_TOUCH_MARGIN,
-            (channel.top() + BADGE_TOUCH_HEIGHT).max(badge.bottom()),
+            (channel.top() + TOUCH_HEIGHT).max(badge.bottom()),
         ),
     )
     .intersect(channel)
@@ -259,7 +258,7 @@ impl RowColumns {
                     let room = rect
                         .with_min_x(self.tag_x + description_offset)
                         .with_max_x(self.qty_x);
-                    paint_ellipsized(painter, room, text, text_font(), DARK.tone(*tone));
+                    theme::paint_ellipsized(painter, room, text, text_font(), DARK.tone(*tone));
                 }
                 Cell::Price(text) => self.paint_number(painter, self.price_x, text),
                 Cell::Qty(text) => self.paint_number(painter, self.qty_x, text),

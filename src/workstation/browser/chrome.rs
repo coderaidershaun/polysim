@@ -107,13 +107,25 @@ pub fn paint_tab_bar(ui: &mut egui::Ui, arrangement: &Arrangement) -> ChromeActi
     chosen.map_or(ChromeAction::None, ChromeAction::Navigate)
 }
 
-// SMELL: every caller must paint its panes between this and `paint_pane_rules`, and only the docs
-// say so. One function that paints the frames, hands each pane back to the caller and then paints
-// the rules would make the order impossible to get wrong.
-/// Paints the panes' backgrounds and their empty header strips. Call it before painting the panes,
-/// so their content lands on top.
-pub fn paint_pane_frames(ui: &egui::Ui, arrangement: &Arrangement) {
-    for pane in panes(arrangement) {
+/// Paints the pane backgrounds, then each shown pane through `paint_pane` in the order chart,
+/// monitor, ladder, then the rules between them, so content covers the backgrounds and no pane
+/// covers a rule. Each pane paints straight on `ui`, with no scope of its own, because egui keeps
+/// the panes' scroll and dropdown state under ids derived from that `ui`.
+pub fn paint_panes(
+    ui: &mut egui::Ui,
+    arrangement: &Arrangement,
+    mut paint_pane: impl FnMut(&mut egui::Ui, View, Pane),
+) {
+    paint_pane_frames(ui, arrangement);
+    for (view, pane) in panes(arrangement) {
+        paint_pane(ui, view, pane);
+    }
+    paint_pane_rules(ui, arrangement);
+}
+
+/// Paints the panes' backgrounds and their empty header strips.
+fn paint_pane_frames(ui: &egui::Ui, arrangement: &Arrangement) {
+    for (_, pane) in panes(arrangement) {
         ui.painter().rect_filled(pane_rect(pane), 0.0, DARK.panel);
         let Some(header) = pane.header else {
             continue;
@@ -129,12 +141,11 @@ pub fn paint_pane_frames(ui: &egui::Ui, arrangement: &Arrangement) {
     }
 }
 
-/// Draws a rule between panes that touch and one down each outer side. Call it after painting the
-/// panes, so no pane covers the rules. The bars above and below draw their own rules, so a full
-/// outline would draw those lines twice.
-pub fn paint_pane_rules(ui: &egui::Ui, arrangement: &Arrangement) {
+/// Draws a rule between panes that touch and one down each outer side. The bars above and below
+/// draw their own rules, so a full outline would draw those lines twice.
+fn paint_pane_rules(ui: &egui::Ui, arrangement: &Arrangement) {
     let painter = ui.painter();
-    let rects = panes(arrangement).map(pane_rect);
+    let rects = panes(arrangement).map(|(_, pane)| pane_rect(pane));
     let Some(outline) = rects.clone().reduce(egui::Rect::union) else {
         return;
     };
@@ -148,10 +159,10 @@ pub fn paint_pane_rules(ui: &egui::Ui, arrangement: &Arrangement) {
     }
 }
 
-fn panes(arrangement: &Arrangement) -> impl Iterator<Item = Pane> + Clone + '_ {
+fn panes(arrangement: &Arrangement) -> impl Iterator<Item = (View, Pane)> + Clone + '_ {
     [View::Chart, View::Monitor, View::Ladder]
         .into_iter()
-        .filter_map(|view| arrangement.pane(view))
+        .filter_map(|view| arrangement.pane(view).map(|pane| (view, pane)))
 }
 
 fn pane_rect(pane: Pane) -> egui::Rect {
@@ -196,18 +207,14 @@ fn paint_picker(
 
 /// A long id is cut to its slot, so it gives way to the badges instead of running under them.
 fn paint_strategy_id(painter: &egui::Painter, slot: egui::Rect, strategy_id: &str) {
-    let room = (slot.width() - METRICS.space_3 - METRICS.space_2).max(0.0);
-    let mut job = egui::text::LayoutJob::simple_singleline(
-        strategy_id.to_owned(),
+    let room = slot
+        .with_min_x(slot.left() + METRICS.space_3)
+        .with_max_x(slot.right() - METRICS.space_2);
+    theme::paint_ellipsized(
+        painter,
+        room,
+        strategy_id,
         egui::FontId::proportional(STRATEGY_FONT),
-        DARK.text_secondary,
-    );
-    job.wrap = egui::text::TextWrapping::truncate_at_width(room);
-    let galley = painter.layout_job(job);
-    let top = slot.center().y - galley.size().y / 2.0;
-    painter.galley(
-        egui::pos2(slot.left() + METRICS.space_3, top),
-        galley,
         DARK.text_secondary,
     );
 }

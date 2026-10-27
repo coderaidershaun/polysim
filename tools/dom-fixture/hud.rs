@@ -8,7 +8,7 @@ use polysim::workstation::chart::view::ChartMode;
 use polysim::workstation::monitor::view::Channel;
 use polysim::workstation::shell::{Selection, SizeClass};
 
-use crate::app::LeftPanel;
+use crate::LeftPanel;
 use crate::scenes::Scene;
 
 const TEXT: egui::Color32 = egui::Color32::from_rgb(145, 157, 174);

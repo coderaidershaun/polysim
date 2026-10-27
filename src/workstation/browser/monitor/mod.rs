@@ -5,7 +5,8 @@ mod account;
 pub mod bands;
 mod channels;
 mod pin;
+mod row_list;
 mod sizes;
 mod summary;
 
-pub use sizes::{band_sizes, column_widths};
+pub use sizes::{band_sizes, column_widths, pane_height};

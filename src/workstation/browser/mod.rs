@@ -11,8 +11,8 @@ mod layout;
 pub mod link_bar;
 pub mod monitor;
 mod socket;
-mod tap;
 mod theme;
+mod touch;
 
 use eframe::{AppCreator, WebOptions, WebRunner};
 use web_sys::wasm_bindgen::JsCast;
@@ -21,7 +21,7 @@ use web_sys::{AddEventListenerOptions, Document, HtmlCanvasElement};
 
 use crate::error;
 use app::WorkstationApp;
-pub use tap::announce_touch_screen;
+pub use touch::announce_touch_screen;
 
 /// The page must hold a canvas with id `workstation`.
 pub fn start() {

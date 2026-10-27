@@ -1,15 +1,11 @@
 //! The browser's WebSocket to the relay, as one value that owns its callbacks. Dropping it detaches
-//! them first, so a replaced socket's late events can never reach the station.
-
-use std::cell::RefCell;
-use std::rc::Rc;
+//! them first, so a replaced socket's late events never call them.
 
 use js_sys::{ArrayBuffer, Uint8Array};
 use web_sys::wasm_bindgen::closure::Closure;
 use web_sys::wasm_bindgen::{JsCast, JsValue};
 use web_sys::{BinaryType, Document, MessageEvent, Url, WebSocket};
 
-use super::app::Station;
 use crate::msg::relay::{PEER_KEY, RELAY_PATH};
 use crate::warn;
 
@@ -29,7 +25,8 @@ impl LinkSocket {
     pub(super) fn open(
         document: &Document,
         peer: usize,
-        station: &Rc<RefCell<Station>>,
+        mut on_frame: impl FnMut(Frame) + 'static,
+        on_state_change: impl FnMut() + 'static,
     ) -> Result<Self, JsValue> {
         let base = document.base_uri()?.unwrap_or_default();
         let url = Url::new_with_base(&format!("{RELAY_PATH}?{PEER_KEY}={peer}"), &base)?;
@@ -37,25 +34,11 @@ impl LinkSocket {
         let socket = WebSocket::new(&url.href())?;
         socket.set_binary_type(BinaryType::Arraybuffer);
 
-        // A panic leaves the station borrowed for good, so a later message has to skip rather
-        // than panic again.
-        let on_message = {
-            let station = Rc::clone(station);
-            Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
-                let Some(frame) = Frame::of(event.data()) else { return };
-                if let Ok(mut busy) = station.try_borrow_mut() {
-                    busy.on_frame(frame, &station);
-                }
-            })
-        };
-        let on_state_change = {
-            let station = Rc::clone(station);
-            Closure::<dyn FnMut()>::new(move || {
-                if let Ok(mut busy) = station.try_borrow_mut() {
-                    busy.pump(&station);
-                }
-            })
-        };
+        let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+            let Some(frame) = Frame::of(event.data()) else { return };
+            on_frame(frame);
+        });
+        let on_state_change = Closure::<dyn FnMut()>::new(on_state_change);
         socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
         socket.set_onopen(Some(on_state_change.as_ref().unchecked_ref()));
         socket.set_onclose(Some(on_state_change.as_ref().unchecked_ref()));

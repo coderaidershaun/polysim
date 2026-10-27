@@ -12,7 +12,7 @@ use polysim::time::TsUs;
 use polysim::workstation::browser::chrome::{ChromeAction, TopBarFrame};
 use polysim::workstation::shell::{self, Arrangement, Navigation, Selection, SizeClass};
 
-use crate::app::query;
+use crate::query;
 
 const STRATEGY_ID: &str = "strat-micro-recorder";
 // SMELL: this repeats the library's list of execution modes, so a mode added there is missing here

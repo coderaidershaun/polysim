@@ -6,19 +6,14 @@ use std::sync::Arc;
 
 use eframe::egui;
 
-use crate::ids::Price;
-use crate::msg::ui::UiBookSnapshot;
-
+use super::DomFrame;
 use super::geometry::{ASK_COLUMNS, BID_COLUMNS, DomLayout};
-pub(crate) use super::geometry::{ladder_rect, rows_that_fit};
 use super::overlay::OverlayPainter;
 use super::pin;
 use crate::ids::Qty;
-use crate::time::DurationUs;
 use crate::workstation::browser::theme::{self, DARK, METRICS};
 use crate::workstation::dom_view::{
-    DomGrouping, DomOverlay, DomRow, DomStatus, DomView, DomViewInput, FeedStatus, StrategyCell,
-    build_dom_view,
+    DomRow, DomStatus, DomView, DomViewInput, StrategyCell, build_dom_view,
 };
 use crate::workstation::exec_model::OrderStatus;
 use crate::workstation::format;
@@ -30,27 +25,6 @@ const MIN_GRID_FADE: f32 = 0.35;
 /// Text that does not fit its cell shrinks in steps of this size. The font cache keeps separate
 /// glyphs for every size, so fixed steps stop a resize from adding new glyphs on every frame.
 const FONT_STEP: f32 = 0.5;
-
-pub struct DomFrame<'a> {
-    pub snapshot: Option<&'a UiBookSnapshot>,
-    pub overlay: DomOverlay<'a>,
-    pub tick: Price,
-    pub grouping: DomGrouping,
-    /// Rows per side asked for; the panel clamps it to what fits above the legibility floor.
-    pub levels: usize,
-    pub price_decimals: usize,
-    pub qty_scale: i64,
-    pub qty_decimals: usize,
-    pub feed: FeedStatus,
-    /// How far the book trails the engine's own newest stamp, when that is far enough to say so.
-    pub stale_age: Option<DurationUs>,
-}
-
-impl DomFrame<'_> {
-    pub(crate) fn write_row_price(&self, buf: &mut String, tick_index: i64) {
-        text::row_price(buf, self.tick, self.price_decimals, tick_index);
-    }
-}
 
 pub fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &DomFrame<'_>) -> egui::Response {
     let response = ui.interact(rect, egui::Id::new("polysim-dom"), egui::Sense::hover());

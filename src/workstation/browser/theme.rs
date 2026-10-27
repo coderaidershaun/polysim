@@ -1,8 +1,9 @@
-//! The design system: named colour and size tokens, so no painter writes a raw value, and the helpers
-//! that snap rules and text to pixel centres.
+//! The design system: named colour and size tokens, so no painter writes a raw value, and the
+//! pixel snapping, shapes and cut-off text that every painter shares.
 
 use eframe::egui;
 
+use crate::workstation::shell::TOUCH_HEIGHT;
 use crate::workstation::text::Tone;
 
 /// Colours named by role, not hue, so a painter asks for what a thing is and the palette decides
@@ -156,7 +157,7 @@ pub(crate) const METRICS: Metrics = Metrics {
     // gives the feature list its fraction of what is left, up to the rows it needs, and the channel
     // the rest. A shorter pane scrolls.
     monitor_summary_height: 56.0,
-    monitor_tab_height: 36.0,
+    monitor_tab_height: TOUCH_HEIGHT,
     monitor_row_height: 18.0,
     monitor_feature_fraction: 0.43,
     monitor_mid_fraction: 0.40,
@@ -258,6 +259,85 @@ pub(crate) fn rules_h(
     for y in ys {
         painter.hline(x_range, crisp(painter, y), stroke);
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Direction {
+    Up,
+    Down,
+}
+
+/// Painted as a shape rather than set as a glyph: the bundled default fonts have no face for the
+/// arrows and triangles this would otherwise be written with.
+pub(crate) fn triangle(
+    center: egui::Pos2,
+    size: f32,
+    direction: Direction,
+    color: egui::Color32,
+) -> egui::Shape {
+    let half = size / 2.0;
+    let points = match direction {
+        Direction::Up => vec![
+            egui::pos2(center.x, center.y - half),
+            egui::pos2(center.x - half, center.y + half),
+            egui::pos2(center.x + half, center.y + half),
+        ],
+        Direction::Down => vec![
+            egui::pos2(center.x, center.y + half),
+            egui::pos2(center.x - half, center.y - half),
+            egui::pos2(center.x + half, center.y - half),
+        ],
+    };
+    egui::Shape::convex_polygon(points, color, egui::Stroke::NONE)
+}
+
+pub(crate) fn fill_pill(painter: &egui::Painter, rect: egui::Rect, border: egui::Color32) {
+    painter.rect_filled(rect, METRICS.corner_radius, DARK.panel_raised);
+    painter.rect_stroke(
+        rect,
+        METRICS.corner_radius,
+        egui::Stroke::new(1.0, border),
+        egui::StrokeKind::Inside,
+    );
+}
+
+pub(crate) fn clamp_rect(bounds: egui::Rect, rect: egui::Rect) -> egui::Rect {
+    let mut min = rect.min;
+    if rect.right() > bounds.right() {
+        min.x = bounds.right() - rect.width();
+    }
+    if rect.bottom() > bounds.bottom() {
+        min.y = bounds.bottom() - rect.height();
+    }
+    min.x = min.x.max(bounds.left());
+    min.y = min.y.max(bounds.top());
+    egui::Rect::from_min_size(min, rect.size())
+}
+
+/// Paints `text` left-aligned in `rect`, cut with an ellipsis at its right end when it does not
+/// fit, and returns the width it took.
+pub(crate) fn paint_ellipsized(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    text: &str,
+    font: egui::FontId,
+    color: egui::Color32,
+) -> f32 {
+    let mut job = egui::text::LayoutJob::single_section(
+        text.to_owned(),
+        egui::text::TextFormat {
+            font_id: font,
+            color,
+            ..Default::default()
+        },
+    );
+    job.halign = egui::Align::LEFT;
+    job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width().max(0.0));
+    let galley = painter.layout_job(job);
+    let width = galley.size().x;
+    let pos = egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0);
+    painter.galley(pos, galley, color);
+    width
 }
 
 /// The colour behind the first frame, so the page never flashes grey while it starts.

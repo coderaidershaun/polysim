@@ -5,7 +5,7 @@
 use eframe::egui;
 
 use super::geometry::DomLayout;
-use crate::workstation::browser::tap::PaneClick;
+use crate::workstation::browser::touch::PaneClick;
 use crate::workstation::dom_view::DomView;
 
 /// A pin marks a spot on the screen, not a price level. As the book moves, the readout shows

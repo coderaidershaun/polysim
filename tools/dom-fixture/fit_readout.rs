@@ -1,10 +1,10 @@
 //! The HUD's fit readouts: the sizes each pane's own fit rules chose for the rect it was given, so a
 //! reviewer can compare them with what is painted.
 
-use eframe::egui::{self, emath::GuiRounding as _};
+use eframe::egui;
 
 use polysim::workstation::browser::chart::mid::{self, Plot};
-use polysim::workstation::browser::monitor::{band_sizes, column_widths};
+use polysim::workstation::browser::monitor::{band_sizes, column_widths, pane_height};
 use polysim::workstation::chart::pane::{LatencyBand, StackBands};
 use polysim::workstation::chart::view::{CandleGrouping, ChartBounds, ChartMode, value_ticks};
 use polysim::workstation::monitor::fit::{self, BandHeights, ColumnPlan, TimeColumn};
@@ -44,14 +44,7 @@ pub fn mid_axis(plot: Option<&Plot<ChartBounds>>, mode: ChartMode) -> String {
 
 /// The content width, the columns the `channel` rows keep, and the six band heights, top to bottom.
 pub fn monitor(rect: egui::Rect, channel: Channel, feature_count: usize) -> String {
-    let sizes = band_sizes();
-    // SMELL: this repeats the step the monitor painter takes to get its height, because the painter
-    // keeps that step private. If the painter changes that step, this readout quietly disagrees
-    // with the painted bands. The painter rounds its scroll viewport to the screen first, and a
-    // rect a hair off a whole point can flip the bands from fitting to scrolling at the threshold.
-    let strip_bottom = (rect.top() + sizes.status).min(rect.bottom());
-    let viewport = rect.with_min_y(strip_bottom).round_ui();
-    let heights = fit::fit_bands(viewport.height() + sizes.status, feature_count, &sizes);
+    let heights = fit::fit_bands(pane_height(rect), feature_count, &band_sizes());
     let plan = fit::fit_columns(channel, rect.width(), &column_widths());
     format!(
         "mon {:.0} | {} | {}",

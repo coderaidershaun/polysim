@@ -10,13 +10,13 @@ use super::latency::{self, LatencyFrame};
 use super::theme;
 use crate::workstation::attachment::Attachment;
 use crate::workstation::browser::chart::stack::{self, ChartStackFrame};
-use crate::workstation::browser::dom::ladder::{self, DomFrame};
+use crate::workstation::browser::dom::{self, DomFrame, ladder};
 use crate::workstation::browser::monitor::bands;
 use crate::workstation::chart::view::ChartMode;
 use crate::workstation::dom_view::{DomUnit, FeedStatus, MAX_ROWS_PER_SIDE, MIN_ROWS_PER_SIDE};
 use crate::workstation::format;
 use crate::workstation::model::UiModel;
-use crate::workstation::monitor::view::{MonitorFrame, instrument_names};
+use crate::workstation::monitor::view::{MonitorFrame, MonitorUiState, instrument_names};
 use crate::workstation::shell::{Arrangement, Pane, Selection, View};
 use crate::workstation::text::{grouping_label, grouping_table};
 
@@ -52,19 +52,11 @@ pub(crate) fn workstation(
         ChromeAction::None => {}
     }
 
-    chrome::paint_pane_frames(ui, arrangement);
-    if let Some(pane) = arrangement.pane(View::Chart) {
-        paint_chart_pane(ui, pane, model);
-    }
-    if let Some(pane) = arrangement.pane(View::Monitor) {
-        let instrument_names = instrument_names(model);
-        let frame = MonitorFrame::for_selected(model, &instrument_names);
-        bands::paint(ui, pane.body.into(), &frame, monitor_state);
-    }
-    if let Some(pane) = arrangement.pane(View::Ladder) {
-        paint_ladder_pane(ui, pane, model, feed);
-    }
-    chrome::paint_pane_rules(ui, arrangement);
+    chrome::paint_panes(ui, arrangement, |ui, view, pane| match view {
+        View::Chart => paint_chart_pane(ui, pane, model),
+        View::Monitor => paint_monitor_pane(ui, pane, model, monitor_state),
+        View::Ladder => paint_ladder_pane(ui, pane, model, feed),
+    });
 
     if let ChromeAction::Navigate(selection) = chrome::paint_tab_bar(ui, arrangement) {
         picked_view = Some(selection);
@@ -118,6 +110,17 @@ fn paint_chart_body(ui: &mut egui::Ui, body: egui::Rect, model: &mut UiModel) {
     }
 }
 
+fn paint_monitor_pane(
+    ui: &mut egui::Ui,
+    pane: Pane,
+    model: &UiModel,
+    monitor_state: &mut MonitorUiState,
+) {
+    let instrument_names = instrument_names(model);
+    let frame = MonitorFrame::for_selected(model, &instrument_names);
+    bands::paint(ui, pane.body.into(), &frame, monitor_state);
+}
+
 /// Hands out the next full-height cell in a control strip, so the controls touch instead of
 /// floating apart.
 fn strip_cell(strip: egui::Rect, cursor: &mut f32, width: f32) -> egui::Rect {
@@ -130,9 +133,9 @@ fn paint_ladder_pane(ui: &mut egui::Ui, pane: Pane, model: &mut UiModel, feed: F
     let body = egui::Rect::from(pane.body);
     if let Some(header) = pane.header {
         let strip = egui::Rect::from(header);
-        let block = ladder::ladder_rect(body);
+        let block = dom::ladder_rect(body);
         let controls = strip.with_min_x(block.left()).with_max_x(block.right());
-        paint_dom_header(ui, controls, model, ladder::rows_that_fit(body));
+        paint_dom_header(ui, controls, model, dom::rows_that_fit(body));
         // The ladder rules its outer edges when it is narrower than its pane, so its header does too.
         if controls.width() < strip.width() {
             theme::rules_v(

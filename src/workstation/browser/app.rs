@@ -15,8 +15,8 @@ use web_sys::wasm_bindgen::closure::Closure;
 use super::layout;
 use super::link_bar::{self, LinkAction};
 use super::socket::{Frame, LinkSocket};
-use super::tap;
 use super::theme::{DARK, METRICS, clear_color};
+use super::touch;
 use crate::config::{ConfigError, StrategyId};
 use crate::hot::exec::ExecHalt;
 use crate::link::LinkHash;
@@ -190,7 +190,15 @@ impl Station {
             .attached
             .as_ref()
             .map_or(0, |(_, attachment)| attachment.active_peer());
-        self.socket = match LinkSocket::open(&self.document, peer, shared) {
+        let on_frame = {
+            let station = Rc::clone(shared);
+            move |frame: Frame| run_unless_borrowed(&station, |busy| busy.on_frame(frame, &station))
+        };
+        let on_state_change = {
+            let station = Rc::clone(shared);
+            move || run_unless_borrowed(&station, |busy| busy.pump(&station))
+        };
+        self.socket = match LinkSocket::open(&self.document, peer, on_frame, on_state_change) {
             Ok(socket) => Some(socket),
             Err(error) => {
                 error!("cannot open the relay socket: {error:?}");
@@ -353,6 +361,14 @@ fn attach(hello: &RelayHello, now: TsUs) -> Result<Attachment, HelloError> {
     Ok(Attachment::new(LinkSession::new(target, now)?, now))
 }
 
+/// A panic leaves the station borrowed for good, so a later event has to skip rather than panic
+/// again.
+fn run_unless_borrowed(station: &Rc<RefCell<Station>>, act: impl FnOnce(&mut Station)) {
+    if let Ok(mut busy) = station.try_borrow_mut() {
+        act(&mut busy);
+    }
+}
+
 pub(super) struct WorkstationApp {
     station: Rc<RefCell<Station>>,
 }
@@ -365,9 +381,7 @@ impl WorkstationApp {
         let tick = {
             let station = Rc::clone(&station);
             Closure::<dyn FnMut()>::new(move || {
-                if let Ok(mut busy) = station.try_borrow_mut() {
-                    busy.pump(&station);
-                }
+                run_unless_borrowed(&station, |busy| busy.pump(&station))
             })
         };
         window
@@ -397,7 +411,7 @@ impl eframe::App for WorkstationApp {
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        tap::announce_touch_screen(ctx, raw_input);
+        touch::announce_touch_screen(ctx, raw_input);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

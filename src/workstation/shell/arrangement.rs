@@ -6,7 +6,7 @@ use crate::hot::exec::ExecHalt;
 use super::navigation::{Navigation, Selection, SizeClass, View};
 
 /// The smallest height at which a control is still easy to hit with a finger.
-const TOUCH_HEIGHT: f32 = 36.0;
+pub(crate) const TOUCH_HEIGHT: f32 = 36.0;
 const TOP_BAR_HEIGHT: f32 = 40.0;
 const TAB_BAR_HEIGHT: f32 = 48.0;
 const LINK_BAR_HEIGHT: f32 = 24.0;

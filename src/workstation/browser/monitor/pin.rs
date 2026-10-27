@@ -4,8 +4,8 @@
 
 use eframe::egui;
 
-use crate::workstation::browser::tap::{self, PaneClick};
 use crate::workstation::browser::theme::{DARK, METRICS};
+use crate::workstation::browser::touch::{self, PaneClick};
 use crate::workstation::monitor::view::{MonitorDetail, MonitorUiState};
 
 /// How far the popup sits from what it describes.
@@ -42,7 +42,7 @@ impl Pins {
         record: impl FnOnce() -> String,
     ) {
         let response = ui.interact(rect, widget_id(detail), egui::Sense::CLICK);
-        if response.clicked() && ui.input(tap::is_finger) {
+        if response.clicked() && ui.input(touch::is_finger) {
             self.tapped = Some(detail);
         }
         if self.pinned != Some(detail) {

@@ -6,7 +6,6 @@ use eframe::egui;
 
 use crate::hot::exec::ExecHalt;
 
-use super::bands::paint_ellipsized;
 use super::sizes::content_column;
 use crate::workstation::browser::theme::{self, DARK, METRICS};
 use crate::workstation::format::MISSING;
@@ -18,22 +17,6 @@ use crate::workstation::text::{
     write_amount,
 };
 
-/// Header, base, quote, bid counts and ask counts. A fixed count keeps the band's height fixed.
-const ROWS: usize = 5;
-
-// SMELL: the band size builder reads these two heights, and this file uses the centred column
-// from that same builder's module, so the two modules depend on each other. The heights stay here,
-// beside the rows they count.
-
-/// Computed from the row count, so the layout and the painter cannot disagree after a size change.
-pub(super) fn height() -> f32 {
-    ROWS as f32 * METRICS.monitor_row_height + 2.0 * METRICS.space_1
-}
-
-pub(super) fn status_height() -> f32 {
-    METRICS.monitor_row_height + 2.0 * METRICS.space_1
-}
-
 /// Draws into the centred column of `band`. The caller fills the band.
 pub(super) fn paint_status(ui: &mut egui::Ui, band: egui::Rect, frame: &MonitorFrame<'_>) {
     let view = account(frame.model, frame.instrument, frame.tick);
@@ -44,6 +27,8 @@ pub(super) fn paint_status(ui: &mut egui::Ui, band: egui::Rect, frame: &MonitorF
     paint_status_row(&painter, &grid, row, &view);
 }
 
+// SMELL: the band's fixed height counts the five rows drawn here, but that count lives with the
+// monitor's other sizes and nothing here reads it, so a sixth row would be cut off with no warning.
 /// Draws into the centred column of `band`, and its rules across the whole band. The caller fills
 /// the band.
 pub(super) fn paint(ui: &mut egui::Ui, band: egui::Rect, frame: &MonitorFrame<'_>) {
@@ -164,7 +149,7 @@ fn paint_header(painter: &egui::Painter, grid: &Grid, rect: egui::Rect, view: &A
         if note_left >= notes_right {
             break;
         }
-        let used = paint_ellipsized(
+        let used = theme::paint_ellipsized(
             painter,
             egui::Rect::from_x_y_ranges(note_left..=notes_right, y..=y),
             &note,
@@ -321,7 +306,7 @@ fn paint_status_row(
     );
     let (reject, tone) = text::reject_display(view.last_reject.map(|reject| reject.origin));
     let reject_text_rect = grid.column(rect, 0).union(grid.column(rect, 1));
-    paint_ellipsized(
+    theme::paint_ellipsized(
         painter,
         reject_text_rect,
         &reject,

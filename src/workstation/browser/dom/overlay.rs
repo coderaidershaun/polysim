@@ -3,12 +3,9 @@
 
 use eframe::egui;
 
+use super::DomFrame;
 use super::geometry::{ASK_COLUMNS, BID_COLUMNS, DomLayout};
-// SMELL: the overlay uses the ladder's frame type and the ladder calls the overlay, so each depends
-// on the other. The frame type stays beside the ladder's paint function because other code names
-// it there. Moving it into a module of its own would end the loop.
-use super::ladder::DomFrame;
-use crate::workstation::browser::theme::{DARK, METRICS};
+use crate::workstation::browser::theme::{self, DARK, Direction, METRICS};
 use crate::workstation::dom_view::{DomRow, DomView, QuotePlacement};
 use crate::workstation::format;
 use crate::workstation::text;
@@ -69,16 +66,10 @@ impl OverlayPainter<'_> {
         });
         let left = self.layout.rect.center().x - size.x / 2.0;
         let pill = egui::Rect::from_min_size(egui::pos2(left, top), size);
-        fill_pill(self.painter, pill, color);
+        theme::fill_pill(self.painter, pill, color);
         self.painter
             .galley(pill.min + egui::vec2(pad, pad / 2.0), galley, color);
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Direction {
-    Up,
-    Down,
 }
 
 fn chevron(
@@ -114,14 +105,15 @@ fn chevron(
         Direction::Up => layout.rect.top() + height / 2.0 + METRICS.space_1,
         Direction::Down => layout.rect.bottom() - height / 2.0 - METRICS.space_1,
     };
-    let pill = clamp_rect(
+    let pill = theme::clamp_rect(
         layout.rect,
         egui::Rect::from_center_size(egui::pos2(center_x, center_y), egui::vec2(width, height)),
     );
-    fill_pill(painter, pill, DARK.focus);
+    theme::fill_pill(painter, pill, DARK.focus);
 
     let arrow_center = egui::pos2(pill.left() + pad + arrow / 2.0, pill.center().y);
-    painter.add(triangle(arrow_center, arrow, direction, DARK.selected));
+    let arrow_shape = theme::triangle(arrow_center, arrow, direction, DARK.selected);
+    painter.add(arrow_shape);
     painter.galley(
         egui::pos2(
             arrow_center.x + arrow / 2.0 + METRICS.space_1,
@@ -131,30 +123,6 @@ fn chevron(
         DARK.focus,
     );
     pill
-}
-
-/// Painted as a shape rather than set as a glyph: the bundled default fonts have no face for the
-/// arrows and triangles this would otherwise be written with.
-pub(crate) fn triangle(
-    center: egui::Pos2,
-    size: f32,
-    direction: Direction,
-    color: egui::Color32,
-) -> egui::Shape {
-    let half = size / 2.0;
-    let points = match direction {
-        Direction::Up => vec![
-            egui::pos2(center.x, center.y - half),
-            egui::pos2(center.x - half, center.y + half),
-            egui::pos2(center.x + half, center.y + half),
-        ],
-        Direction::Down => vec![
-            egui::pos2(center.x, center.y + half),
-            egui::pos2(center.x - half, center.y - half),
-            egui::pos2(center.x + half, center.y - half),
-        ],
-    };
-    egui::Shape::convex_polygon(points, color, egui::Stroke::NONE)
 }
 
 struct RowDetail {
@@ -205,12 +173,12 @@ fn readout(painter: &egui::Painter, layout: &DomLayout, pointer: egui::Pos2, det
     let width = galleys.iter().map(|g| g.size().x).fold(0.0_f32, f32::max) + 2.0 * pad;
     let height = line_h * galleys.len() as f32 + 2.0 * pad;
     let anchor = egui::pos2(pointer.x + METRICS.space_2, pointer.y + METRICS.space_2);
-    let clamped = clamp_rect(
+    let clamped = theme::clamp_rect(
         layout.rect,
         egui::Rect::from_min_size(anchor, egui::vec2(width, height)),
     );
 
-    fill_pill(painter, clamped, DARK.border);
+    theme::fill_pill(painter, clamped, DARK.border);
     for (index, galley) in galleys.into_iter().enumerate() {
         painter.galley(
             egui::pos2(
@@ -221,27 +189,4 @@ fn readout(painter: &egui::Painter, layout: &DomLayout, pointer: egui::Pos2, det
             DARK.text_primary,
         );
     }
-}
-
-pub(crate) fn fill_pill(painter: &egui::Painter, rect: egui::Rect, border: egui::Color32) {
-    painter.rect_filled(rect, METRICS.corner_radius, DARK.panel_raised);
-    painter.rect_stroke(
-        rect,
-        METRICS.corner_radius,
-        egui::Stroke::new(1.0, border),
-        egui::StrokeKind::Inside,
-    );
-}
-
-pub(crate) fn clamp_rect(bounds: egui::Rect, rect: egui::Rect) -> egui::Rect {
-    let mut min = rect.min;
-    if rect.right() > bounds.right() {
-        min.x = bounds.right() - rect.width();
-    }
-    if rect.bottom() > bounds.bottom() {
-        min.y = bounds.bottom() - rect.height();
-    }
-    min.x = min.x.max(bounds.left());
-    min.y = min.y.max(bounds.top());
-    egui::Rect::from_min_size(min, rect.size())
 }

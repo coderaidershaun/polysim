@@ -1,10 +1,5 @@
-//! The one rule that pins a readout by touch, shared by the ladder, the monitor and the chart.
-//!
-//! Only a finger's tap makes a pin, because a mouse already shows every readout on hover. A tap on
-//! something pinnable pins it. While a pin is set, a finger tap on another pinnable thing in the
-//! same pane moves it there. A second tap on the same thing, a tap on nothing pinnable, or any
-//! mouse click in the pane lets go. A click or tap in another pane, or on a popup or window that
-//! something else draws over the pane, leaves the pin alone.
+//! Telling a finger from a mouse. Only a finger's tap pins a readout, because a mouse already
+//! shows every readout on hover, and any mouse click in a pane lets go of that pane's pin.
 
 use eframe::egui;
 use js_sys::Reflect;

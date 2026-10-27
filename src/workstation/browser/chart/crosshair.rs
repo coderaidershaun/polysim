@@ -12,9 +12,8 @@ use crate::ids::{InstrumentId, Price};
 use super::mid::PlotGeometry;
 use super::pin::{CrosshairPin, Touch};
 use super::risk::PositionPlot;
-use crate::workstation::browser::dom::overlay;
-use crate::workstation::browser::tap::PaneClick;
 use crate::workstation::browser::theme::{self, DARK, METRICS};
+use crate::workstation::browser::touch::PaneClick;
 use crate::workstation::chart::model::{ChartModel, bucket_open_ts};
 use crate::workstation::chart::position_model::PositionModel;
 use crate::workstation::chart::position_view::RiskSeries;
@@ -256,9 +255,9 @@ fn paint_pill(
     let is_flipped = right_of_line + size.x > plot.right() && left_of_line >= plot.left();
     let left = if is_flipped { left_of_line } else { right_of_line };
     let top_left = egui::pos2(left, anchor.y - PILL_PAD.y - first.size().y / 2.0);
-    let pill = overlay::clamp_rect(plot, egui::Rect::from_min_size(top_left, size));
+    let pill = theme::clamp_rect(plot, egui::Rect::from_min_size(top_left, size));
 
-    overlay::fill_pill(painter, pill, DARK.border);
+    theme::fill_pill(painter, pill, DARK.border);
     let mut y = pill.top() + PILL_PAD.y;
     for galley in galleys {
         let line_height = galley.size().y;

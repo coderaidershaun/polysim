@@ -23,6 +23,24 @@ mod scenes;
 #[cfg(target_arch = "wasm32")]
 mod shell_scene;
 
+#[cfg(target_arch = "wasm32")]
+fn query(name: &str) -> Option<String> {
+    let search = web_sys::window()?.location().search().ok()?;
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+        .map(str::to_owned)
+}
+
+/// A position scene brings its own mid chart, so its risk chart always shares that chart's window.
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeftPanel {
+    Chart,
+    Positions,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
     position_dump::dump();

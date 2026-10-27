@@ -1,6 +1,8 @@
 //! How the chart pane shares its height at any size, so no band is crushed: the latency grid or its
 //! one-line summary on top, then the mid chart, the series strip and the risk chart.
 
+use crate::workstation::shell::TOUCH_HEIGHT;
+
 /// One row per flow. The table of row labels is declared with this length, so the compiler keeps
 /// the grid's height and its rows in step.
 pub(crate) const LATENCY_ROW_COUNT: usize = 3;
@@ -13,8 +15,8 @@ const GRID_HEIGHT: f32 = LATENCY_HEADER_HEIGHT + LATENCY_ROW_COUNT as f32 * LATE
 /// and must still count as that height.
 const HEIGHT_SLACK: f32 = 0.01;
 
-/// The series selector fills the strip, and a touch target needs at least 36 points of height.
-const STRIP_HEIGHT: f32 = 36.0;
+/// The series selector fills the strip, so the strip is as tall as a touch target.
+const STRIP_HEIGHT: f32 = TOUCH_HEIGHT;
 
 /// The mid chart is the main thing to read and the risk chart sits beside it, so the mid chart
 /// takes the larger share when both fit.

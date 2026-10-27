@@ -5,7 +5,7 @@ use eframe::egui;
 
 use polysim::workstation::browser::chart::mid::{self, ChartFrame};
 use polysim::workstation::browser::chart::stack::{self, ChartStackFrame};
-use polysim::workstation::browser::dom::ladder::{self, DomFrame};
+use polysim::workstation::browser::dom::{DomFrame, ladder};
 use polysim::workstation::browser::latency::{self, LatencyFrame};
 use polysim::workstation::browser::monitor::bands;
 use polysim::workstation::browser::{announce_touch_screen, chrome};
@@ -24,6 +24,7 @@ use crate::monitor_scenes::monitor_scenes;
 use crate::position_scenes::{PositionScene, position_scenes};
 use crate::scenes::{Scene, scenes};
 use crate::shell_scene::{self, ShellScene};
+use crate::{LeftPanel, query};
 
 // SMELL: this colour, like the HUD's text colour, repeats one from the workstation's palette, which
 // the library keeps private, so a palette change leaves the fixture's background and the HUD's text
@@ -32,13 +33,6 @@ const CANVAS: egui::Color32 = egui::Color32::from_rgb(10, 13, 18);
 
 /// The panes that report a fit readout. The ladder has none.
 const READOUT_VIEWS: [View; 2] = [View::Chart, View::Monitor];
-
-/// A position scene brings its own mid chart, so its risk chart always shares that chart's window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LeftPanel {
-    Chart,
-    Positions,
-}
 
 pub struct DomFixture {
     scenes: Panel<Scene>,
@@ -298,18 +292,12 @@ impl DomFixture {
     /// not have. Returns the fit readout of each pane that has one, in the order of
     /// `READOUT_VIEWS`.
     fn paint_panes(&mut self, ui: &mut egui::Ui, arrangement: &Arrangement) -> Vec<String> {
-        chrome::paint_pane_frames(ui, arrangement);
         let mut readouts = Vec::new();
-        if let Some(pane) = arrangement.pane(View::Chart) {
-            readouts.push(self.paint_chart(ui, pane.body.into()));
-        }
-        if let Some(pane) = arrangement.pane(View::Monitor) {
-            readouts.push(self.paint_monitor(ui, pane.body.into()));
-        }
-        if let Some(pane) = arrangement.pane(View::Ladder) {
-            self.paint_ladder(ui, pane.body.into());
-        }
-        chrome::paint_pane_rules(ui, arrangement);
+        chrome::paint_panes(ui, arrangement, |ui, view, pane| match view {
+            View::Chart => readouts.push(self.paint_chart(ui, pane.body.into())),
+            View::Monitor => readouts.push(self.paint_monitor(ui, pane.body.into())),
+            View::Ladder => self.paint_ladder(ui, pane.body.into()),
+        });
         readouts
     }
 
@@ -411,18 +399,6 @@ fn dom_levels() -> usize {
 /// A value that is not a number gives no pick.
 fn number(name: &str) -> Option<usize> {
     query(name)?.parse().ok()
-}
-
-// SMELL: the shell scene reads the query string through this function while this page builds the
-// shell scene, so the two files import each other. The reader belongs in a small file of its own
-// beside them.
-pub(crate) fn query(name: &str) -> Option<String> {
-    let search = web_sys::window()?.location().search().ok()?;
-    search
-        .trim_start_matches('?')
-        .split('&')
-        .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
-        .map(str::to_owned)
 }
 
 fn wrapped(index: usize, delta: i32, count: usize) -> usize {
