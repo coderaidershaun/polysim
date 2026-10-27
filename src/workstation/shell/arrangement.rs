@@ -91,13 +91,14 @@ pub struct Pane {
 
 /// The slots run left to right: picker, switcher, strategy id, then the badges. On a short bar the
 /// strategy id gives way first and its room goes to the picker, then the picker shrinks, and the
-/// badges never give way. Below 320 points the badges keep their width first, then the switcher,
-/// and the picker gets what is left, so no slot overlaps another or turns negative.
+/// badges never give way. Below 320 points the badges keep their width first and the picker gets
+/// what is left, so no slot overlaps another or turns negative.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TopBar {
     pub area: Area,
     pub picker: Area,
-    /// Absent on a compact canvas, where the tab bar is the switcher.
+    /// Present on a medium canvas only. A compact canvas switches with the tab bar, and a wide one
+    /// always shows the whole desk.
     pub switcher: Option<Area>,
     /// Absent when less than a readable slice is left for it.
     pub strategy: Option<Area>,
@@ -113,7 +114,7 @@ impl TopBar {
         let halt = halt
             .is_some_and(ExecHalt::is_halted)
             .then(|| room.cut_right(HALT_WIDTH));
-        let switcher_width = (class != SizeClass::Compact).then(|| SWITCHER_WIDTH.min(room.width));
+        let switcher_width = (class == SizeClass::Medium).then(|| SWITCHER_WIDTH.min(room.width));
         let reserved = switcher_width.unwrap_or(0.0);
         let has_strategy = room.width - PICKER_WIDTH - reserved >= STRATEGY_MIN_WIDTH;
         // Without room for the strategy id the picker takes what is left, so no blank cell sits
@@ -136,7 +137,8 @@ impl TopBar {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Arrangement {
     pub class: SizeClass,
-    /// What the canvas actually shows, which on a compact canvas is always a single view.
+    /// What the canvas actually shows. A compact canvas always shows a single view, and a wide one
+    /// always shows the desk.
     pub shown: Selection,
     pub top_bar: TopBar,
     pub tab_bar: Option<Area>,

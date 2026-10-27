@@ -103,7 +103,7 @@ impl ShellScene {
     }
 
     /// The steps wrap, so the desk follows the monitor. A compact canvas has no desk, so the step
-    /// skips it there.
+    /// skips it there. A wide canvas always shows the desk, so the step changes nothing there.
     fn step_view(&mut self, arrangement: &Arrangement) {
         let at = Selection::ALL
             .iter()

@@ -66,7 +66,7 @@ impl Selection {
 }
 
 /// The selection plus the single view a compact canvas falls back to, because the desk does not
-/// exist there.
+/// exist there. A wide canvas has room for everything, so it always shows the desk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Navigation {
     selection: Selection,
@@ -85,24 +85,27 @@ impl Navigation {
         }
     }
 
-    /// What the URL must show. It can be the desk while a compact canvas shows a view.
+    /// What the URL must show. It can be the desk while a compact canvas shows a view, or a view
+    /// while a wide canvas shows the desk.
     pub(crate) fn selection(&self) -> Selection {
         self.selection
     }
 
     pub(super) fn shown(&self, class: SizeClass) -> Selection {
         match (self.selection, class) {
+            (_, SizeClass::Wide) => Selection::Desk,
             (Selection::Desk, SizeClass::Compact) => Selection::View(self.last_view),
             (selection, _) => selection,
         }
     }
 
-    /// The desk is refused on a compact canvas, so key `0` does nothing there.
+    /// A wide canvas always shows the desk, so it refuses every selection. A compact canvas refuses
+    /// the desk, so key `0` does nothing there.
     pub fn select(&mut self, selection: Selection, class: SizeClass) {
-        match selection {
-            Selection::Desk if class == SizeClass::Compact => {}
-            Selection::Desk => self.selection = selection,
-            Selection::View(view) => {
+        match (selection, class) {
+            (_, SizeClass::Wide) | (Selection::Desk, SizeClass::Compact) => {}
+            (Selection::Desk, _) => self.selection = selection,
+            (Selection::View(view), _) => {
                 self.selection = selection;
                 self.last_view = view;
             }

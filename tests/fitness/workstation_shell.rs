@@ -191,8 +191,8 @@ fn the_medium_desk_gives_the_ladder_forty_percent_clamped_to_320_and_440() {
 }
 
 #[test]
-fn a_single_view_fills_the_content_and_hides_the_others_in_every_class() {
-    for width in [390.0, 900.0, 1_280.0] {
+fn a_single_view_fills_the_content_and_hides_the_others_below_wide() {
+    for width in [390.0, 900.0] {
         for view in [View::Chart, View::Ladder, View::Monitor] {
             let arrangement = arrange(width, HEIGHT, Selection::View(view));
             let content_top = 40.0;
@@ -244,15 +244,15 @@ fn chart_and_ladder_panes_carry_a_header_directly_above_the_body_and_the_monitor
 
 #[test]
 fn a_pane_is_capped_at_2400_by_1600_and_a_wider_slot_centres_it_at_the_top() {
-    let arrangement = arrange(3_840.0, 2_160.0, Selection::View(View::Chart));
+    let arrangement = arrange(5_120.0, 2_160.0, Selection::Desk);
     let chart = shown(&arrangement, View::Chart);
     let header = chart.header.expect("the chart has a header");
     assert_eq!(header.top, 40.0);
-    assert_eq!((header.left, header.width), (720.0, 2_400.0));
+    assert_eq!((header.left, header.width), (80.0, 2_400.0));
     assert_eq!(
         chart.body,
         Area {
-            left: 720.0,
+            left: 80.0,
             top: 70.0,
             width: 2_400.0,
             height: 1_600.0
@@ -261,11 +261,12 @@ fn a_pane_is_capped_at_2400_by_1600_and_a_wider_slot_centres_it_at_the_top() {
 }
 
 #[test]
-fn compact_falls_back_to_the_last_single_view_and_refuses_the_desk() {
-    let compact =
-        |navigation: &Navigation| Arrangement::new(canvas(390.0, 844.0), navigation, None).shown;
-    let wide =
-        |navigation: &Navigation| Arrangement::new(canvas(1_280.0, HEIGHT), navigation, None).shown;
+fn compact_shows_the_last_view_and_wide_shows_only_the_desk() {
+    let shown_at = |width: f32, navigation: &Navigation| {
+        Arrangement::new(canvas(width, HEIGHT), navigation, None).shown
+    };
+    let compact = |navigation: &Navigation| shown_at(390.0, navigation);
+    let wide = |navigation: &Navigation| shown_at(1_280.0, navigation);
     let chart = Selection::View(View::Chart);
     let monitor = Selection::View(View::Monitor);
 
@@ -277,25 +278,38 @@ fn compact_falls_back_to_the_last_single_view_and_refuses_the_desk() {
     );
 
     let mut navigation = Navigation::new(Selection::Desk);
-    navigation.select(monitor, SizeClass::Wide);
-    navigation.select(Selection::Desk, SizeClass::Wide);
+    navigation.select(monitor, SizeClass::Medium);
+    navigation.select(Selection::Desk, SizeClass::Medium);
     assert_eq!(compact(&navigation), monitor, "the last view comes back");
     assert_eq!(
         wide(&navigation),
         Selection::Desk,
-        "the wide canvas keeps the desk"
+        "the wide canvas shows the desk"
     );
 
     let before = navigation;
+    for selection in Selection::ALL {
+        navigation.select(selection, SizeClass::Wide);
+        assert_eq!(
+            navigation, before,
+            "{selection:?} is refused on a wide canvas"
+        );
+    }
+
     navigation.select(Selection::Desk, SizeClass::Compact);
     assert_eq!(navigation, before, "key 0 does nothing on a compact canvas");
 
     navigation.select(chart, SizeClass::Compact);
     assert_eq!(compact(&navigation), chart);
     assert_eq!(
-        wide(&navigation),
+        shown_at(900.0, &navigation),
         chart,
-        "a view chosen in compact stays chosen when it grows"
+        "a view chosen in compact stays chosen on a medium canvas"
+    );
+    assert_eq!(
+        wide(&navigation),
+        Selection::Desk,
+        "a view chosen in compact does not leave the wide desk"
     );
 }
 
@@ -314,8 +328,8 @@ fn the_top_bar_drops_the_strategy_first_and_never_the_badges() {
             1_280.0,
             false,
             Some((0.0, 220.0)),
-            Some((220.0, 256.0)),
-            Some((476.0, 744.0)),
+            None,
+            Some((220.0, 1_000.0)),
             None,
             Some((1_220.0, 60.0)),
         ),
@@ -323,8 +337,8 @@ fn the_top_bar_drops_the_strategy_first_and_never_the_badges() {
             1_280.0,
             true,
             Some((0.0, 220.0)),
-            Some((220.0, 256.0)),
-            Some((476.0, 672.0)),
+            None,
+            Some((220.0, 928.0)),
             Some((1_148.0, 72.0)),
             Some((1_220.0, 60.0)),
         ),
@@ -606,21 +620,24 @@ proptest! {
                 prop_assert!(!is_overlapping(span(*a), span(*b)), "panes overlap: {a:?} {b:?}");
             }
         }
-        if selection == Selection::Desk {
-            let mut spans: Vec<Area> = shown.iter().map(|(_, pane)| span(*pane)).collect();
-            spans.sort_by(|a, b| a.left.total_cmp(&b.left));
-            prop_assert!((spans[0].left - content.left).abs() <= EPSILON, "desk starts late");
-            for pair in spans.windows(2) {
-                prop_assert!((right(pair[0]) - pair[1].left).abs() <= EPSILON, "desk gap {pair:?}");
-            }
-            let last = spans[spans.len() - 1];
-            prop_assert!((right(last) - right(content)).abs() <= EPSILON, "desk ends early");
+        let mut spans: Vec<Area> = shown.iter().map(|(_, pane)| span(*pane)).collect();
+        spans.sort_by(|a, b| a.left.total_cmp(&b.left));
+        prop_assert!((spans[0].left - content.left).abs() <= EPSILON, "panes start late");
+        for pair in spans.windows(2) {
+            prop_assert!((right(pair[0]) - pair[1].left).abs() <= EPSILON, "panes gap {pair:?}");
         }
+        let last = spans[spans.len() - 1];
+        prop_assert!((right(last) - right(content)).abs() <= EPSILON, "panes end early");
 
         let bar = arrangement.top_bar;
         prop_assert!(bar.mode.width == 60.0 && (right(bar.mode) - width).abs() <= EPSILON);
         prop_assert!(bar.halt.is_some() == is_latched, "halt slot {:?}", bar.halt);
-        prop_assert!(bar.switcher.is_some() == (arrangement.class != SizeClass::Compact));
+        prop_assert!(bar.switcher.is_some() == (arrangement.class == SizeClass::Medium));
+        prop_assert!(
+            arrangement.class != SizeClass::Wide || arrangement.shown == Selection::Desk,
+            "a wide canvas shows {:?}",
+            arrangement.shown
+        );
         if bar.picker.width < 220.0 {
             prop_assert!(bar.strategy.is_none(), "the strategy id outlives the picker");
         }
