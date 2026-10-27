@@ -1,5 +1,7 @@
 //! The crosshair over both plots: under a mouse, under a dragging finger, or where a finger lifted.
 //! It skips the strip so it never crosses the series selector, and each pill stays inside its plot.
+//! A finger on a plot scrubs, so a tap there always pins where it lifts, even over the pinned
+//! bucket. Every other click or tap in the pane lets go of the pin.
 
 use std::sync::Arc;
 
@@ -11,6 +13,7 @@ use super::mid::PlotGeometry;
 use super::pin::{CrosshairPin, Touch};
 use super::risk::PositionPlot;
 use crate::workstation::browser::dom::overlay;
+use crate::workstation::browser::tap::PaneClick;
 use crate::workstation::browser::theme::{self, DARK, METRICS};
 use crate::workstation::chart::model::{ChartModel, bucket_open_ts};
 use crate::workstation::chart::position_model::PositionModel;
@@ -34,9 +37,11 @@ pub(super) struct CrosshairFrame<'a> {
     pub series: RiskSeries,
     pub mid: Option<PlotGeometry>,
     pub lower: Option<PositionPlot>,
-    /// Both charts together. The hairline clips to it, and a click or tap inside it but off both
-    /// plots clears a pin.
+    /// Both charts together. The hairline clips to it, and a finger must land inside it to scrub.
     pub stack: egui::Rect,
+    /// The whole pane body around the stack. A mouse click in it, or a tap off both plots, lets go
+    /// of a pin.
+    pub pane: egui::Rect,
     pub hovered: Option<egui::Pos2>,
 }
 
@@ -67,28 +72,19 @@ impl Axis {
     }
 }
 
-/// A pointer event the pin cares about, copied out of the frame's input so no lock is held while
-/// the event is resolved.
+/// A touch event the pin cares about, copied out of the frame's input so no lock is held while the
+/// event is resolved.
 #[derive(Clone, Copy)]
-enum Pointer {
-    Press(egui::Pos2),
-    Touch {
-        finger: u64,
-        phase: egui::TouchPhase,
-        pos: egui::Pos2,
-    },
+struct FingerEvent {
+    finger: u64,
+    phase: egui::TouchPhase,
+    pos: egui::Pos2,
 }
 
-impl Pointer {
+impl FingerEvent {
     fn from_event(event: &egui::Event) -> Option<Self> {
         match *event {
-            egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                ..
-            } => Some(Self::Press(pos)),
-            egui::Event::Touch { id, phase, pos, .. } => Some(Self::Touch {
+            egui::Event::Touch { id, phase, pos, .. } => Some(Self {
                 finger: id.0,
                 phase,
                 pos,
@@ -105,8 +101,14 @@ pub(super) fn paint(ui: &egui::Ui, frame: &CrosshairFrame<'_>) {
         .ctx()
         .data(|data| data.get_temp(pin_id))
         .unwrap_or_default();
+    if is_let_go_click(ui, frame) {
+        pin.on_touch(Touch::LetGo);
+    }
     for touch in touches(ui, frame, axis) {
         pin.on_touch(touch);
+    }
+    if !ui.input(|input| input.any_touches()) {
+        pin.end_scrub();
     }
     pin.forget_outside(axis.domain);
     ui.ctx().data_mut(|data| data.insert_temp(pin_id, pin));
@@ -118,19 +120,32 @@ pub(super) fn paint(ui: &egui::Ui, frame: &CrosshairFrame<'_>) {
     paint_pills(&painter, frame, bucket);
 }
 
-/// This frame's pointer events in the order they arrived. A tap can deliver its press, touch start,
-/// release and touch end all in one frame, so their order decides what the pin ends up holding.
+/// Whether this frame's click lets go of a pin. A mouse click does, plots included. A tap does
+/// unless it landed on a plot: a finger there scrubs, and the pin lands where it lifts. The click
+/// is read before the touch events apply, so a tap that starts on a plot and lifts off it still
+/// pins where it lifted.
+fn is_let_go_click(ui: &egui::Ui, frame: &CrosshairFrame<'_>) -> bool {
+    match PaneClick::read(ui.ctx(), frame.pane, ui.layer_id()) {
+        Some(PaneClick::Mouse) => true,
+        Some(PaneClick::Finger(at)) => !is_on_plot(frame, at),
+        None => false,
+    }
+}
+
+/// This frame's touch events in the order they arrived. The chart reads raw touches, not clicks,
+/// because a finger drags across it to scrub. A tap can deliver its start and end in one frame, so
+/// their order decides what the pin ends up holding.
 fn touches(ui: &egui::Ui, frame: &CrosshairFrame<'_>, axis: Axis) -> Vec<Touch> {
-    let pointers: Vec<Pointer> = ui.input(|input| {
+    let events: Vec<FingerEvent> = ui.input(|input| {
         input
             .events
             .iter()
-            .filter_map(Pointer::from_event)
+            .filter_map(FingerEvent::from_event)
             .collect()
     });
-    pointers
+    events
         .into_iter()
-        .filter_map(|pointer| resolve(ui, frame, axis, pointer))
+        .filter_map(|event| resolve(ui, frame, axis, event))
         .collect()
 }
 
@@ -138,41 +153,23 @@ fn resolve(
     ui: &egui::Ui,
     frame: &CrosshairFrame<'_>,
     axis: Axis,
-    pointer: Pointer,
+    event: FingerEvent,
 ) -> Option<Touch> {
-    match pointer {
-        // A mouse click, or the press half of a tap. A touch that starts on a plot is picked up
-        // from its own touch event below, so a press on a plot maps to nothing here.
-        Pointer::Press(pos) => {
-            (is_reachable(ui, frame, pos) && !is_on_plot(frame, pos)).then_some(Touch::OffPlot)
+    let FingerEvent { finger, phase, pos } = event;
+    match phase {
+        egui::TouchPhase::Start => {
+            (is_reachable(ui, frame, pos) && is_on_plot(frame, pos)).then(|| Touch::OnPlot {
+                finger,
+                bucket: axis.bucket_at(pos.x),
+            })
         }
-        Pointer::Touch {
-            finger,
-            phase: egui::TouchPhase::Start,
-            pos,
-        } => (is_reachable(ui, frame, pos) && is_on_plot(frame, pos)).then(|| Touch::OnPlot {
-            finger,
-            bucket: axis.bucket_at(pos.x),
-        }),
         // A finger that drags off the stack keeps scrubbing, clamped to the plot's edge.
-        Pointer::Touch {
-            finger,
-            phase: egui::TouchPhase::Move,
-            pos,
-        } => Some(Touch::Moved {
+        egui::TouchPhase::Move => Some(Touch::Moved {
             finger,
             bucket: axis.bucket_at(pos.x),
         }),
-        Pointer::Touch {
-            finger,
-            phase: egui::TouchPhase::End,
-            ..
-        } => Some(Touch::Lifted { finger }),
-        Pointer::Touch {
-            finger,
-            phase: egui::TouchPhase::Cancel,
-            ..
-        } => Some(Touch::Cancelled { finger }),
+        egui::TouchPhase::End => Some(Touch::Lifted { finger }),
+        egui::TouchPhase::Cancel => Some(Touch::Cancelled { finger }),
     }
 }
 

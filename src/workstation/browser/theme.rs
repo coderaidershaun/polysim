@@ -225,6 +225,17 @@ pub(crate) fn text_at(
     painter.text(anchor, align, text, font, color)
 }
 
+/// The column of `width` points centred across `rect`, at the full height of `rect`. Its offset
+/// from the left of `rect` is a whole number of points, so it starts on a whole point whenever
+/// `rect` does.
+pub(crate) fn centred_column(rect: egui::Rect, width: f32) -> egui::Rect {
+    let left = rect.left() + ((rect.width() - width) / 2.0).floor();
+    egui::Rect::from_min_size(
+        egui::pos2(left, rect.top()),
+        egui::vec2(width, rect.height()),
+    )
+}
+
 /// A border hairline at each x across `y_range`, each snapped to a pixel centre.
 pub(crate) fn rules_v(
     painter: &egui::Painter,

@@ -1,5 +1,5 @@
-//! The text band over the page: which scene each panel shows, what the shell shows, and the keys
-//! that step them.
+//! The text band over the page: which scene each panel shows, what the shell shows, the keys that
+//! step them, and a row for each pane that reports its fit.
 
 use eframe::egui;
 
@@ -34,11 +34,36 @@ pub struct Hud<'a> {
     pub class: SizeClass,
     pub size: egui::Vec2,
     pub zoom: f32,
+    pub link_index: usize,
+    pub link_count: usize,
+    pub link: &'a str,
+    /// How many panes report a fit readout. The band keeps a row for each.
+    pub readout_count: usize,
 }
 
-/// Paints the band at the top of `canvas`, every line wrapped to its width. Returns the height it
-/// used, so the page can start below it.
-pub fn paint(painter: &egui::Painter, canvas: egui::Rect, hud: &Hud<'_>) -> f32 {
+/// The band's height and the rows it keeps for the panes' readouts. The rows are filled after the
+/// panes paint, because a readout reports what its pane measured.
+pub struct HudBand {
+    pub height: f32,
+    rows: Vec<egui::Rect>,
+}
+
+impl HudBand {
+    /// Pairs readouts with rows in order, so a readout without a row is dropped and a row without a
+    /// readout stays blank. A readout wider than its row ends in an ellipsis on a whole glyph.
+    pub fn paint_readouts(&self, painter: &egui::Painter, readouts: &[String]) {
+        for (row, readout) in self.rows.iter().zip(readouts) {
+            let mut job =
+                egui::text::LayoutJob::simple_singleline(readout.clone(), body_font(), TEXT);
+            job.wrap = egui::text::TextWrapping::truncate_at_width(row.width());
+            painter.galley(row.min, painter.layout_job(job), TEXT);
+        }
+    }
+}
+
+/// Paints the band at the top of `canvas`, every line wrapped to its width, and leaves one blank
+/// row, a text line tall, for each readout. The page starts below the band.
+pub fn paint(painter: &egui::Painter, canvas: egui::Rect, hud: &Hud<'_>) -> HudBand {
     let wrap_width = (canvas.width() - 2.0 * PAD).max(1.0);
     let mut top = canvas.top() + PAD;
     for (font, color, text) in lines(hud) {
@@ -47,7 +72,25 @@ pub fn paint(painter: &egui::Painter, canvas: egui::Rect, hud: &Hud<'_>) -> f32 
         painter.galley(egui::pos2(canvas.left() + PAD, top), galley, color);
         top += height + LINE_GAP;
     }
-    top + PAD - LINE_GAP - canvas.top()
+    let row_height = painter
+        .layout_no_wrap("0".to_owned(), body_font(), TEXT)
+        .size()
+        .y;
+    let mut rows = Vec::with_capacity(hud.readout_count);
+    for _ in 0..hud.readout_count {
+        let size = egui::vec2(wrap_width, row_height);
+        let row = egui::Rect::from_min_size(egui::pos2(canvas.left() + PAD, top), size);
+        rows.push(row);
+        top += row_height + LINE_GAP;
+    }
+    HudBand {
+        height: top + PAD - LINE_GAP - canvas.top(),
+        rows,
+    }
+}
+
+fn body_font() -> egui::FontId {
+    egui::FontId::monospace(11.0)
 }
 
 fn lines(hud: &Hud<'_>) -> Vec<(egui::FontId, egui::Color32, String)> {
@@ -63,7 +106,7 @@ fn lines(hud: &Hud<'_>) -> Vec<(egui::FontId, egui::Color32, String)> {
     );
     let mut lines = vec![title];
     let mut line = |color: egui::Color32, text: String| {
-        lines.push((egui::FontId::monospace(11.0), color, text));
+        lines.push((body_font(), color, text));
     };
     if !hud.variant.is_empty() {
         line(TEXT_DIM, format!("variant: {}", hud.variant));
@@ -90,17 +133,20 @@ fn lines(hud: &Hud<'_>) -> Vec<(egui::FontId, egui::Color32, String)> {
     line(
         TEXT,
         format!(
-            "view {}  class {}  {:.0}x{:.0} pt  zoom {:.2}",
+            "view {}  class {}  {:.0}x{:.0} pt  zoom {:.2}  link {}/{} {}",
             hud.shown.fragment(),
             class_label(hud.class),
             hud.size.x,
             hud.size.y,
-            hud.zoom
+            hud.zoom,
+            hud.link_index + 1,
+            hud.link_count,
+            hud.link
         ),
     );
     line(
         TEXT_DIM,
-        "1-9 dom | left/right var | up/down step | M mon | T tab | C chart | V line/candles | P risk | X series | N view | K halt | E exec | H hud".to_string(),
+        "1-9 dom | left/right var | up/down step | M mon | T tab | C chart | V line/candles | P risk | X series | L link | N view | K halt | E exec | H hud".to_string(),
     );
     lines
 }

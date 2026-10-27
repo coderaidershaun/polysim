@@ -305,7 +305,7 @@ fn paint_status_row(
         painter.text(
             egui::pos2(rect.right() - METRICS.space_2 - METRICS.space_1, y),
             egui::Align2::RIGHT_CENTER,
-            format!("HALTED  {}", reason.label()),
+            format!("{}  {}", text::HALT_WORD, reason.label()),
             egui::FontId::monospace(METRICS.monitor_channel_font),
             DARK.invalid,
         );

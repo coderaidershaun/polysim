@@ -33,8 +33,9 @@ pub(crate) fn execution_badge(mode: Option<ExecutionMode>) -> (&'static str, Ton
     (ExecutionMode::badge(mode), tone)
 }
 
-// SMELL: the monitor's halt banner spells this word itself, so renaming the state takes two edits.
-pub(crate) const HALT_BADGE: (&str, Tone) = ("HALTED", Tone::Invalid);
+pub(crate) const HALT_WORD: &str = "HALTED";
+
+pub(crate) const HALT_BADGE: (&str, Tone) = (HALT_WORD, Tone::Invalid);
 
 pub(crate) fn selection_label(selection: Selection) -> &'static str {
     match selection {

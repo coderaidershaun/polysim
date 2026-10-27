@@ -7,9 +7,13 @@
 #[cfg(target_arch = "wasm32")]
 mod app;
 mod chart_scenes;
+#[cfg(target_arch = "wasm32")]
+mod fit_readout;
 mod fixture;
 #[cfg(target_arch = "wasm32")]
 mod hud;
+#[cfg(target_arch = "wasm32")]
+mod link_scenes;
 mod monitor_feed;
 mod monitor_scenes;
 #[cfg(not(target_arch = "wasm32"))]

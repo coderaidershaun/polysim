@@ -5,28 +5,33 @@ use eframe::egui;
 
 use polysim::workstation::browser::chart::mid::{self, ChartFrame};
 use polysim::workstation::browser::chart::stack::{self, ChartStackFrame};
-use polysim::workstation::browser::chrome;
 use polysim::workstation::browser::dom::ladder::{self, DomFrame};
+use polysim::workstation::browser::latency::{self, LatencyFrame};
 use polysim::workstation::browser::monitor::bands;
+use polysim::workstation::browser::{announce_touch_screen, chrome};
 use polysim::workstation::chart::position_view::RiskSeries;
 use polysim::workstation::chart::view::ChartMode;
 use polysim::workstation::dom_view::{DEFAULT_ROWS_PER_SIDE, DomOverlay};
 use polysim::workstation::monitor::view::{Channel, MonitorFrame};
 use polysim::workstation::shell::{Arrangement, View};
 
-use crate::chart_scenes::{ChartScene, chart_scenes};
-use crate::hud;
+use crate::chart_scenes::{ChartScene, chart_scenes, latency_summary};
+use crate::fit_readout;
+use crate::hud::{self, HudBand};
+use crate::link_scenes::{LinkScene, link_scenes};
 use crate::monitor_feed::MonitorScene;
 use crate::monitor_scenes::monitor_scenes;
 use crate::position_scenes::{PositionScene, position_scenes};
 use crate::scenes::{Scene, scenes};
 use crate::shell_scene::{self, ShellScene};
 
-// SMELL: these repeat colours from the workstation's palette, which the library keeps private, so a
-// palette change leaves the fixture's own background and the HUD's text behind.
+// SMELL: this colour, like the HUD's text colour, repeats one from the workstation's palette, which
+// the library keeps private, so a palette change leaves the fixture's background and the HUD's text
+// behind.
 const CANVAS: egui::Color32 = egui::Color32::from_rgb(10, 13, 18);
-const PANEL_RAISED: egui::Color32 = egui::Color32::from_rgb(21, 27, 36);
-const BORDER: egui::Color32 = egui::Color32::from_rgb(44, 53, 67);
+
+/// The panes that report a fit readout. The ladder has none.
+const READOUT_VIEWS: [View; 2] = [View::Chart, View::Monitor];
 
 /// A position scene brings its own mid chart, so its risk chart always shares that chart's window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +49,8 @@ pub struct DomFixture {
     positions: Panel<PositionScene>,
     risk_series: RiskSeries,
     left_panel: LeftPanel,
+    latency: LatencyFrame,
+    links: Panel<LinkScene>,
     shell: ShellScene,
 }
 
@@ -109,6 +116,10 @@ impl DomFixture {
                 Some(_) => LeftPanel::Positions,
                 None => LeftPanel::Chart,
             },
+            latency: LatencyFrame {
+                summary: Some(latency_summary()),
+            },
+            links: Panel::new(link_scenes(), number("LINK")),
             shell: ShellScene::new(),
         }
     }
@@ -153,6 +164,9 @@ impl DomFixture {
             if input.key_pressed(egui::Key::X) {
                 self.flip_risk_series();
             }
+            if input.key_pressed(egui::Key::L) {
+                self.links.step(1);
+            }
         });
     }
 
@@ -179,12 +193,18 @@ impl DomFixture {
         };
     }
 
-    /// Paints through the workstation's own chart stack. Returns the series the operator clicked.
-    fn paint_stack(&self, ui: &mut egui::Ui, body: egui::Rect) -> Option<RiskSeries> {
+    /// Paints through the workstation's own chart stack, which sits in `charts` under the latency
+    /// band of the chart pane `pane`. Returns the series the operator clicked.
+    fn paint_stack(
+        &self,
+        ui: &mut egui::Ui,
+        charts: egui::Rect,
+        pane: egui::Rect,
+    ) -> Option<RiskSeries> {
         let scene = self.positions.current();
         stack::paint(
             ui,
-            body,
+            charts,
             &ChartStackFrame {
                 chart: &scene.chart,
                 positions: &scene.positions,
@@ -192,6 +212,7 @@ impl DomFixture {
                 tick: scene.tick,
                 mode: self.chart_mode,
                 series: self.risk_series,
+                pane,
             },
         )
     }
@@ -208,28 +229,37 @@ impl DomFixture {
 
 impl DomFixture {
     /// Paints the HUD band first and arranges the panes in what is left, so no pane sits under the
-    /// band.
+    /// band. The band keeps a row for each pane that reports a fit, and fills them last.
     fn paint_page(&mut self, ui: &mut egui::Ui) {
         let full = ui.available_rect_before_wrap();
         ui.painter_at(full).rect_filled(full, 0.0, CANVAS);
 
-        // The size class and the shown view depend on the width alone, so an arrangement of the
-        // whole canvas can name them before the band's height is known.
+        // The size class and the shown view depend on the width and the selection alone, so an
+        // arrangement of the whole canvas can name them before the band's height is known. A key
+        // can change the selection, so the rows are counted from an arrangement made after it.
         let page = self.shell.arrange(full);
         self.shell.handle_keys(ui.ctx(), &page);
-        let band = if self.shell.is_hud_shown() { self.paint_hud(ui, full, &page) } else { 0.0 };
-        let below = full.with_min_y((full.top() + band).min(full.bottom()));
+        let page = self.shell.arrange(full);
+        let band = self
+            .shell
+            .is_hud_shown()
+            .then(|| self.paint_hud(ui, full, &page));
+        let band_height = band.as_ref().map_or(0.0, |band| band.height);
+        let below = full.with_min_y((full.top() + band_height).min(full.bottom()));
         let arrangement = self.shell.arrange(below);
 
         let action = chrome::paint_top_bar(ui, &arrangement, &self.shell.top_bar_frame());
         self.shell.apply(action, arrangement.class);
-        self.paint_panes(ui, &arrangement);
+        let readouts = self.paint_panes(ui, &arrangement);
         let action = chrome::paint_tab_bar(ui, &arrangement);
         self.shell.apply(action, arrangement.class);
-        paint_link_strip(ui, arrangement.link_bar.into());
+        self.links.current().paint(ui, arrangement.link_bar.into());
+        if let Some(band) = band {
+            band.paint_readouts(&ui.painter_at(full), &readouts);
+        }
     }
 
-    fn paint_hud(&self, ui: &egui::Ui, canvas: egui::Rect, page: &Arrangement) -> f32 {
+    fn paint_hud(&self, ui: &egui::Ui, canvas: egui::Rect, page: &Arrangement) -> HudBand {
         let dom_scene = self.scenes.current();
         let monitor = self.monitors.current();
         let position_scene = self.positions.current();
@@ -253,36 +283,47 @@ impl DomFixture {
                 class: page.class,
                 size: canvas.size(),
                 zoom: ui.ctx().zoom_factor(),
+                link_index: self.links.index,
+                link_count: self.links.items.len(),
+                link: self.links.current().name,
+                readout_count: READOUT_VIEWS
+                    .iter()
+                    .filter(|view| page.pane(**view).is_some())
+                    .count(),
             },
         )
     }
 
     /// The pane headers stay empty, because their controls change a live model the fixture does
-    /// not have.
-    fn paint_panes(&mut self, ui: &mut egui::Ui, arrangement: &Arrangement) {
+    /// not have. Returns the fit readout of each pane that has one, in the order of
+    /// `READOUT_VIEWS`.
+    fn paint_panes(&mut self, ui: &mut egui::Ui, arrangement: &Arrangement) -> Vec<String> {
         chrome::paint_pane_frames(ui, arrangement);
+        let mut readouts = Vec::new();
         if let Some(pane) = arrangement.pane(View::Chart) {
-            self.paint_chart(ui, pane.body.into());
+            readouts.push(self.paint_chart(ui, pane.body.into()));
         }
         if let Some(pane) = arrangement.pane(View::Monitor) {
-            self.paint_monitor(ui, pane.body.into());
+            readouts.push(self.paint_monitor(ui, pane.body.into()));
         }
         if let Some(pane) = arrangement.pane(View::Ladder) {
             self.paint_ladder(ui, pane.body.into());
         }
         chrome::paint_pane_rules(ui, arrangement);
+        readouts
     }
 
-    /// Paints through the workstation's own chart painters.
-    fn paint_chart(&self, ui: &mut egui::Ui, body: egui::Rect) {
-        match self.left_panel {
+    /// Paints the latency band and the charts under it through the workstation's own painters, as
+    /// the page does.
+    fn paint_chart(&self, ui: &mut egui::Ui, body: egui::Rect) -> String {
+        let (band, charts) = latency::split(body);
+        latency::paint(ui, band, &self.latency);
+        let fit = match self.left_panel {
             LeftPanel::Chart => {
                 let chart_scene = self.charts.current();
-                // This panel draws no crosshair, so the geometry the mid chart hands back goes
-                // unused.
-                let _mid = mid::paint(
+                let painted = mid::paint(
                     ui,
-                    body,
+                    charts,
                     &ChartFrame {
                         chart: &chart_scene.chart,
                         instrument: chart_scene.instrument,
@@ -291,15 +332,18 @@ impl DomFixture {
                         domain: None,
                     },
                 );
+                fit_readout::mid_axis(painted.geometry.as_ref(), self.chart_mode)
             }
             // The workstation applies the operator's click. The fixture switches series by key.
             LeftPanel::Positions => {
-                let _picked = self.paint_stack(ui, body);
+                let _picked = self.paint_stack(ui, charts, body);
+                fit_readout::stack(charts)
             }
-        }
+        };
+        format!("chart {} | {fit}", fit_readout::latency(band))
     }
 
-    fn paint_monitor(&mut self, ui: &mut egui::Ui, body: egui::Rect) {
+    fn paint_monitor(&mut self, ui: &mut egui::Ui, body: egui::Rect) -> String {
         // The ladder variant's own unit, so cycling scenes shows both delta captions.
         let dom_unit = self.scenes.current().variants[self.variant].grouping.unit();
         let monitor = self.monitors.current_mut();
@@ -314,6 +358,11 @@ impl DomFixture {
             instrument_names: &monitor.instrument_names,
         };
         bands::paint(ui, body, &monitor_frame, &mut monitor.state);
+        fit_readout::monitor(
+            body,
+            monitor.state.active_tab,
+            monitor.model.monitor().feature_count(),
+        )
     }
 
     fn paint_ladder(&self, ui: &mut egui::Ui, body: egui::Rect) {
@@ -343,22 +392,14 @@ impl eframe::App for DomFixture {
         shell_scene::fit_zoom(ctx);
     }
 
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        announce_touch_screen(ctx, raw_input);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.handle_keys(&ui.ctx().clone());
         self.paint_page(ui);
     }
-}
-
-/// The link bar's painter is private to the page, so the fixture holds its place with an empty
-/// strip.
-fn paint_link_strip(ui: &egui::Ui, rect: egui::Rect) {
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, PANEL_RAISED);
-    painter.hline(
-        rect.x_range(),
-        rect.top() + 0.5,
-        egui::Stroke::new(1.0, BORDER),
-    );
 }
 
 /// `DOM_LEVELS` reproduces any position of the header's level stepper, which the fixture does not

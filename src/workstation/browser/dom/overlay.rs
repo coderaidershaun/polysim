@@ -3,7 +3,7 @@
 
 use eframe::egui;
 
-use super::geometry::DomLayout;
+use super::geometry::{ASK_COLUMNS, BID_COLUMNS, DomLayout};
 // SMELL: the overlay uses the ladder's frame type and the ladder calls the overlay, so each depends
 // on the other. The frame type stays beside the ladder's paint function because other code names
 // it there. Moving it into a module of its own would end the loop.
@@ -98,15 +98,26 @@ fn chevron(
 
     let arrow = 9.0;
     let pad = METRICS.dom_cell_pad;
-    let width = arrow + METRICS.space_1 + galley.size().x + 2.0 * pad;
+    let content_width = arrow + METRICS.space_1 + galley.size().x + 2.0 * pad;
     let height = layout.row_height.clamp(16.0, 22.0);
-    let center_x = layout.rect.center().x;
+    // The top chip covers the public size of the top ask row, and the bottom chip that of the
+    // bottom bid row, so neither hides a price or the strategy's own orders.
+    let column = match direction {
+        Direction::Up => ASK_COLUMNS.public,
+        Direction::Down => BID_COLUMNS.public,
+    };
+    let cell = layout.cell(layout.rect, column);
+    // The pill covers that size completely, so no part of the number shows beside it.
+    let width = content_width.max(cell.width() - 2.0 * METRICS.space_1);
+    let center_x = cell.center().x;
     let center_y = match direction {
         Direction::Up => layout.rect.top() + height / 2.0 + METRICS.space_1,
         Direction::Down => layout.rect.bottom() - height / 2.0 - METRICS.space_1,
     };
-    let pill =
-        egui::Rect::from_center_size(egui::pos2(center_x, center_y), egui::vec2(width, height));
+    let pill = clamp_rect(
+        layout.rect,
+        egui::Rect::from_center_size(egui::pos2(center_x, center_y), egui::vec2(width, height)),
+    );
     fill_pill(painter, pill, DARK.focus);
 
     let arrow_center = egui::pos2(pill.left() + pad + arrow / 2.0, pill.center().y);

@@ -109,6 +109,7 @@ fn paint_chart_body(ui: &mut egui::Ui, body: egui::Rect, model: &mut UiModel) {
             tick: model.instrument_scales().tick,
             mode: model.chart_mode(),
             series: model.risk_series(),
+            pane: body,
         };
         stack::paint(ui, charts, &frame)
     };
@@ -128,7 +129,18 @@ fn strip_cell(strip: egui::Rect, cursor: &mut f32, width: f32) -> egui::Rect {
 fn paint_ladder_pane(ui: &mut egui::Ui, pane: Pane, model: &mut UiModel, feed: FeedStatus) {
     let body = egui::Rect::from(pane.body);
     if let Some(header) = pane.header {
-        paint_dom_header(ui, header.into(), model, ladder::rows_that_fit(body));
+        let strip = egui::Rect::from(header);
+        let block = ladder::ladder_rect(body);
+        let controls = strip.with_min_x(block.left()).with_max_x(block.right());
+        paint_dom_header(ui, controls, model, ladder::rows_that_fit(body));
+        // The ladder rules its outer edges when it is narrower than its pane, so its header does too.
+        if controls.width() < strip.width() {
+            theme::rules_v(
+                &ui.painter_at(strip),
+                [controls.left(), controls.right()],
+                strip.y_range(),
+            );
+        }
     }
 
     let scales = model.instrument_scales();

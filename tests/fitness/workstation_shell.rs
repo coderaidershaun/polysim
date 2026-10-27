@@ -358,7 +358,7 @@ fn the_top_bar_drops_the_strategy_first_and_never_the_badges() {
         (
             390.0,
             true,
-            Some((0.0, 220.0)),
+            Some((0.0, 258.0)),
             None,
             None,
             Some((258.0, 72.0)),
@@ -367,7 +367,7 @@ fn the_top_bar_drops_the_strategy_first_and_never_the_badges() {
         (
             320.0,
             false,
-            Some((0.0, 220.0)),
+            Some((0.0, 260.0)),
             None,
             None,
             None,
@@ -624,6 +624,12 @@ proptest! {
         if bar.picker.width < 220.0 {
             prop_assert!(bar.strategy.is_none(), "the strategy id outlives the picker");
         }
+        let first_badge = bar.halt.unwrap_or(bar.mode);
+        let last_before_badges = bar.strategy.or(bar.switcher).unwrap_or(bar.picker);
+        prop_assert!(
+            (right(last_before_badges) - first_badge.left).abs() <= EPSILON,
+            "a gap before the badges: {last_before_badges:?} then {first_badge:?}"
+        );
         let slots = top_bar_slots(&arrangement);
         for (first, (name, a)) in slots.iter().enumerate() {
             prop_assert!(is_inside(*a, top), "{name} leaves the top bar");

@@ -90,9 +90,9 @@ pub struct Pane {
 }
 
 /// The slots run left to right: picker, switcher, strategy id, then the badges. On a short bar the
-/// strategy id gives way first and the picker second, and the badges never do. Below 320 points
-/// the badges keep their width first, then the switcher, and the picker gets what is left, so no
-/// slot overlaps another or turns negative.
+/// strategy id gives way first and its room goes to the picker, then the picker shrinks, and the
+/// badges never give way. Below 320 points the badges keep their width first, then the switcher,
+/// and the picker gets what is left, so no slot overlaps another or turns negative.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TopBar {
     pub area: Area,
@@ -114,9 +114,14 @@ impl TopBar {
             .is_some_and(ExecHalt::is_halted)
             .then(|| room.cut_right(HALT_WIDTH));
         let switcher_width = (class != SizeClass::Compact).then(|| SWITCHER_WIDTH.min(room.width));
-        let picker = room.cut_left(PICKER_WIDTH.min(room.width - switcher_width.unwrap_or(0.0)));
+        let reserved = switcher_width.unwrap_or(0.0);
+        let has_strategy = room.width - PICKER_WIDTH - reserved >= STRATEGY_MIN_WIDTH;
+        // Without room for the strategy id the picker takes what is left, so no blank cell sits
+        // before the badges.
+        let picker_width = if has_strategy { PICKER_WIDTH } else { room.width - reserved };
+        let picker = room.cut_left(picker_width);
         let switcher = switcher_width.map(|width| room.cut_left(width));
-        let strategy = (room.width >= STRATEGY_MIN_WIDTH).then_some(room);
+        let strategy = has_strategy.then_some(room);
         Self {
             area,
             picker,

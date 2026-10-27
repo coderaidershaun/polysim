@@ -16,6 +16,8 @@ use crate::workstation::chart::view::{
 };
 use crate::workstation::text::{self, AxisLabels};
 
+pub const AXIS_FONT: f32 = METRICS.chart_axis_font;
+
 pub struct ChartFrame<'a> {
     pub chart: &'a ChartModel,
     pub instrument: InstrumentId,
@@ -142,8 +144,8 @@ pub(crate) fn paint_axis_labels(
     bounds: ChartBounds,
     labels: AxisLabels,
 ) {
-    let ticks = view::value_ticks(bounds, rect.height(), METRICS.chart_axis_font);
-    let font = egui::FontId::monospace(METRICS.chart_axis_font);
+    let ticks = view::value_ticks(bounds, rect.height(), AXIS_FONT);
+    let font = egui::FontId::monospace(AXIS_FONT);
     let stroke = theme::hairline(painter, DARK.grid);
     let left = rect.right() + METRICS.chart_pad;
     for (value, label) in text::axis_labels(ticks, labels) {

@@ -3,7 +3,7 @@
 
 use polysim::ids::{FIXED_SCALE, InstrumentId, Price, Qty, Side};
 use polysim::msg::inbound::Level;
-use polysim::msg::ui::UiBookState;
+use polysim::msg::ui::{UiBookState, UiLatencyCell, UiLatencyRow, UiLatencySummary};
 use polysim::time::DurationUs;
 use polysim::workstation::chart::model::{BookContinuity, ChartModel};
 
@@ -19,6 +19,8 @@ const COMMITS_PER_BUCKET: i64 = 4;
 
 const TICK: Price = Price(FIXED_SCALE);
 const BASE_BID: i64 = 65_990;
+
+const LATENCY_SAMPLES: u64 = 600;
 
 /// `tick` is `Price(0)` for an instrument with no venue grid.
 pub struct ChartScene {
@@ -40,6 +42,40 @@ pub fn chart_scenes() -> Vec<ChartScene> {
         fill_off_mid(),
         coarse_buckets(),
     ]
+}
+
+/// Every cell of the latency grid filled, from a few microseconds to a mean past the grid's bound,
+/// so the grid shows its overflow word.
+pub fn latency_summary() -> UiLatencySummary {
+    UiLatencySummary {
+        market_data: latency_row([4_200, 38, 12, 85, 4_340, 8_900]),
+        execution: latency_row([21_500, 45, 18, 140, 21_700, 12_400_000]),
+        hot_path: latency_row([3_100, 29, 9, 61, 3_200, 6_400]),
+        backlog_ema: Some(0.4),
+    }
+}
+
+/// The means in microseconds, in the grid's column order.
+fn latency_row(means_us: [i64; 6]) -> UiLatencyRow {
+    let [
+        exchange_to_received,
+        received_to_queued,
+        queue_wait,
+        processing,
+        end_to_end,
+        order_round_trip,
+    ] = means_us.map(|mean_us| UiLatencyCell {
+        count: LATENCY_SAMPLES,
+        sum_us: mean_us * LATENCY_SAMPLES as i64,
+    });
+    UiLatencyRow {
+        exchange_to_received,
+        received_to_queued,
+        queue_wait,
+        processing,
+        end_to_end,
+        order_round_trip,
+    }
 }
 
 /// A series still filling its window, so it grows from the left before it slides. The window is

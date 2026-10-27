@@ -15,6 +15,7 @@ use web_sys::wasm_bindgen::closure::Closure;
 use super::layout;
 use super::link_bar::{self, LinkAction};
 use super::socket::{Frame, LinkSocket};
+use super::tap;
 use super::theme::{DARK, METRICS, clear_color};
 use crate::config::{ConfigError, StrategyId};
 use crate::hot::exec::ExecHalt;
@@ -393,6 +394,10 @@ impl eframe::App for WorkstationApp {
         let mut station = self.station.borrow_mut();
         let link_action = station.paint(ui);
         station.act_on(link_action, &self.station);
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        tap::announce_touch_screen(ctx, raw_input);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

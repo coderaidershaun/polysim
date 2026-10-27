@@ -7,3 +7,5 @@ mod channels;
 mod pin;
 mod sizes;
 mod summary;
+
+pub use sizes::{band_sizes, column_widths};

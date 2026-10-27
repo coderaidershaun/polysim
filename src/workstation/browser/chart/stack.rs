@@ -33,6 +33,9 @@ pub struct ChartStackFrame<'a> {
     pub tick: Price,
     pub mode: ChartMode,
     pub series: RiskSeries,
+    /// The whole chart pane body around the stack, latency band included. A mouse click anywhere in
+    /// it, or a tap off both plots, lets go of a pinned crosshair. A tap on a plot pins there.
+    pub pane: egui::Rect,
 }
 
 pub fn paint(
@@ -84,6 +87,7 @@ pub fn paint(
             mid: mid.geometry,
             lower: lower.geometry,
             stack: rect,
+            pane: frame.pane,
             hovered: mid.response.hover_pos().or(lower.response.hover_pos()),
         },
     );

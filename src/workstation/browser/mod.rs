@@ -6,11 +6,12 @@ pub mod chart;
 pub mod chrome;
 mod controls;
 pub mod dom;
-mod latency;
+pub mod latency;
 mod layout;
-mod link_bar;
+pub mod link_bar;
 pub mod monitor;
 mod socket;
+mod tap;
 mod theme;
 
 use eframe::{AppCreator, WebOptions, WebRunner};
@@ -20,6 +21,7 @@ use web_sys::{AddEventListenerOptions, Document, HtmlCanvasElement};
 
 use crate::error;
 use app::WorkstationApp;
+pub use tap::announce_touch_screen;
 
 /// The page must hold a canvas with id `workstation`.
 pub fn start() {

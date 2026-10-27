@@ -1,15 +1,15 @@
 //! Where the crosshair stands: under a mouse, a dragging finger, or pinned where a finger lifted
-//! until a click or tap lands in the stack off both plots. It uses no egui type, so it reads alone.
+//! until the pane lets go of it. It uses no egui type, so it reads alone.
 
 use crate::workstation::chart::view::ChartDomain;
 
 /// One pointer event, already resolved against the plots. `finger` is the browser's id for one
-/// finger, which stays the same from touch down to lift. `OffPlot` is a mouse click as well as a
-/// tap, in the stack but off both plots.
+/// finger, which stays the same from touch down to lift. `LetGo` is a click or tap in the pane that
+/// is not a finger landing on a plot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Touch {
     OnPlot { finger: u64, bucket: u64 },
-    OffPlot,
+    LetGo,
     Moved { finger: u64, bucket: u64 },
     Lifted { finger: u64 },
     Cancelled { finger: u64 },
@@ -34,7 +34,9 @@ impl CrosshairPin {
             // A lift that landed off the page never arrives, so a new touch takes over a stale
             // scrub instead of waiting for it.
             Touch::OnPlot { finger, bucket } => self.scrub = Some(Scrub { finger, bucket }),
-            Touch::OffPlot => *self = Self::default(),
+            // A click lets go of the pin but not of a scrub in progress, which ends when its own
+            // finger lifts.
+            Touch::LetGo => self.pinned = None,
             Touch::Moved { finger, bucket } => {
                 if let Some(scrub) = self.scrub.as_mut().filter(|scrub| scrub.finger == finger) {
                     scrub.bucket = bucket;
@@ -60,6 +62,12 @@ impl CrosshairPin {
             .map(|scrub| scrub.bucket)
             .or(hovered)
             .or(self.pinned)
+    }
+
+    /// A scrub whose finger is no longer down never gets its lift, as when the chart was not painted
+    /// in that frame. Left alone, it would keep the crosshair from following the mouse.
+    pub(super) fn end_scrub(&mut self) {
+        self.scrub = None;
     }
 
     /// A pin whose bucket has left the window marks nothing, so it is dropped.

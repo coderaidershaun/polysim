@@ -4,6 +4,7 @@
 
 use eframe::egui;
 
+use crate::workstation::browser::tap::{self, PaneClick};
 use crate::workstation::browser::theme::{DARK, METRICS};
 use crate::workstation::monitor::view::{MonitorDetail, MonitorUiState};
 
@@ -41,9 +42,7 @@ impl Pins {
         record: impl FnOnce() -> String,
     ) {
         let response = ui.interact(rect, widget_id(detail), egui::Sense::CLICK);
-        // eframe handles a tap's click before the finger lifts, so the touch is still down here,
-        // while a mouse click has no touch at all.
-        if response.clicked() && ui.input(|input| input.any_touches()) {
+        if response.clicked() && ui.input(tap::is_finger) {
             self.tapped = Some(detail);
         }
         if self.pinned != Some(detail) {
@@ -95,7 +94,7 @@ impl Pins {
             POPUP_GAP,
             popup.get_expected_size().unwrap_or(egui::vec2(width, 0.0)),
         )
-        .unwrap_or(egui::RectAlign::BOTTOM_START);
+        .unwrap_or_else(|| self.roomier_side(response.interact_rect));
         popup
             .align(align)
             .align_alternatives(&[])
@@ -107,8 +106,17 @@ impl Pins {
             .map(|shown| shown.response.rect)
     }
 
-    /// Applies the frame's taps. A tap on a pinnable widget pins it, or lets go when it was already
-    /// pinned. Any other click or tap in the monitor, on its popup included, lets go of the pin.
+    /// When no side fits the popup inside the monitor, it still spills over whatever sits beside the
+    /// monitor, so it takes the side with more room and spills less.
+    fn roomier_side(&self, anchor: egui::Rect) -> egui::RectAlign {
+        let below = self.monitor.bottom() - anchor.bottom();
+        let above = anchor.top() - self.monitor.top();
+        if above > below { egui::RectAlign::TOP_START } else { egui::RectAlign::BOTTOM_START }
+    }
+
+    /// Applies the frame's taps. A tap on a pinnable widget pins it, or moves the pin there, or lets
+    /// go when it was already pinned. Any other click or tap in the monitor, on its own popup
+    /// included, lets go of the pin. A click on a window drawn over the monitor leaves it alone.
     pub(super) fn resolve(self, ui: &egui::Ui, state: &mut MonitorUiState) {
         let before = state.pinned();
         match self.tapped {
@@ -122,12 +130,14 @@ impl Pins {
     }
 
     fn is_click_inside(&self, ui: &egui::Ui) -> bool {
-        ui.input(|input| {
-            input.pointer.any_click()
-                && input.pointer.interact_pos().is_some_and(|at| {
-                    self.monitor.contains(at) || self.popup.is_some_and(|popup| popup.contains(at))
-                })
-        })
+        PaneClick::read(ui.ctx(), self.monitor, ui.layer_id()).is_some()
+            || ui.input(|input| {
+                input.pointer.primary_clicked()
+                    && input
+                        .pointer
+                        .interact_pos()
+                        .is_some_and(|at| self.popup.is_some_and(|popup| popup.contains(at)))
+            })
     }
 }
 

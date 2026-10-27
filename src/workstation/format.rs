@@ -74,9 +74,9 @@ const BPS_UNDERFLOW: &str = "<1e-7";
 
 const BPS_OVERFLOW: &str = ">1e9";
 
-/// Nine characters is the latency cell's budget too: at the 1200px minimum layout width its column
-/// is (600 - 112) / 7 = 69.7px against a 7.2px monospace advance. Grouping (or the slot count's decimal
-/// place) spends two of them, leaving seven integer digits, and a leading sign spends one more.
+/// Nine characters is the latency cell's budget too, because the narrowest latency column fits
+/// nine glyphs of the value font. Grouping (or the slot count's decimal place) spends two of them,
+/// leaving seven integer digits, and a leading sign spends one more.
 const LATENCY_MAX_INTEGER: u64 = 10_000_000;
 const LATENCY_MAX_NEGATIVE_INTEGER: u64 = 1_000_000;
 const LATENCY_OVERFLOW: &str = ">1e7";

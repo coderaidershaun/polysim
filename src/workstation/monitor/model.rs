@@ -336,7 +336,7 @@ impl MonitorModel {
         self.features.get(index).copied().flatten()
     }
 
-    pub(crate) fn feature_count(&self) -> usize {
+    pub fn feature_count(&self) -> usize {
         self.feature_count
     }
 

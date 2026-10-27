@@ -9,8 +9,8 @@ use eframe::egui;
 use crate::ids::Price;
 use crate::msg::ui::UiBookSnapshot;
 
-use super::geometry::DomLayout;
-pub(crate) use super::geometry::rows_that_fit;
+use super::geometry::{ASK_COLUMNS, BID_COLUMNS, DomLayout};
+pub(crate) use super::geometry::{ladder_rect, rows_that_fit};
 use super::overlay::OverlayPainter;
 use super::pin;
 use crate::ids::Qty;
@@ -126,14 +126,16 @@ impl LadderPainter<'_> {
     fn rows(&mut self, view: &DomView) {
         for (index, row) in view.ask_rows().iter().enumerate() {
             let rect = self.layout.ask_row(index);
-            let (public, strategy) = (self.layout.cell(rect, 2), self.layout.cell(rect, 0));
+            let public = self.layout.cell(rect, ASK_COLUMNS.public);
+            let strategy = self.layout.cell(rect, ASK_COLUMNS.strategy);
             self.price(rect, row.tick_index);
             self.public(public, row, at_status(DARK.ask, self.status), Edge::Right);
             self.strategy(strategy, row, Edge::Left);
         }
         for (index, row) in view.bid_rows().iter().enumerate() {
             let rect = self.layout.bid_row(index);
-            let (public, strategy) = (self.layout.cell(rect, 0), self.layout.cell(rect, 2));
+            let public = self.layout.cell(rect, BID_COLUMNS.public);
+            let strategy = self.layout.cell(rect, BID_COLUMNS.strategy);
             self.price(rect, row.tick_index);
             self.public(public, row, at_status(DARK.bid, self.status), Edge::Left);
             self.strategy(strategy, row, Edge::Right);

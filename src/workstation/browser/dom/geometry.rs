@@ -3,7 +3,7 @@
 
 use eframe::egui;
 
-use crate::workstation::browser::theme::METRICS;
+use crate::workstation::browser::theme::{self, METRICS};
 use crate::workstation::dom_view::{DomRow, DomView, MAX_ROWS_PER_SIDE, fit_rows};
 
 /// The widest a column grows. A wider pane gets a centred ladder of three full columns instead of
@@ -13,6 +13,24 @@ const COLUMN_CEILING: f32 = 160.0;
 /// The separator band is never shorter than this, so the mid's own line fits inside its borders
 /// even where the band's share of a short pane would cut it off.
 const SEPARATOR_FLOOR: f32 = 26.0;
+
+/// The column of one side's rows that holds the public size, and the one that holds the strategy's
+/// own orders, counted from the left. The price column sits between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SideColumns {
+    pub(super) public: usize,
+    pub(super) strategy: usize,
+}
+
+pub(super) const ASK_COLUMNS: SideColumns = SideColumns {
+    public: 2,
+    strategy: 0,
+};
+
+pub(super) const BID_COLUMNS: SideColumns = SideColumns {
+    public: 0,
+    strategy: 2,
+};
 
 pub(super) struct DomLayout {
     pub(super) rect: egui::Rect,
@@ -70,18 +88,21 @@ pub(crate) fn rows_that_fit(body: egui::Rect) -> usize {
     .rows
 }
 
+/// The block the ladder takes in `body`: it fills the height, and once its three columns reach their
+/// widest, it sits centred across the width. The header's controls sit over the same block.
+pub(crate) fn ladder_rect(body: egui::Rect) -> egui::Rect {
+    theme::centred_column(body, body.width().min(3.0 * COLUMN_CEILING))
+}
+
 impl DomLayout {
-    /// `body` is the pane the ladder is given. The ladder always fills its height, and once its
-    /// three columns reach their widest, it sits centred across the width.
     pub(super) fn new(body: egui::Rect, levels: usize) -> Self {
-        let width = body.width().min(3.0 * COLUMN_CEILING);
-        let rect = body.shrink2(egui::vec2((body.width() - width) / 2.0, 0.0));
+        let rect = ladder_rect(body);
         let fit = fit_rows(side_height(rect), levels, METRICS.dom_row_height_floor);
         let scale = (fit.row_height / METRICS.dom_row_height).min(1.0);
         Self {
             rect,
             separator: separator_of(rect),
-            column_width: width / 3.0,
+            column_width: rect.width() / 3.0,
             rows_per_side: fit.rows,
             row_height: fit.row_height,
             fonts: RowFonts::at(scale),
