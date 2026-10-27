@@ -23,3 +23,7 @@ __pycache__/
 .claude
 .scratch
 .work
+
+# rex:ignore claude
+.claude/skills/
+.claude/settings.local.json
