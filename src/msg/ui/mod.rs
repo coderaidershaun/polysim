@@ -1,6 +1,7 @@
 //! What the engine tells a workstation: its lifecycle, its instrument catalog, and the live book
 //! and event feed. Nothing here names a GUI toolkit, so the engine never depends on one.
 
+mod history;
 mod latency;
 
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
@@ -17,6 +18,7 @@ use crate::registry::Registry;
 use crate::sink::{UiBookSink, UiEventSink};
 use crate::time::TsUs;
 
+pub use history::{UI_CHART_WINDOW, UI_HISTORY_SAMPLES, UiHistory, UiHistorySample};
 pub use latency::{UiLatencyCell, UiLatencyRow, UiLatencySummary};
 
 /// A run sends only a handful of lifecycle messages, and each is sent with `try_send`, so a full
@@ -153,6 +155,40 @@ pub struct UiBookSnapshot {
 
 // The 32-level cap is what keeps the cost of each copy bounded.
 const _: () = assert!(size_of::<UiBookSnapshot>() <= 1048);
+
+// Every link frame, the stored catalog frames included, is as wide as its widest body, so growth
+// here costs them all and must be deliberate.
+const _: () = assert!(size_of::<UiHistory>() <= 1392);
+
+/// The best bid and ask of a usable book.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TopOfBook {
+    pub bid: Price,
+    pub ask: Price,
+}
+
+impl UiBookSnapshot {
+    /// `Some` only for a valid book with a bid and an ask. The chart's mid, the ladder and the
+    /// engine's history all use this one rule for a book worth a mid.
+    pub(crate) fn top_of_book(&self) -> Option<TopOfBook> {
+        if self.state != UiBookState::Valid || self.bid_len == 0 || self.ask_len == 0 {
+            return None;
+        }
+        Some(TopOfBook {
+            bid: self.bids[0].price,
+            ask: self.asks[0].price,
+        })
+    }
+
+    /// Snapshots lost between this instrument's previous snapshot and this one, read from the jump
+    /// in sequence. The workstation's gap count and the engine's history share this one rule, so a
+    /// backfilled chart splits its line where the live one did.
+    pub(crate) fn lost_since(&self, previous_seq: Option<u64>) -> u64 {
+        previous_seq.map_or(0, |previous| {
+            self.seq.saturating_sub(previous.saturating_add(1))
+        })
+    }
+}
 
 /// The ladder the strategy wants for one instrument. The array index is the stable quote level, and
 /// `None` withdraws that level. This is intent, not fact: an `OrderUpdate` arrives once the venue

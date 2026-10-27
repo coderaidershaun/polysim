@@ -4,16 +4,16 @@
 //! hole rather than an invented sample.
 
 use std::mem;
+use std::ops::Range;
 
 use crate::ids::{InstrumentId, Price, Side};
-use crate::msg::ui::{UiBookSnapshot, UiEvent};
+use crate::msg::ui::{TopOfBook, UI_CHART_WINDOW, UiBookSnapshot, UiEvent, UiHistorySample};
 use crate::time::{DurationUs, TsUs};
-use crate::workstation::dom_view::{snapshot_mid, tick_index};
+use crate::workstation::dom_view::{mid_half_ticks, tick_index};
 use crate::workstation::history::{BoundedHistory, grow_to};
 
-/// Five minutes, the length of one Polymarket up/down window. Buckets older than this leave the
-/// chart even while the ring still holds them.
-const WINDOW_US: u64 = 300_000_000;
+/// Buckets older than the chart window leave the chart even while the ring still holds them.
+const WINDOW_US: u64 = UI_CHART_WINDOW.micros() as u64;
 
 /// Caps the ring so a fast spin cannot size it by accident. 3,000 holds the whole window at a 100
 /// ms spin, which is more buckets than the widest plot has points. A 1 ms spin would otherwise ask
@@ -133,10 +133,58 @@ impl ChartModel {
         if continuity == BookContinuity::GapBefore {
             self.charts[slot].is_gap_pending = true;
         }
-        let Some(index) = bucket_index(snapshot.event_ts_us, self.spin_interval) else { return };
-        let Some(tick) = self.charts[slot].tick_size else { return };
-        let Some(mid_half_ticks) = snapshot_mid(snapshot, tick) else { return };
-        self.charts[slot].bank(index, mid_half_ticks);
+        if let Some(top) = snapshot.top_of_book() {
+            self.bank_mid(slot, snapshot.event_ts_us, top);
+        }
+    }
+
+    /// Folds one remembered input as the live frame it stands for. Positions belong to the
+    /// position model.
+    pub(crate) fn apply_sample(&mut self, instrument: InstrumentId, sample: &UiHistorySample) {
+        match *sample {
+            UiHistorySample::Mid {
+                event_ts_us,
+                top,
+                has_gap_before,
+            } => {
+                let slot = instrument.0 as usize;
+                self.ensure_instruments(slot + 1);
+                if has_gap_before {
+                    self.charts[slot].is_gap_pending = true;
+                }
+                self.bank_mid(slot, event_ts_us, top);
+            }
+            UiHistorySample::Fill {
+                event_ts_us,
+                side,
+                price,
+            } => self.bank_fill(instrument, event_ts_us, side, price),
+            UiHistorySample::Position { .. } => {}
+        }
+    }
+
+    /// Swaps this instrument's buckets and fills that lie in `span` for those `from` holds there,
+    /// and keeps everything outside it.
+    pub(crate) fn replace_span(
+        &mut self,
+        instrument: InstrumentId,
+        span: &Range<u64>,
+        from: &Self,
+    ) {
+        let slot = instrument.0 as usize;
+        self.ensure_instruments(slot + 1);
+        let Some(source) = from.charts.get(slot) else { return };
+        let chart = &mut self.charts[slot];
+        chart.buckets.replace_span(
+            span,
+            source.buckets.iter_oldest_first().copied(),
+            |bucket| bucket.index,
+        );
+        chart
+            .fills
+            .replace_span(span, source.fills.iter_oldest_first().copied(), |fill| {
+                fill.index
+            });
     }
 
     pub fn apply_event(&mut self, event: &UiEvent) {
@@ -175,6 +223,13 @@ impl ChartModel {
         self.spin_interval
     }
 
+    fn bank_mid(&mut self, slot: usize, at: TsUs, top: TopOfBook) {
+        let Some(index) = bucket_index(at, self.spin_interval) else { return };
+        let Some(tick) = self.charts[slot].tick_size else { return };
+        let Some(mid_half_ticks) = mid_half_ticks(top.bid, top.ask, tick) else { return };
+        self.charts[slot].bank(index, mid_half_ticks);
+    }
+
     fn bank_fill(&mut self, instrument: InstrumentId, at: TsUs, side: Side, price: Price) {
         let slot = instrument.0 as usize;
         self.ensure_instruments(slot + 1);
@@ -190,7 +245,7 @@ impl ChartModel {
         });
     }
 
-    fn clear(&mut self, instrument: InstrumentId) {
+    pub(crate) fn clear(&mut self, instrument: InstrumentId) {
         let capacity = self.bucket_capacity;
         let Some(chart) = self.charts.get_mut(instrument.0 as usize) else { return };
         *chart = InstrumentChart::new(chart.tick_size, capacity);

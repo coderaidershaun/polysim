@@ -3,10 +3,11 @@
 
 use crate::ids::{FIXED_SCALE, InstrumentId, Price, Side};
 use crate::msg::ui::{
-    DomQuote, UiBookSnapshot, UiCatalog, UiEvent, UiInstrument, UiLatencySummary,
+    DomQuote, UiBookSnapshot, UiCatalog, UiEvent, UiHistory, UiInstrument, UiLatencySummary,
 };
 use crate::time::{DurationUs, TsUs};
 
+use super::chart::backfill::ChartBackfill;
 use super::chart::model::{BookContinuity, ChartModel};
 use super::chart::position_model::PositionModel;
 use super::chart::position_view::RiskSeries;
@@ -66,6 +67,7 @@ pub struct UiModel {
     monitor: MonitorModel,
     chart: ChartModel,
     positions: PositionModel,
+    backfill: ChartBackfill,
     exec: ExecModel,
 }
 
@@ -104,6 +106,7 @@ impl UiModel {
             monitor: MonitorModel::with_capacity(instrument_count, feature_count, spin_interval),
             chart: ChartModel::with_capacity(instrument_count, spin_interval),
             positions: PositionModel::with_capacity(instrument_count, spin_interval),
+            backfill: ChartBackfill::new(),
             exec: ExecModel::with_capacity(instrument_count),
         }
     }
@@ -124,6 +127,7 @@ impl UiModel {
             .map(|instrument| instrument.tick_size)
             .collect();
         self.chart.configure(&tick_sizes, spin_interval);
+        self.backfill.configure(&tick_sizes, spin_interval);
         self.positions
             .configure(catalog.instruments.len(), spin_interval);
         self.exec.configure(catalog.instruments.len());
@@ -135,8 +139,7 @@ impl UiModel {
     pub fn apply_book(&mut self, snapshot: UiBookSnapshot) {
         let index = snapshot.instrument.0 as usize;
         self.ensure_instruments(index + 1);
-        let lost = self.book_last_seq[index]
-            .map_or(0, |previous| snapshot.seq.saturating_sub(previous + 1));
+        let lost = snapshot.lost_since(self.book_last_seq[index]);
         if lost > 0 {
             self.book_gaps += lost;
             self.monitor.note_books_lost(lost, snapshot.event_ts_us);
@@ -173,6 +176,14 @@ impl UiModel {
         self.monitor.apply_event(&event);
         self.chart.apply_event(&event);
         self.positions.apply_event(&event);
+        if let UiEvent::Rotation {
+            instrument,
+            event_ts_us,
+            ..
+        } = event
+        {
+            self.backfill.forget(instrument, event_ts_us);
+        }
         self.exec.apply_event(&event);
         if let UiEvent::Latency { summary, .. } = event {
             self.latest_latency = Some(summary);
@@ -189,6 +200,14 @@ impl UiModel {
         let index = instrument.0 as usize;
         self.ensure_instruments(index + 1);
         self.latest_quote[index] = Some((quote, event_ts_us));
+    }
+
+    /// Merges the engine's remembered chart inputs into the live charts. History is not live, so it
+    /// touches no freshness stamp, gap count or other model. A chunk that arrives before the catalog
+    /// is ignored.
+    pub fn apply_history(&mut self, history: &UiHistory) {
+        self.backfill
+            .apply(history, &mut self.chart, &mut self.positions);
     }
 
     pub fn book(&self, instrument: InstrumentId) -> Option<&UiBookSnapshot> {

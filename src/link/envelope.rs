@@ -69,6 +69,7 @@ impl TopicId {
     pub const CATALOG_INSTRUMENTS: TopicId = TopicId(3);
     pub const CATALOG_FEATURES: TopicId = TopicId(4);
     pub const LIFECYCLE: TopicId = TopicId(5);
+    pub const HISTORY: TopicId = TopicId(6);
     pub const FIRST_STRATEGY: TopicId = TopicId(16);
 
     /// Id of the strategy topic declared at `index`. The numbering lives here because the sites
@@ -105,6 +106,7 @@ impl TopicId {
             "catalog_instruments" => Some(TopicId::CATALOG_INSTRUMENTS),
             "catalog_features" => Some(TopicId::CATALOG_FEATURES),
             "lifecycle" => Some(TopicId::LIFECYCLE),
+            "history" => Some(TopicId::HISTORY),
             _ => strategy_topics
                 .iter()
                 .position(|declared| *declared == name)
@@ -289,6 +291,8 @@ pub enum LinkDecodeError {
     FieldCountExceeded { count: u8, capacity: usize },
     #[error("book declares {count} levels, capacity {capacity}")]
     BookLevelsExceeded { count: u16, capacity: usize },
+    #[error("history declares {count} samples, capacity {capacity}")]
+    HistoryLenExceeded { count: u8, capacity: usize },
     #[error(
         "order snapshot declares detail_len={detail_len}, total_working={total_working}; capacities are detail={detail_capacity}, total={total_capacity}"
     )]
@@ -354,6 +358,16 @@ pub(super) struct ByteReader<'a> {
 impl<'a> ByteReader<'a> {
     pub(super) fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, at: 0 }
+    }
+
+    pub(super) fn consumed(&self) -> usize {
+        self.at
+    }
+
+    /// Steps over the padding that a writer's `pad_to` left. A frame is length-checked before its
+    /// body is read, so `end` is always inside it.
+    pub(super) fn skip_to(&mut self, end: usize) {
+        self.at = end;
     }
 
     /// OOB read here = invariant violation (not bad input); frame length checked before body read.

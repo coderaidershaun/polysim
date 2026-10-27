@@ -24,9 +24,9 @@ use polysim::msg::exec::{Liquidity, RejectClass};
 use polysim::msg::inbound::Level;
 use polysim::msg::persist::FeatureId;
 use polysim::msg::ui::{
-    DomQuote, UI_BOOK_LEVELS, UI_ORDER_SNAPSHOT_CAPACITY, UI_ORDER_SNAPSHOT_MAX_TOTAL,
-    UiBookSnapshot, UiBookState, UiEvent, UiLatencyCell, UiLatencyRow, UiLatencySummary,
-    UiWorkingOrder,
+    DomQuote, TopOfBook, UI_BOOK_LEVELS, UI_HISTORY_SAMPLES, UI_ORDER_SNAPSHOT_CAPACITY,
+    UI_ORDER_SNAPSHOT_MAX_TOTAL, UiBookSnapshot, UiBookState, UiEvent, UiHistory, UiHistorySample,
+    UiLatencyCell, UiLatencyRow, UiLatencySummary, UiWorkingOrder,
 };
 use polysim::time::{DurationUs, TsUs};
 use proptest::prelude::*;
@@ -45,6 +45,10 @@ const PAYLOAD_COUNT_OFFSET: usize = 96;
 /// `bid_len` follows the 80-byte envelope, the 2-byte instrument, the 8-byte sequence, the 8-byte
 /// event stamp and the 1-byte book state; `ask_len` is the two bytes after it.
 const BOOK_BID_LEN_OFFSET: usize = 99;
+/// `len` follows the 80-byte envelope, the 2-byte instrument, the 8-byte cutoff and the 8-byte
+/// first index; the first sample starts the byte after it, and its gap flag is its 26th byte.
+const HISTORY_LEN_OFFSET: usize = 98;
+const HISTORY_FIRST_GAP_FLAG_OFFSET: usize = HISTORY_LEN_OFFSET + 1 + 25;
 
 fn guard() -> FrameGuard {
     FrameGuard {
@@ -100,6 +104,13 @@ fn book_datagram() -> LinkDatagram {
                 qty: Qty(5),
             }; UI_BOOK_LEVELS],
         }),
+    }
+}
+
+fn history_datagram(history: UiHistory) -> LinkDatagram {
+    LinkDatagram {
+        envelope: envelope(TopicId::HISTORY, 1),
+        body: LinkBody::History(history),
     }
 }
 
@@ -619,6 +630,54 @@ fn arb_catalog_instrument() -> impl Strategy<Value = LinkBody> {
         )
 }
 
+fn arb_history_sample() -> impl Strategy<Value = UiHistorySample> {
+    prop_oneof![
+        (any::<i64>(), any::<i64>(), any::<i64>(), any::<bool>()).prop_map(
+            |(stamp, bid, ask, has_gap_before)| UiHistorySample::Mid {
+                event_ts_us: TsUs::from_micros(stamp),
+                top: TopOfBook {
+                    bid: Price(bid),
+                    ask: Price(ask),
+                },
+                has_gap_before,
+            }
+        ),
+        (any::<i64>(), arb_wire_f64(), arb_wire_f64()).prop_map(
+            |(stamp, exposure_quote, pnl_quote)| UiHistorySample::Position {
+                event_ts_us: TsUs::from_micros(stamp),
+                exposure_quote,
+                pnl_quote,
+            }
+        ),
+        (any::<i64>(), arb_side(), any::<i64>()).prop_map(|(stamp, side, price)| {
+            UiHistorySample::Fill {
+                event_ts_us: TsUs::from_micros(stamp),
+                side,
+                price: Price(price),
+            }
+        }),
+    ]
+}
+
+fn arb_history() -> impl Strategy<Value = LinkBody> {
+    (
+        any::<u16>(),
+        any::<i64>(),
+        any::<u64>(),
+        0..=UI_HISTORY_SAMPLES as u8,
+        prop::collection::vec(arb_history_sample(), UI_HISTORY_SAMPLES),
+    )
+        .prop_map(|(instrument, cutoff, first_index, len, samples)| {
+            LinkBody::History(UiHistory {
+                instrument: InstrumentId(instrument),
+                cutoff_ts_us: TsUs::from_micros(cutoff),
+                first_index,
+                len,
+                samples: samples.try_into().expect("a full sample array"),
+            })
+        })
+}
+
 fn arb_datagram() -> impl Strategy<Value = LinkDatagram> {
     prop_oneof![
         (
@@ -640,6 +699,8 @@ fn arb_datagram() -> impl Strategy<Value = LinkDatagram> {
         (arb_envelope(TopicId::BOOKS), arb_book())
             .prop_map(|(envelope, body)| LinkDatagram { envelope, body }),
         (arb_envelope(TopicId::EVENTS), arb_event())
+            .prop_map(|(envelope, body)| LinkDatagram { envelope, body }),
+        (arb_envelope(TopicId::HISTORY), arb_history())
             .prop_map(|(envelope, body)| LinkDatagram { envelope, body }),
         (
             arb_envelope(TopicId::CATALOG_INSTRUMENTS),
@@ -821,15 +882,17 @@ fn rejects_frames_with_distinct_causes() {
 
     let drifted = LinkHash::of_fields(&["microprice", "mid", "imbalance"]);
     let book_bytes = encode(&book_datagram());
-    let unknown_topic = TopicId(TopicId::LIFECYCLE.0 + 1);
+    let unknown_topic = TopicId(TopicId::HISTORY.0 + 1);
     let forged_field_count = LINK_MAX_FIELDS as u8 + 1;
     let forged_book_len = UI_BOOK_LEVELS as u16 + 1;
+    let forged_history_len = UI_HISTORY_SAMPLES as u8 + 1;
+    let history_bytes = encode(&history_datagram(golden_history()));
     let over_capacity = (UI_ORDER_SNAPSHOT_CAPACITY + 1) as u8;
     let terminal = OrderState::Closed(CloseReason::Filled);
     let live = working_order(7, OrderState::Live);
     let pair = [live, working_order(8, OrderState::Live)];
 
-    let cases: [(&str, Vec<u8>, LinkDecodeError); 16] = [
+    let cases: [(&str, Vec<u8>, LinkDecodeError); 18] = [
         (
             "magic mismatch",
             {
@@ -946,6 +1009,30 @@ fn rejects_frames_with_distinct_causes() {
             LinkDecodeError::BookLevelsExceeded {
                 count: forged_book_len,
                 capacity: UI_BOOK_LEVELS,
+            },
+        ),
+        (
+            "history len beyond capacity",
+            {
+                let mut bytes = history_bytes.clone();
+                bytes[HISTORY_LEN_OFFSET] = forged_history_len;
+                bytes
+            },
+            LinkDecodeError::HistoryLenExceeded {
+                count: forged_history_len,
+                capacity: UI_HISTORY_SAMPLES,
+            },
+        ),
+        (
+            "history gap flag neither 0 nor 1",
+            {
+                let mut bytes = history_bytes.clone();
+                bytes[HISTORY_FIRST_GAP_FLAG_OFFSET] = 2;
+                bytes
+            },
+            LinkDecodeError::UnknownDiscriminant {
+                field: "gap flag",
+                value: 2,
             },
         ),
         (
@@ -1255,6 +1342,37 @@ fn event(seq: u64, event: UiEvent) -> LinkDatagram {
     let mut datagram = event_datagram(event);
     datagram.envelope.seq = seq;
     datagram
+}
+
+/// A chunk of three samples, one of each kind, with the gap flag set, so a swapped or resized field
+/// of any of them moves bytes the fixture pins.
+fn golden_history() -> UiHistory {
+    let mut samples = [UiHistorySample::EMPTY; UI_HISTORY_SAMPLES];
+    samples[0] = UiHistorySample::Mid {
+        event_ts_us: TsUs::from_micros(1_700_000_000_001_016),
+        top: TopOfBook {
+            bid: Price(0x0102_0304_0506_0708),
+            ask: Price(0x1112_1314_1516_1718),
+        },
+        has_gap_before: true,
+    };
+    samples[1] = UiHistorySample::Position {
+        event_ts_us: TsUs::from_micros(1_700_000_000_001_017),
+        exposure_quote: 12.5,
+        pnl_quote: -3.25,
+    };
+    samples[2] = UiHistorySample::Fill {
+        event_ts_us: TsUs::from_micros(1_700_000_000_001_018),
+        side: Side::Sell,
+        price: Price(0x2122_2324_2526_2728),
+    };
+    UiHistory {
+        instrument: InstrumentId(0x0304),
+        cutoff_ts_us: TsUs::from_micros(1_700_000_000_001_019),
+        first_index: 0x3132_3334_3536_3738,
+        len: 3,
+        samples,
+    }
 }
 
 /// One fixed frame of every kind. Fields carry distinct non-zero values wherever the type allows,
@@ -1622,6 +1740,13 @@ fn golden_frames() -> Vec<(&'static str, LinkDatagram)> {
                     },
                 },
             ),
+        ),
+        (
+            "history",
+            LinkDatagram {
+                envelope: envelope(TopicId::HISTORY, 0x1010),
+                body: LinkBody::History(golden_history()),
+            },
         ),
     ]
 }

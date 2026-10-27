@@ -2,6 +2,8 @@
 //! histories, the chart's per-instrument bucket ring and its fill ring. One eviction policy shared by
 //! all of them, so no panel invents its own retention rule, and one way per-instrument storage grows.
 
+use std::ops::Range;
+
 /// A fixed-capacity ring of the freshest `capacity` items: pushes past capacity silently evict the
 /// oldest, iteration runs from either end, and `appended` counts every push ever so a viewer derives
 /// an unseen count from a stored watermark. The backing store is reserved once at construction —
@@ -55,6 +57,44 @@ impl<T> BoundedHistory<T> {
         let newest = self.slots.len().checked_sub(1)?;
         let index = (self.oldest + newest) % self.capacity.max(1);
         self.slots.get_mut(index)
+    }
+
+    /// Swaps every held item whose index lies in `span` for the incoming items that do. Items
+    /// outside `span` stay, the result is in index order, and the newest `capacity` are kept.
+    /// `appended` does not move, because a splice is not a push.
+    pub(crate) fn replace_span(
+        &mut self,
+        span: &Range<u64>,
+        incoming: impl Iterator<Item = T>,
+        index_of: impl Fn(&T) -> u64,
+    ) {
+        self.slots.rotate_left(self.oldest);
+        self.oldest = 0;
+        self.slots.retain(|item| !span.contains(&index_of(item)));
+        for item in incoming.filter(|item| span.contains(&index_of(item))) {
+            self.insert_within_capacity(item, &index_of);
+        }
+        self.slots.sort_by_key(&index_of);
+    }
+
+    /// A full ring makes room by dropping its lowest index, so the store never grows past what
+    /// was reserved. An item lower than everything held is the one dropped instead.
+    fn insert_within_capacity(&mut self, item: T, index_of: &impl Fn(&T) -> u64) {
+        if self.slots.len() < self.capacity {
+            self.slots.push(item);
+            return;
+        }
+        let lowest = self
+            .slots
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, held)| index_of(held));
+        let Some((position, held)) = lowest else { return };
+        if index_of(&item) < index_of(held) {
+            return;
+        }
+        self.slots.remove(position);
+        self.slots.push(item);
     }
 
     pub(crate) fn appended(&self) -> u64 {

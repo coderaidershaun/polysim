@@ -9,7 +9,7 @@ use crate::link::{
     Envelope, FrameGuard, LINK_MAX_DATAGRAM, Lifecycle, LinkBody, LinkDatagram, LinkDecodeError,
     LinkHash, LinkIdentity, RunState, SequenceGate, Subscribe, TopicId, TopicSet,
 };
-use crate::msg::ui::{UiBookSnapshot, UiCatalog, UiEvent};
+use crate::msg::ui::{UiBookSnapshot, UiCatalog, UiEvent, UiHistory};
 use crate::time::{DurationUs, TsUs};
 use crate::{info, warn, warn_repeating};
 
@@ -29,12 +29,13 @@ const REPORT_INTERVAL: DurationUs = DurationUs::from_secs(60);
 /// Enumerated rather than [`TopicSet::ALL`]: "all" means every topic the sender offers, which would
 /// have an engine unicast strategy payload frames at a process that declares no link fields and can
 /// only count them as rejects.
-const WANTED_TOPICS: [TopicId; 5] = [
+const WANTED_TOPICS: [TopicId; 6] = [
     TopicId::BOOKS,
     TopicId::EVENTS,
     TopicId::CATALOG_INSTRUMENTS,
     TopicId::CATALOG_FEATURES,
     TopicId::LIFECYCLE,
+    TopicId::HISTORY,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -55,14 +56,15 @@ pub enum LinkSessionError {
     NoPeers,
 }
 
-// UiBookSnapshot is large, but boxing it would cost a heap allocation per datagram and the caller
-// consumes each delivery at once.
+// UiBookSnapshot and UiHistory are large, but boxing them would cost a heap allocation per datagram
+// and the caller consumes each delivery at once.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum Delivery {
     Book(UiBookSnapshot),
     Event(UiEvent),
     Catalog(UiCatalog),
+    History(UiHistory),
 }
 
 #[derive(Debug, Default)]
@@ -78,6 +80,7 @@ struct DeliveredCounts {
     events: u64,
     catalog: u64,
     lifecycle: u64,
+    history: u64,
 }
 
 /// One trading engine at a time. Everything about that engine (the sequence gate, the catalog, the
@@ -212,6 +215,10 @@ impl LinkSession {
                 self.delivered.lifecycle += 1;
                 self.reported = Some(lifecycle);
                 self.publish_catalog()
+            }
+            LinkBody::History(history) => {
+                self.delivered.history += 1;
+                Some(Delivery::History(history))
             }
             LinkBody::Subscribe(_) | LinkBody::Payload(_) => {
                 self.rejected.foreign += 1;
@@ -368,12 +375,13 @@ impl LinkSession {
         let rejected = &self.rejected;
         let delivered = &self.delivered;
         info!(
-            "link session {} delivered[books={} events={} catalog={} lifecycle={}] rejected[decode={} gated={} foreign={}] gate{:?}",
+            "link session {} delivered[books={} events={} catalog={} lifecycle={} history={}] rejected[decode={} gated={} foreign={}] gate{:?}",
             self.peer(),
             delivered.books,
             delivered.events,
             delivered.catalog,
             delivered.lifecycle,
+            delivered.history,
             rejected.decode,
             rejected.gated,
             rejected.foreign,

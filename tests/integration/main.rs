@@ -5,6 +5,7 @@
 
 mod binance_scale;
 mod binance_signed;
+mod link_backfill;
 mod observer;
 mod poly_rotation;
 mod rest_check;

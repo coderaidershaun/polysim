@@ -2,9 +2,11 @@
 //! spin arithmetic. The link carries these values as `f64`. They become exact quote amounts once,
 //! here, so the mid chart's integer helpers serve this chart unchanged.
 
+use std::ops::Range;
+
 use super::model::{bucket_capacity, bucket_index};
 use crate::ids::{InstrumentId, fixed_mantissa};
-use crate::msg::ui::UiEvent;
+use crate::msg::ui::{UiEvent, UiHistorySample};
 use crate::time::{DurationUs, TsUs};
 use crate::workstation::history::{BoundedHistory, grow_to};
 
@@ -56,6 +58,35 @@ impl PositionModel {
             UiEvent::Rotation { instrument, .. } => self.clear(instrument),
             _ => {}
         }
+    }
+
+    /// Folds one remembered input as the live frame it stands for. Mids and fills belong to the
+    /// mid chart.
+    pub(crate) fn apply_sample(&mut self, instrument: InstrumentId, sample: &UiHistorySample) {
+        if let UiHistorySample::Position {
+            event_ts_us,
+            exposure_quote,
+            pnl_quote,
+        } = *sample
+        {
+            self.bank_position(instrument, event_ts_us, exposure_quote, pnl_quote);
+        }
+    }
+
+    /// Swaps this instrument's buckets that lie in `span` for those `from` holds there, and keeps
+    /// everything outside it.
+    pub(crate) fn replace_span(
+        &mut self,
+        instrument: InstrumentId,
+        span: &Range<u64>,
+        from: &Self,
+    ) {
+        let slot = instrument.0 as usize;
+        self.ensure_instruments(slot + 1);
+        let Some(source) = from.series.get(slot) else { return };
+        self.series[slot].replace_span(span, source.iter_oldest_first().copied(), |bucket| {
+            bucket.index
+        });
     }
 
     pub fn buckets(&self, instrument: InstrumentId) -> impl Iterator<Item = &PositionBucket> {
@@ -129,7 +160,7 @@ impl PositionModel {
 
     /// The engine sends no position after a rotation until a two-sided book marks the instrument
     /// again, so keeping the old series would show that silence as an unchanged position.
-    fn clear(&mut self, instrument: InstrumentId) {
+    pub(crate) fn clear(&mut self, instrument: InstrumentId) {
         let capacity = self.bucket_capacity;
         let Some(series) = self.series.get_mut(instrument.0 as usize) else { return };
         *series = BoundedHistory::new(capacity);

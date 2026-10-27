@@ -1,25 +1,33 @@
-//! Chart projection fitness: the pure map from the ordered book and event lanes to the
-//! rolling five-minute mid series, and the screen transform over it. Buckets are folded in event time
-//! alone, so a spin carrying no trustworthy mid stays a real hole the line splits across rather
-//! than an invented sample, and replay reproduces the series exactly. Prices never leave exact
-//! half-tick integers until the final `0..=1` fraction. The domain grows from left to right before it
-//! slides; the bounds cover fills as well as mids, so an off-mid marker can never be invisible.
+//! Chart projection fitness: the pure map from the ordered book and event lanes to the rolling
+//! five-minute mid series, and the screen transform over it. A backfill from the engine's memory
+//! merges into the mid and position buckets to the same series a continuous feed builds. Buckets
+//! are folded in event time alone, so a spin carrying no trustworthy mid stays a real hole the
+//! line splits across rather than an invented sample, and replay reproduces the series exactly.
+//! Prices never leave exact half-tick integers until the final `0..=1` fraction. The domain grows
+//! from left to right before it slides; the bounds cover fills as well as mids, so an off-mid
+//! marker can never be invisible.
 
 use polysim::ids::{AssetId, InstrumentId, Price, Qty, Side};
 use polysim::msg::exec::Liquidity;
-use polysim::msg::ui::{UiBookSnapshot, UiBookState, UiEvent};
+use polysim::msg::ui::{
+    TopOfBook, UI_HISTORY_SAMPLES, UiBookSnapshot, UiBookState, UiCatalog, UiEvent, UiHistory,
+    UiHistorySample, UiInstrument,
+};
 use polysim::time::{DurationUs, TsUs};
 use polysim::workstation::chart::model::{
     BookContinuity, ChartBucket, ChartFill, ChartModel, bucket_open_ts,
 };
+use polysim::workstation::chart::position_model::PositionBucket;
 use polysim::workstation::chart::view::{
     Candle, CandleGrouping, ChartBounds, ChartDomain, bounds, domain, segment_points,
     visible_fills, x_fraction, y_fraction,
 };
+use polysim::workstation::model::UiModel;
 use proptest::prelude::*;
 
 use crate::workstation_support::{
-    CAPACITY, SPIN, TICK, chart_book, chart_model, chart_with_ticks, rotation_event, valid_book,
+    BookFixture, CAPACITY, SPIN, TICK, book_snapshot, chart_book, chart_model, chart_with_ticks,
+    rotation_event, valid_book,
 };
 
 /// Buckets committed past a full window, so eviction and sliding are exercised by an amount rather
@@ -35,10 +43,19 @@ fn commit(chart: &mut ChartModel, instrument: u16, bucket: u64, bid: i64, ask: i
 }
 
 fn fill_event(instrument: u16, bucket: u64, side: Side, price: i64) -> UiEvent {
+    fill_event_at(
+        instrument,
+        TsUs::from_micros(bucket as i64 * SPIN.micros()),
+        side,
+        price,
+    )
+}
+
+fn fill_event_at(instrument: u16, event_ts_us: TsUs, side: Side, price: i64) -> UiEvent {
     UiEvent::Fill {
         instrument: InstrumentId(instrument),
         seq: 0,
-        event_ts_us: TsUs::from_micros(bucket as i64 * SPIN.micros()),
+        event_ts_us,
         quote_level: None,
         side,
         price: Price(price),
@@ -878,5 +895,343 @@ proptest! {
         prop_assert!((0.0..=1.0).contains(&fraction));
         prop_assert!(fraction >= y_fraction(price - 1, bounds));
         prop_assert_eq!(low + (f64::from(fraction) * span as f64).round() as i64, price);
+    }
+}
+
+/// One frame of the engine's feed, as the link would carry it. Boxing a book would lose `Copy`, and
+/// a test frame is held only briefly.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, Copy)]
+enum Frame {
+    Book(UiBookSnapshot),
+    Event(UiEvent),
+}
+
+#[derive(Debug, Clone)]
+enum Step {
+    Book {
+        bid: i64,
+        spread: i64,
+        skipped: u64,
+        is_valid: bool,
+    },
+    Position {
+        exposure: i32,
+        pnl: i32,
+    },
+    Fill {
+        side: Side,
+        price: i64,
+    },
+}
+
+fn arb_step() -> impl Strategy<Value = (i64, Step)> {
+    let stamp_step = 50_000i64..600_000;
+    let skipped = prop_oneof![8 => Just(0u64), 1 => 1u64..4];
+    let is_valid = prop_oneof![9 => Just(true), 1 => Just(false)];
+    let kind = prop_oneof![
+        6 => (90i64..110, 1i64..6, skipped, is_valid).prop_map(|(bid, spread, skipped, is_valid)| {
+            Step::Book { bid, spread, skipped, is_valid }
+        }),
+        2 => (-1_000i32..1_000, -1_000i32..1_000)
+            .prop_map(|(exposure, pnl)| Step::Position { exposure, pnl }),
+        1 => (prop_oneof![Just(Side::Buy), Just(Side::Sell)], 90i64..110)
+            .prop_map(|(side, price)| Step::Fill { side, price }),
+    ];
+    (stamp_step, kind)
+}
+
+/// Frames stamped from one rising clock, with steps shorter than a spin so several share a bucket.
+fn feed_of(steps: &[(i64, Step)]) -> Vec<Frame> {
+    let mut now = 1_000_000i64;
+    let mut book_seq = 0u64;
+    let mut event_seq = 0u64;
+    steps
+        .iter()
+        .map(|(elapsed, step)| {
+            now += elapsed;
+            match *step {
+                Step::Book {
+                    bid,
+                    spread,
+                    skipped,
+                    is_valid,
+                } => {
+                    book_seq += 1 + skipped;
+                    let state =
+                        if is_valid { UiBookState::Valid } else { UiBookState::AwaitingSnapshot };
+                    Frame::Book(book_snapshot(BookFixture {
+                        instrument: 0,
+                        seq: book_seq,
+                        event_ts: now,
+                        state,
+                        bids: &[(bid, 1)],
+                        asks: &[(bid + spread, 1)],
+                    }))
+                }
+                Step::Position { exposure, pnl } => {
+                    event_seq += 1;
+                    Frame::Event(UiEvent::Position {
+                        instrument: InstrumentId(0),
+                        seq: event_seq,
+                        event_ts_us: TsUs::from_micros(now),
+                        exposure_quote: f64::from(exposure) / 8.0,
+                        pnl_quote: f64::from(pnl) / 8.0,
+                    })
+                }
+                Step::Fill { side, price } => {
+                    event_seq += 1;
+                    let mut fill = fill_event_at(0, TsUs::from_micros(now), side, price);
+                    fill.set_seq(event_seq);
+                    Frame::Event(fill)
+                }
+            }
+        })
+        .collect()
+}
+
+/// What the engine remembers of those frames: a mid for each usable book, with the gap carried to
+/// the next mid when the book sequence jumped, plus every position and fill.
+fn remembered(frames: &[Frame]) -> Vec<UiHistorySample> {
+    let mut samples = Vec::new();
+    let mut last_seq: Option<u64> = None;
+    let mut is_gap_pending = false;
+    for frame in frames {
+        match *frame {
+            Frame::Book(book) => {
+                is_gap_pending |= last_seq.is_some_and(|previous| book.seq > previous + 1);
+                last_seq = Some(book.seq);
+                if book.state == UiBookState::Valid {
+                    samples.push(UiHistorySample::Mid {
+                        event_ts_us: book.event_ts_us,
+                        top: TopOfBook {
+                            bid: book.bids[0].price,
+                            ask: book.asks[0].price,
+                        },
+                        has_gap_before: std::mem::take(&mut is_gap_pending),
+                    });
+                }
+            }
+            Frame::Event(UiEvent::Position {
+                event_ts_us,
+                exposure_quote,
+                pnl_quote,
+                ..
+            }) => {
+                samples.push(UiHistorySample::Position {
+                    event_ts_us,
+                    exposure_quote,
+                    pnl_quote,
+                });
+            }
+            Frame::Event(UiEvent::Fill {
+                event_ts_us,
+                side,
+                price,
+                ..
+            }) => {
+                samples.push(UiHistorySample::Fill {
+                    event_ts_us,
+                    side,
+                    price,
+                });
+            }
+            Frame::Event(_) => {}
+        }
+    }
+    samples
+}
+
+fn chunk(cutoff_ts_us: TsUs, all: &[UiHistorySample], first: usize, len: usize) -> UiHistory {
+    let mut samples = [UiHistorySample::EMPTY; UI_HISTORY_SAMPLES];
+    samples[..len].copy_from_slice(&all[first..first + len]);
+    UiHistory {
+        instrument: InstrumentId(0),
+        cutoff_ts_us,
+        first_index: first as u64,
+        len: len as u8,
+        samples,
+    }
+}
+
+/// `all[..end]` cut into chunks of the given lengths in turn, each starting where the last ended.
+fn cut(
+    cutoff_ts_us: TsUs,
+    all: &[UiHistorySample],
+    end: usize,
+    lengths: &[usize],
+) -> Vec<UiHistory> {
+    let mut chunks = Vec::new();
+    let mut first = 0;
+    for &length in lengths.iter().cycle() {
+        if first == end {
+            break;
+        }
+        let len = length.min(end - first);
+        chunks.push(chunk(cutoff_ts_us, all, first, len));
+        first += len;
+    }
+    chunks
+}
+
+fn one_instrument_catalog() -> UiCatalog {
+    UiCatalog {
+        strategy_id: "fitness".into(),
+        window_title: "fitness".into(),
+        execution_mode: None,
+        spin_interval_us: SPIN.micros() as u64,
+        instruments: vec![UiInstrument {
+            instrument_id: InstrumentId(0),
+            display: "BTCUSDT".into(),
+            base: "BTC".into(),
+            quote: "USDT".into(),
+            base_asset: AssetId(0),
+            quote_asset: AssetId(1),
+            tick_size: Some(TICK),
+            lot_size: Some(Qty(1)),
+            qty_scale: 100_000_000,
+        }],
+        feature_names: Vec::new(),
+    }
+}
+
+fn model_fed(frames: impl IntoIterator<Item = Frame>) -> UiModel {
+    let mut model = UiModel::with_capacity(1, SPIN);
+    model.set_catalog(one_instrument_catalog());
+    for frame in frames {
+        apply(&mut model, frame);
+    }
+    model
+}
+
+fn apply(model: &mut UiModel, frame: Frame) {
+    match frame {
+        Frame::Book(book) => model.apply_book(book),
+        Frame::Event(event) => model.apply_event(event),
+    }
+}
+
+/// Mid buckets, fills and position buckets, each split at the cutoff bucket into what lies before
+/// it and what lies at or after it.
+struct Series {
+    before: (Vec<ChartBucket>, Vec<ChartFill>, Vec<PositionBucket>),
+    after: (Vec<ChartBucket>, Vec<ChartFill>, Vec<PositionBucket>),
+}
+
+fn series_of(model: &UiModel, cutoff_bucket: u64) -> Series {
+    let instrument = InstrumentId(0);
+    let mut mids: Vec<ChartBucket> = model.chart().buckets(instrument).copied().collect();
+    let mut marks: Vec<ChartFill> = model.chart().fills(instrument).copied().collect();
+    let mut positions: Vec<PositionBucket> =
+        model.positions().buckets(instrument).copied().collect();
+    marks.sort_by_key(|fill| fill.index);
+    mids.sort_by_key(|bucket| bucket.index);
+    positions.sort_by_key(|bucket| bucket.index);
+    let split = |mids: &[ChartBucket],
+                 marks: &[ChartFill],
+                 positions: &[PositionBucket],
+                 is_before: bool| {
+        (
+            mids.iter()
+                .filter(|b| (b.index < cutoff_bucket) == is_before)
+                .copied()
+                .collect::<Vec<_>>(),
+            marks
+                .iter()
+                .filter(|f| (f.index < cutoff_bucket) == is_before)
+                .copied()
+                .collect::<Vec<_>>(),
+            positions
+                .iter()
+                .filter(|p| (p.index < cutoff_bucket) == is_before)
+                .copied()
+                .collect::<Vec<_>>(),
+        )
+    };
+    Series {
+        before: split(&mids, &marks, &positions, true),
+        after: split(&mids, &marks, &positions, false),
+    }
+}
+
+proptest! {
+    /// FITNESS: a workstation that joins mid-run, holding a lossy chart of its own, ends with the
+    /// chart a continuous feed built for every bucket before the cutoff bucket, and keeps exactly
+    /// the buckets its own live feed built from the cutoff bucket on. Chunks split buckets at any
+    /// point, repeats re-cut the same samples at other lengths, and nothing is folded twice.
+    #[test]
+    fn a_backfill_rebuilds_the_chart_a_continuous_feed_built(
+        steps in prop::collection::vec(arb_step(), 2..250),
+        join in any::<prop::sample::Index>(),
+        survived in prop::collection::vec(any::<bool>(), 250),
+        lengths in prop::collection::vec(
+            prop_oneof![4 => 1usize..=6, 1 => 1usize..=UI_HISTORY_SAMPLES],
+            1..8,
+        ),
+        arrivals in prop::collection::vec(0usize..=1_000, 64),
+        repeats in prop::collection::vec((0usize..=1_000, 1usize..=UI_HISTORY_SAMPLES), 0..4),
+    ) {
+        let feed = feed_of(&steps);
+        let join = 1 + join.index(feed.len() - 1);
+        let (before, live) = feed.split_at(join);
+        let samples = remembered(before);
+        prop_assume!(!samples.is_empty());
+        let cutoff = samples.iter().map(UiHistorySample::event_ts_us).max().expect("non-empty");
+        let cutoff_bucket = (cutoff.micros() / SPIN.micros()) as u64;
+
+        let slot_of = |raw: usize| raw * live.len() / 1_000;
+        let mut arrival_slots: Vec<usize> = arrivals.iter().copied().map(slot_of).collect();
+        arrival_slots.sort_unstable();
+        let chunks = cut(cutoff, &samples, samples.len(), &lengths);
+        let mut deliveries: Vec<(usize, UiHistory)> = chunks
+            .iter()
+            .enumerate()
+            .map(|(number, chunk)| {
+                (arrival_slots[number.min(arrival_slots.len() - 1)], *chunk)
+            })
+            .collect();
+        let delivered_by = |slot: usize| -> usize {
+            chunks
+                .iter()
+                .zip(&arrival_slots)
+                .filter(|(_, at)| **at <= slot)
+                .map(|(chunk, _)| usize::from(chunk.len))
+                .sum()
+        };
+        for &(raw, length) in &repeats {
+            let slot = slot_of(raw);
+            let end = delivered_by(slot);
+            let recut = cut(cutoff, &samples, end, &[length]);
+            deliveries.extend(recut.into_iter().map(|chunk| (slot, chunk)));
+        }
+        deliveries.sort_by_key(|(slot, _)| *slot);
+
+        let continuous = model_fed(feed.iter().copied());
+        let lossy_before = before
+            .iter()
+            .zip(&survived)
+            .filter(|(_, kept)| **kept)
+            .map(|(frame, _)| *frame);
+        let mut joined = model_fed(lossy_before.clone());
+        let mut live_only = model_fed(lossy_before);
+        let mut pending = deliveries.into_iter().peekable();
+        for (slot, frame) in live.iter().copied().enumerate() {
+            while let Some((_, chunk)) = pending.next_if(|(at, _)| *at <= slot) {
+                joined.apply_history(&chunk);
+            }
+            apply(&mut joined, frame);
+            apply(&mut live_only, frame);
+        }
+        for (_, chunk) in pending {
+            joined.apply_history(&chunk);
+        }
+
+        let (full, merged, own) = (
+            series_of(&continuous, cutoff_bucket),
+            series_of(&joined, cutoff_bucket),
+            series_of(&live_only, cutoff_bucket),
+        );
+        prop_assert_eq!(merged.before, full.before, "buckets before the cutoff bucket");
+        prop_assert_eq!(merged.after, own.after, "buckets from the cutoff bucket on");
     }
 }

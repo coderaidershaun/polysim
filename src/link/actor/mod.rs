@@ -2,6 +2,8 @@
 //! gate. Inbound frames are validated and pushed to the engine like any other input, and outbound
 //! frames are drained on timers from the hot thread's UI rings, which nothing else reads.
 
+mod backfill;
+mod memory;
 mod outbound;
 
 use std::io;
@@ -12,6 +14,7 @@ use std::time::Duration;
 use rtrb::Consumer;
 use tokio::net::UdpSocket;
 use tokio::runtime::Handle;
+use tokio::time::MissedTickBehavior;
 
 use crate::config::{ConfigError, ControllerLoss, ExecutionMode, PeerSubscription};
 use crate::hot::spawn::LinkQueueProducer;
@@ -20,6 +23,9 @@ use crate::msg::ui::UiChannels;
 use crate::shutdown::{RunAssertion, RunControlGate, TaskHandle};
 use crate::time::{DurationUs, EngineClock, TsUs};
 use crate::{info, warn, warn_repeating};
+
+use backfill::{BackfillRefused, Backfills};
+use memory::ChartMemory;
 
 use super::control::{LINK_MAX_TOPICS, RunPhase, RunState, Subscribe, TopicSet};
 use super::envelope::{FrameGuard, LINK_MAX_DATAGRAM, LinkDecodeError, LinkIdentity, TopicId};
@@ -145,6 +151,7 @@ struct RejectCounts {
     receive_failed: u64,
     table_full_refused: u64,
     peer_silenced: u64,
+    backfill_refused: u64,
 }
 
 struct Actor {
@@ -158,6 +165,8 @@ struct Actor {
     inbound: LinkQueueProducer,
     outbound: Consumer<OutboundLink>,
     channels: UiChannels,
+    memory: ChartMemory,
+    backfills: Backfills,
     control: RunControlGate,
     clock: EngineClock,
     spin_interval: DurationUs,
@@ -196,6 +205,8 @@ impl Actor {
             inbound: setup.inbound,
             outbound: setup.outbound,
             channels: setup.channels,
+            memory: ChartMemory::new(),
+            backfills: Backfills::new(),
             control: setup.control,
             clock: setup.clock,
             spin_interval: setup.spin_interval,
@@ -216,6 +227,10 @@ impl Actor {
     async fn run(mut self) {
         let socket = Arc::clone(&self.socket);
         let mut flush = tokio::time::interval(FLUSH_INTERVAL);
+        // The default fires missed ticks back to back after a stall, which would send several
+        // flushes' share of backfill in one burst. Each flush drains everything, so a late tick
+        // costs the live feed nothing.
+        flush.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut announce = tokio::time::interval(ANNOUNCE_INTERVAL);
         let mut refresh = tokio::time::interval(SUBSCRIBE_INTERVAL);
         let mut inbox = [0u8; LINK_MAX_DATAGRAM];
@@ -267,8 +282,15 @@ impl Actor {
     }
 
     fn on_subscribe(&mut self, from: SocketAddr, subscribe: Subscribe, now: TsUs) {
-        if self.subscribers.refresh(from, subscribe.topics, now) == RefreshOutcome::Rejected {
+        let outcome = self.subscribers.refresh(from, subscribe.topics, now);
+        if outcome == RefreshOutcome::Rejected {
             self.on_table_full(from);
+        }
+        // Only a subscriber that names the history topic gets a backfill. A peer engine that asks
+        // for every topic could only count the burst as ignored frames.
+        let wants_history = subscribe.topics.topics().contains(&TopicId::HISTORY);
+        if outcome == RefreshOutcome::Added && wants_history {
+            self.begin_backfill(from, now);
         }
         if subscribe.desired_epoch == 0 {
             // Epoch 0: peer subscribes without claiming control
@@ -369,12 +391,13 @@ impl Actor {
             + counts.send_failed
             + counts.receive_failed
             + counts.table_full_refused
-            + counts.peer_silenced;
+            + counts.peer_silenced
+            + counts.backfill_refused;
         if total == 0 {
             return;
         }
         info!(
-            "link rejected[decode_failed={} gate_rejected={} topic_ignored={} send_failed={} receive_failed={} table_full_refused={} peer_silenced={}] gate{:?}",
+            "link rejected[decode_failed={} gate_rejected={} topic_ignored={} send_failed={} receive_failed={} table_full_refused={} peer_silenced={} backfill_refused={}] gate{:?}",
             counts.decode_failed,
             counts.gate_rejected,
             counts.topic_ignored,
@@ -382,6 +405,7 @@ impl Actor {
             counts.receive_failed,
             counts.table_full_refused,
             counts.peer_silenced,
+            counts.backfill_refused,
             self.gate.counts()
         );
     }
@@ -401,6 +425,15 @@ impl Actor {
             self.counts.receive_failed,
             "link socket receive failed {} times (latest: {error})",
             self.counts.receive_failed
+        );
+    }
+
+    #[cold]
+    fn on_backfill_refused(&mut self, error: &BackfillRefused) {
+        warn_repeating!(
+            self.counts.backfill_refused,
+            "link refused {} backfills (latest: {error})",
+            self.counts.backfill_refused
         );
     }
 

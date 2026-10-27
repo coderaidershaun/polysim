@@ -20,10 +20,31 @@ impl Actor {
             self.send(outbound.topic, LinkBody::Payload(outbound.payload), now);
         }
         while let Ok(snapshot) = self.channels.books.pop() {
+            self.memory.on_book(&snapshot);
             self.send(TopicId::BOOKS, LinkBody::Book(snapshot), now);
         }
         while let Ok(event) = self.channels.events.pop() {
+            self.memory.on_event(&event);
             self.send(TopicId::EVENTS, LinkBody::Event(event), now);
+        }
+        self.backfills.begin_flush();
+        while let Some((address, chunk)) = self.backfills.next_due(&self.memory) {
+            self.send_to(address, TopicId::HISTORY, LinkBody::History(chunk));
+        }
+    }
+
+    /// The workstation cannot fold history before it holds the catalog, so it gets the lifecycle
+    /// and catalog at once instead of at the next announce.
+    pub(super) fn begin_backfill(&mut self, to: SocketAddr, now: TsUs) {
+        self.poll_lifecycle(now);
+        let lifecycle = LinkBody::Lifecycle(self.lifecycle());
+        self.send_to(to, TopicId::LIFECYCLE, lifecycle);
+        for index in 0..self.catalog_frames.len() {
+            let (topic, body) = self.catalog_frames[index];
+            self.send_to(to, topic, body);
+        }
+        if let Err(error) = self.backfills.start(to) {
+            self.on_backfill_refused(&error);
         }
     }
 

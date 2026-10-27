@@ -580,6 +580,7 @@ proptest! {
                     Delivery::Book(snapshot) => model.apply_book(snapshot),
                     Delivery::Event(event) => model.apply_event(event),
                     Delivery::Catalog(_) => panic!("a feed frame produced a catalog"),
+                    Delivery::History(_) => panic!("a feed frame produced a history chunk"),
                 }
             }
         }
@@ -734,7 +735,8 @@ fn a_subscribe_is_due_at_start_every_two_seconds_and_at_once_after_an_assert() {
             TopicId::EVENTS,
             TopicId::CATALOG_INSTRUMENTS,
             TopicId::CATALOG_FEATURES,
-            TopicId::LIFECYCLE
+            TopicId::LIFECYCLE,
+            TopicId::HISTORY
         ],
         "the workstation names the topics it reads: 'all' would have the engine unicast strategy \
          payload frames at a process that can only count them as rejects"
@@ -860,6 +862,7 @@ impl Replica {
         match &delivery {
             Some(Delivery::Book(snapshot)) => self.model.apply_book(*snapshot),
             Some(Delivery::Event(event)) => self.model.apply_event(*event),
+            Some(Delivery::History(history)) => self.model.apply_history(history),
             Some(Delivery::Catalog(_)) | None => {}
         }
         delivery

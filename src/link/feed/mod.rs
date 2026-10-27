@@ -2,6 +2,7 @@
 //! can drift from the one the engine holds.
 
 mod exec;
+mod history;
 mod latency;
 
 use crate::hot::exec::QuoteLevel;
@@ -16,6 +17,7 @@ use crate::time::TsUs;
 use super::envelope::{ByteReader, ByteWriter, ENVELOPE_LEN, LINK_MAX_DATAGRAM, LinkDecodeError};
 use super::wire::{OPTIONAL_LEVEL_LEN, WireField, wire_array, wire_enum, wire_struct};
 use exec::{HALT_LEN, REJECT_ORIGIN_LEN};
+pub(super) use history::HISTORY_BODY_LEN;
 use latency::LATENCY_LEN;
 
 const LEVEL_LEN: usize = 16;

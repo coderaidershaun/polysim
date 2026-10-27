@@ -346,10 +346,8 @@ fn derive_status(snapshot: Option<&UiBookSnapshot>, feed: FeedStatus) -> DomStat
 }
 
 pub(crate) fn snapshot_mid(snapshot: &UiBookSnapshot, tick: Price) -> Option<i64> {
-    if snapshot.state != UiBookState::Valid || snapshot.bid_len == 0 || snapshot.ask_len == 0 {
-        return None;
-    }
-    mid_half_ticks(snapshot.bids[0].price, snapshot.asks[0].price, tick)
+    let top = snapshot.top_of_book()?;
+    mid_half_ticks(top.bid, top.ask, tick)
 }
 
 pub(crate) fn delta_from_mid(tick_index: i64, mid_half_ticks: i64) -> i64 {
