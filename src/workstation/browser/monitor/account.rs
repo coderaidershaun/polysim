@@ -7,7 +7,7 @@ use eframe::egui;
 use crate::hot::exec::ExecHalt;
 
 use super::sizes::content_column;
-use crate::workstation::browser::theme::{self, DARK, METRICS};
+use crate::workstation::browser::theme::{self, METRICS, Palette};
 use crate::workstation::format::MISSING;
 use crate::workstation::monitor::view::{
     AccountView, AssetRowView, MonitorFrame, SideCountView, account,
@@ -90,12 +90,13 @@ impl Grid {
     const COLUMNS: usize = 3;
 
     fn new(painter: &egui::Painter, rect: egui::Rect) -> Self {
+        let palette = Palette::of(painter.ctx());
         let label_left = rect.left() + METRICS.space_2;
         let numbers_left = label_left + METRICS.monitor_asset_label_w;
         let width = (rect.right() - METRICS.space_2 - numbers_left).max(0.0);
         let column_width = width / Self::COLUMNS as f32;
         let glyph = painter
-            .layout_no_wrap("0".to_owned(), number_font(), DARK.text_primary)
+            .layout_no_wrap("0".to_owned(), number_font(), palette.text_primary)
             .size()
             .x;
         Self {
@@ -119,13 +120,14 @@ impl Grid {
 
 /// The band title, its notes and the asset columns' captions.
 fn paint_header(painter: &egui::Painter, grid: &Grid, rect: egui::Rect, view: &AccountView<'_>) {
+    let palette = Palette::of(painter.ctx());
     let y = theme::crisp(painter, rect.center().y);
     let title = painter.text(
         egui::pos2(rect.left() + METRICS.space_2, y),
         egui::Align2::LEFT_CENTER,
         "ACCOUNT",
         egui::FontId::proportional(METRICS.monitor_micro_font),
-        DARK.text_secondary,
+        palette.text_secondary,
     );
     let mut notes_right = f32::INFINITY;
     for (index, caption) in account_captions(view).iter().enumerate() {
@@ -135,7 +137,7 @@ fn paint_header(painter: &egui::Painter, grid: &Grid, rect: egui::Rect, view: &A
             egui::Align2::RIGHT_CENTER,
             caption,
             egui::FontId::proportional(METRICS.monitor_micro_font),
-            DARK.text_secondary,
+            palette.text_secondary,
         );
         if index == 0 {
             notes_right = drawn.left() - METRICS.space_2;
@@ -154,7 +156,7 @@ fn paint_header(painter: &egui::Painter, grid: &Grid, rect: egui::Rect, view: &A
             egui::Rect::from_x_y_ranges(note_left..=notes_right, y..=y),
             &note,
             egui::FontId::proportional(METRICS.monitor_micro_font),
-            DARK.tone(tone),
+            palette.tone(tone),
         );
         note_left += used + METRICS.space_2;
     }
@@ -169,26 +171,32 @@ fn paint_asset(
     asset: AssetRowView<'_>,
     scratch: &mut String,
 ) {
+    let palette = Palette::of(painter.ctx());
     theme::text_at(
         painter,
         egui::pos2(grid.label(rect).left(), rect.center().y),
         egui::Align2::LEFT_CENTER,
         asset_label(asset),
         egui::FontId::monospace(METRICS.monitor_channel_font),
-        DARK.text_primary,
+        palette.text_primary,
     );
 
     let free = asset.balance.map(|balance| balance.free);
     let locked = asset.balance.map(|balance| balance.locked);
     let glyphs = grid.number_glyphs;
     write_fitted_amount(scratch, free, BALANCE_DECIMALS, glyphs);
-    paint_number(painter, grid.column(rect, 0), scratch, DARK.text_primary);
+    paint_number(painter, grid.column(rect, 0), scratch, palette.text_primary);
     // Locked is dimmer: the venue holds it, so it cannot be spent.
     write_fitted_amount(scratch, locked, BALANCE_DECIMALS, glyphs);
-    paint_number(painter, grid.column(rect, 1), scratch, DARK.text_secondary);
+    paint_number(
+        painter,
+        grid.column(rect, 1),
+        scratch,
+        palette.text_secondary,
+    );
     // Two places against the balances' five: obviously the same money, obviously a total.
     write_fitted_amount(scratch, asset.value, VALUE_DECIMALS, glyphs);
-    paint_number(painter, grid.column(rect, 2), scratch, DARK.text_primary);
+    paint_number(painter, grid.column(rect, 2), scratch, palette.text_primary);
 }
 
 /// An amount too wide for its column loses decimal places, cut and never rounded, before it would
@@ -231,13 +239,14 @@ fn paint_counts(
     label: &str,
     counts: SideCountView,
 ) {
+    let palette = Palette::of(painter.ctx());
     let y = theme::crisp(painter, rect.center().y);
     let label_rect = painter.text(
         egui::pos2(grid.label(rect).left(), y),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::monospace(METRICS.monitor_channel_font),
-        DARK.text_secondary,
+        palette.text_secondary,
     );
     if counts.leaked > 0 {
         painter.text(
@@ -245,14 +254,14 @@ fn paint_counts(
             egui::Align2::LEFT_CENTER,
             format!("+{}", counts.leaked),
             egui::FontId::monospace(METRICS.monitor_channel_font),
-            DARK.invalid,
+            palette.invalid,
         );
     }
 
-    let lost_color = if counts.lost > 0 { DARK.invalid } else { DARK.text_secondary };
+    let lost_color = if counts.lost > 0 { palette.invalid } else { palette.text_secondary };
     let cells = [
-        ("open", counts.open, DARK.text_primary),
-        ("inflt", counts.in_flight, DARK.text_primary),
+        ("open", counts.open, palette.text_primary),
+        ("inflt", counts.in_flight, palette.text_primary),
         ("lost", counts.lost, lost_color),
     ];
     for (index, (tag, count, color)) in cells.into_iter().enumerate() {
@@ -263,7 +272,7 @@ fn paint_counts(
             egui::Align2::LEFT_CENTER,
             tag,
             egui::FontId::proportional(METRICS.monitor_micro_font),
-            DARK.text_secondary,
+            palette.text_secondary,
         );
         paint_number(painter, cell, &count.to_string(), color);
     }
@@ -279,20 +288,21 @@ fn paint_status_row(
     rect: egui::Rect,
     view: &AccountView<'_>,
 ) {
+    let palette = Palette::of(painter.ctx());
     let y = theme::crisp(painter, rect.center().y);
     if let Some(ExecHalt::Halted { reason, .. }) = view.halt {
         // Filled, not outlined, so the halt is easy to find from the corner of the eye.
         painter.rect_filled(
             rect.shrink2(egui::vec2(METRICS.space_2, 1.0)),
             METRICS.corner_radius,
-            DARK.halt_fill,
+            palette.halt_fill,
         );
         painter.text(
             egui::pos2(rect.right() - METRICS.space_2 - METRICS.space_1, y),
             egui::Align2::RIGHT_CENTER,
             format!("{}  {}", text::HALT_WORD, reason.label()),
             egui::FontId::monospace(METRICS.monitor_channel_font),
-            DARK.invalid,
+            palette.invalid,
         );
         return;
     }
@@ -302,7 +312,7 @@ fn paint_status_row(
         egui::Align2::LEFT_CENTER,
         "reject",
         egui::FontId::proportional(METRICS.monitor_micro_font),
-        DARK.text_secondary,
+        palette.text_secondary,
     );
     let (reject, tone) = text::reject_display(view.last_reject.map(|reject| reject.origin));
     let reject_text_rect = grid.column(rect, 0).union(grid.column(rect, 1));
@@ -311,12 +321,12 @@ fn paint_status_row(
         reject_text_rect,
         &reject,
         egui::FontId::monospace(METRICS.monitor_channel_font),
-        DARK.tone(tone),
+        palette.tone(tone),
     );
 
     let (gate, gate_color) = match view.halt {
-        Some(ExecHalt::Armed) => ("ARMED", DARK.positive),
-        _ => (MISSING, DARK.text_secondary),
+        Some(ExecHalt::Armed) => ("ARMED", palette.positive),
+        _ => (MISSING, palette.text_secondary),
     };
     paint_number(painter, grid.column(rect, 2), gate, gate_color);
 }

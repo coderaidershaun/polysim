@@ -320,16 +320,19 @@ fn cell(area: Option<Area>) -> Cell {
     area.map(|area| (area.left, area.width))
 }
 
+/// Width, latched, then the cells in order: picker, switcher, strategy, scheme, halt, mode.
+type TopBarCase = (f32, bool, Cell, Cell, Cell, Cell, Cell, Cell);
+
 #[test]
 fn the_top_bar_drops_the_strategy_first_and_never_the_badges() {
-    // width, latched, picker, switcher, strategy, halt, mode
-    let cases: [(f32, bool, Cell, Cell, Cell, Cell, Cell); 9] = [
+    let cases: [TopBarCase; 9] = [
         (
             1_280.0,
             false,
             Some((0.0, 220.0)),
             None,
-            Some((220.0, 1_000.0)),
+            Some((220.0, 960.0)),
+            Some((1_180.0, 40.0)),
             None,
             Some((1_220.0, 60.0)),
         ),
@@ -338,7 +341,8 @@ fn the_top_bar_drops_the_strategy_first_and_never_the_badges() {
             true,
             Some((0.0, 220.0)),
             None,
-            Some((220.0, 928.0)),
+            Some((220.0, 888.0)),
+            Some((1_108.0, 40.0)),
             Some((1_148.0, 72.0)),
             Some((1_220.0, 60.0)),
         ),
@@ -347,7 +351,8 @@ fn the_top_bar_drops_the_strategy_first_and_never_the_badges() {
             false,
             Some((0.0, 220.0)),
             Some((220.0, 256.0)),
-            Some((476.0, 184.0)),
+            Some((476.0, 144.0)),
+            Some((620.0, 40.0)),
             None,
             Some((660.0, 60.0)),
         ),
@@ -356,7 +361,8 @@ fn the_top_bar_drops_the_strategy_first_and_never_the_badges() {
             true,
             Some((0.0, 220.0)),
             Some((220.0, 256.0)),
-            Some((476.0, 112.0)),
+            Some((476.0, 72.0)),
+            Some((548.0, 40.0)),
             Some((588.0, 72.0)),
             Some((660.0, 60.0)),
         ),
@@ -365,34 +371,38 @@ fn the_top_bar_drops_the_strategy_first_and_never_the_badges() {
             false,
             Some((0.0, 220.0)),
             None,
-            Some((220.0, 110.0)),
+            Some((220.0, 70.0)),
+            Some((290.0, 40.0)),
             None,
             Some((330.0, 60.0)),
         ),
         (
             390.0,
             true,
-            Some((0.0, 258.0)),
+            Some((0.0, 218.0)),
             None,
             None,
+            Some((218.0, 40.0)),
             Some((258.0, 72.0)),
             Some((330.0, 60.0)),
         ),
         (
             320.0,
             false,
-            Some((0.0, 260.0)),
+            Some((0.0, 220.0)),
             None,
             None,
+            Some((220.0, 40.0)),
             None,
             Some((260.0, 60.0)),
         ),
         (
             320.0,
             true,
-            Some((0.0, 188.0)),
+            Some((0.0, 148.0)),
             None,
             None,
+            Some((148.0, 40.0)),
             Some((188.0, 72.0)),
             Some((260.0, 60.0)),
         ),
@@ -402,11 +412,12 @@ fn the_top_bar_drops_the_strategy_first_and_never_the_badges() {
             Some((0.0, 0.0)),
             None,
             None,
+            Some((0.0, 0.0)),
             Some((0.0, 40.0)),
             Some((40.0, 60.0)),
         ),
     ];
-    for (width, is_latched, picker, switcher, strategy, halt, mode) in cases {
+    for (width, is_latched, picker, switcher, strategy, scheme, halt, mode) in cases {
         let halt_state = if is_latched { latched() } else { None };
         let arrangement = Arrangement::new(
             canvas(width, HEIGHT),
@@ -418,6 +429,7 @@ fn the_top_bar_drops_the_strategy_first_and_never_the_badges() {
         assert_eq!(cell(Some(bar.picker)), picker, "picker, {case}");
         assert_eq!(cell(bar.switcher), switcher, "switcher, {case}");
         assert_eq!(cell(bar.strategy), strategy, "strategy, {case}");
+        assert_eq!(cell(Some(bar.scheme)), scheme, "scheme, {case}");
         assert_eq!(cell(bar.halt), halt, "halt, {case}");
         assert_eq!(cell(Some(bar.mode)), mode, "mode, {case}");
     }
@@ -536,6 +548,7 @@ fn top_bar_slots(arrangement: &Arrangement) -> Vec<(&'static str, Area)> {
         ("picker", Some(bar.picker)),
         ("switcher", bar.switcher),
         ("strategy", bar.strategy),
+        ("scheme", Some(bar.scheme)),
         ("halt", bar.halt),
         ("mode", Some(bar.mode)),
     ];
@@ -641,11 +654,18 @@ proptest! {
         if bar.picker.width < 220.0 {
             prop_assert!(bar.strategy.is_none(), "the strategy id outlives the picker");
         }
+        prop_assert!(bar.scheme.width == 40.0, "scheme {:?}", bar.scheme);
         let first_badge = bar.halt.unwrap_or(bar.mode);
-        let last_before_badges = bar.strategy.or(bar.switcher).unwrap_or(bar.picker);
+        let last_before_scheme = bar.strategy.or(bar.switcher).unwrap_or(bar.picker);
         prop_assert!(
-            (right(last_before_badges) - first_badge.left).abs() <= EPSILON,
-            "a gap before the badges: {last_before_badges:?} then {first_badge:?}"
+            (right(last_before_scheme) - bar.scheme.left).abs() <= EPSILON,
+            "a gap before the scheme switch: {last_before_scheme:?} then {:?}",
+            bar.scheme
+        );
+        prop_assert!(
+            (right(bar.scheme) - first_badge.left).abs() <= EPSILON,
+            "a gap before the badges: {:?} then {first_badge:?}",
+            bar.scheme
         );
         let slots = top_bar_slots(&arrangement);
         for (first, (name, a)) in slots.iter().enumerate() {

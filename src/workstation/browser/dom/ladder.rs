@@ -11,7 +11,7 @@ use super::geometry::{ASK_COLUMNS, BID_COLUMNS, DomLayout};
 use super::overlay::OverlayPainter;
 use super::pin;
 use crate::ids::Qty;
-use crate::workstation::browser::theme::{self, DARK, METRICS};
+use crate::workstation::browser::theme::{self, METRICS, Palette};
 use crate::workstation::dom_view::{
     DomRow, DomStatus, DomView, DomViewInput, StrategyCell, build_dom_view,
 };
@@ -27,6 +27,7 @@ const MIN_GRID_FADE: f32 = 0.35;
 const FONT_STEP: f32 = 0.5;
 
 pub fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &DomFrame<'_>) -> egui::Response {
+    let palette = Palette::of(ui.ctx());
     let response = ui.interact(rect, egui::Id::new("polysim-dom"), egui::Sense::hover());
     let painter = ui.painter().with_clip_rect(rect);
     let layout = DomLayout::new(rect, frame.levels);
@@ -39,7 +40,7 @@ pub fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &DomFrame<'_>) -> egui:
         feed: frame.feed,
     });
 
-    painter.rect_filled(rect, 0.0, DARK.panel);
+    painter.rect_filled(rect, 0.0, palette.panel);
     paint_grid(&painter, &layout, rect);
     let mut ladder = LadderPainter {
         painter: &painter,
@@ -67,6 +68,7 @@ pub fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &DomFrame<'_>) -> egui:
 }
 
 fn paint_grid(painter: &egui::Painter, layout: &DomLayout, body: egui::Rect) {
+    let palette = Palette::of(painter.ctx());
     // A ladder narrower than its body gets a rule on both outer edges, so it reads as one block.
     let is_inset = layout.rect.width() < body.width();
     let rules = if is_inset { 0..=3 } else { 1..=2 };
@@ -74,10 +76,8 @@ fn paint_grid(painter: &egui::Painter, layout: &DomLayout, body: egui::Rect) {
     theme::rules_v(painter, columns, layout.rect.y_range());
     // A ladder at the height floor rules twice the lines one at the reference row does; at full
     // strength that many read as hatching, so the row rules fade as the rows compress.
-    let rows = theme::hairline(
-        painter,
-        DARK.border.gamma_multiply(layout.scale.max(MIN_GRID_FADE)),
-    );
+    let fade = layout.scale.max(MIN_GRID_FADE);
+    let rows = theme::hairline(painter, palette.border.gamma_multiply(fade));
     for index in 0..=layout.rows_per_side {
         let above = layout.separator.top() - index as f32 * layout.row_height;
         let below = layout.separator.bottom() + index as f32 * layout.row_height;
@@ -98,12 +98,15 @@ struct LadderPainter<'a> {
 
 impl LadderPainter<'_> {
     fn rows(&mut self, view: &DomView) {
+        let palette = Palette::of(self.painter.ctx());
+        let ask_color = at_status(palette.ask, self.status);
+        let bid_color = at_status(palette.bid, self.status);
         for (index, row) in view.ask_rows().iter().enumerate() {
             let rect = self.layout.ask_row(index);
             let public = self.layout.cell(rect, ASK_COLUMNS.public);
             let strategy = self.layout.cell(rect, ASK_COLUMNS.strategy);
             self.price(rect, row.tick_index);
-            self.public(public, row, at_status(DARK.ask, self.status), Edge::Right);
+            self.public(public, row, ask_color, Edge::Right);
             self.strategy(strategy, row, Edge::Left);
         }
         for (index, row) in view.bid_rows().iter().enumerate() {
@@ -111,15 +114,16 @@ impl LadderPainter<'_> {
             let public = self.layout.cell(rect, BID_COLUMNS.public);
             let strategy = self.layout.cell(rect, BID_COLUMNS.strategy);
             self.price(rect, row.tick_index);
-            self.public(public, row, at_status(DARK.bid, self.status), Edge::Left);
+            self.public(public, row, bid_color, Edge::Left);
             self.strategy(strategy, row, Edge::Right);
         }
     }
 
     fn price(&mut self, row_rect: egui::Rect, tick_index: i64) {
+        let palette = Palette::of(self.painter.ctx());
         self.frame.write_row_price(&mut self.scratch, tick_index);
         let cell = self.layout.cell(row_rect, 1);
-        let color = at_status(DARK.text_primary, self.status);
+        let color = at_status(palette.text_primary, self.status);
         let galley = self.fitted(self.layout.fonts.price, cell, color);
         self.put(galley, cell, (cell.center().x, egui::Align2::CENTER_CENTER));
     }
@@ -131,11 +135,14 @@ impl LadderPainter<'_> {
     }
 
     fn strategy(&mut self, cell: egui::Rect, row: &DomRow, edge: Edge) {
+        let palette = Palette::of(self.painter.ctx());
         let (qty, word, color) = match row.strategy_cell() {
             Some(StrategyCell::Order { qty, status }) => {
-                (qty, status.word(), DARK.tone(text::order_tone(status)))
+                (qty, status.word(), palette.tone(text::order_tone(status)))
             }
-            Some(StrategyCell::Desired { qty }) => (qty, "want", DARK.selected.gamma_multiply(0.6)),
+            Some(StrategyCell::Desired { qty }) => {
+                (qty, "want", palette.selected.gamma_multiply(0.6))
+            }
             None => return,
         };
         let color = at_status(color, self.status);
@@ -154,9 +161,11 @@ impl LadderPainter<'_> {
     }
 
     fn separator(&mut self, view: &DomView) {
+        let palette = Palette::of(self.painter.ctx());
         let separator = self.layout.separator;
-        self.painter.rect_filled(separator, 0.0, DARK.panel_raised);
-        let border = egui::Stroke::new(2.0, DARK.focus);
+        self.painter
+            .rect_filled(separator, 0.0, palette.panel_raised);
+        let border = egui::Stroke::new(2.0, palette.focus);
         for y in [separator.top(), separator.bottom()] {
             self.painter
                 .hline(separator.x_range(), theme::crisp(self.painter, y), border);
@@ -165,12 +174,12 @@ impl LadderPainter<'_> {
         let label = self.painter.layout_no_wrap(
             "MID".to_owned(),
             egui::FontId::proportional(METRICS.dom_tag_font),
-            DARK.text_secondary,
+            palette.text_secondary,
         );
         // The mid is centred, so it leaves the label's width free on both sides.
         let mid_cell = separator.shrink2(egui::vec2(METRICS.dom_cell_pad + label.size().x, 0.0));
         format::write_opt_venue_mid(&mut self.scratch, view.mid_half_ticks, self.frame.tick);
-        let color = DARK.tone(text::mid_tone(view.mid_half_ticks));
+        let color = palette.tone(text::mid_tone(view.mid_half_ticks));
         let mid = self.fitted(METRICS.dom_mid_font, mid_cell, color);
         self.put(
             mid,
@@ -299,11 +308,12 @@ fn ring_for(
     row: &DomRow,
     status: DomStatus,
 ) {
+    let palette = Palette::of(painter.ctx());
     let (width, color) = match text::ring(row, status) {
-        Some(Ring::Confirmed) => (2.0, DARK.selected),
-        Some(Ring::InFlight) => (1.0, DARK.tone(text::order_tone(OrderStatus::InFlight))),
-        Some(Ring::Lost) => (1.0, DARK.tone(text::order_tone(OrderStatus::Lost))),
-        Some(Ring::Desired) => (1.0, DARK.selected.gamma_multiply(0.6)),
+        Some(Ring::Confirmed) => (2.0, palette.selected),
+        Some(Ring::InFlight) => (1.0, palette.tone(text::order_tone(OrderStatus::InFlight))),
+        Some(Ring::Lost) => (1.0, palette.tone(text::order_tone(OrderStatus::Lost))),
+        Some(Ring::Desired) => (1.0, palette.selected.gamma_multiply(0.6)),
         None => return,
     };
     // The ring carries status alone once the tags drop out, so it thins with the row rather than

@@ -5,7 +5,7 @@ use eframe::egui;
 
 use super::DomFrame;
 use super::geometry::{ASK_COLUMNS, BID_COLUMNS, DomLayout};
-use crate::workstation::browser::theme::{self, DARK, Direction, METRICS};
+use crate::workstation::browser::theme::{self, Direction, METRICS, Palette};
 use crate::workstation::dom_view::{DomRow, DomView, QuotePlacement};
 use crate::workstation::format;
 use crate::workstation::text;
@@ -43,8 +43,9 @@ impl OverlayPainter<'_> {
     pub(super) fn paint_hover(&self, pointer: Option<egui::Pos2>) {
         let Some(pointer) = pointer else { return };
         let Some((row_rect, row)) = self.layout.row_at(self.view, pointer) else { return };
+        let palette = Palette::of(self.painter.ctx());
         self.painter
-            .rect_filled(row_rect, 0.0, DARK.selected.gamma_multiply(0.12));
+            .rect_filled(row_rect, 0.0, palette.selected.gamma_multiply(0.12));
         let detail = row_detail(row, self.frame);
         readout(self.painter, self.layout, pointer, &detail);
     }
@@ -53,7 +54,7 @@ impl OverlayPainter<'_> {
         let Some((label, tone)) = text::status_pill(self.view.status, self.frame.stale_age) else {
             return;
         };
-        let color = DARK.tone(tone);
+        let color = Palette::of(self.painter.ctx()).tone(tone);
         let galley = self.painter.layout_no_wrap(
             label,
             egui::FontId::proportional(METRICS.dom_qty_font),
@@ -78,13 +79,14 @@ fn chevron(
     direction: Direction,
     delta_half_ticks: i64,
 ) -> egui::Rect {
+    let palette = Palette::of(painter.ctx());
     // The triangle beside the number is what says "delta": every `format::write_*` opens by clearing
     // the buffer, so a prefix written here would be discarded.
     let label = format::render(|out| format::write_mid(out, delta_half_ticks));
     let galley = painter.layout_no_wrap(
         label,
         egui::FontId::proportional(METRICS.dom_tag_font + 1.0),
-        DARK.focus,
+        palette.focus,
     );
 
     let arrow = 9.0;
@@ -109,10 +111,10 @@ fn chevron(
         layout.rect,
         egui::Rect::from_center_size(egui::pos2(center_x, center_y), egui::vec2(width, height)),
     );
-    theme::fill_pill(painter, pill, DARK.focus);
+    theme::fill_pill(painter, pill, palette.focus);
 
     let arrow_center = egui::pos2(pill.left() + pad + arrow / 2.0, pill.center().y);
-    let arrow_shape = theme::triangle(arrow_center, arrow, direction, DARK.selected);
+    let arrow_shape = theme::triangle(arrow_center, arrow, direction, palette.selected);
     painter.add(arrow_shape);
     painter.galley(
         egui::pos2(
@@ -120,7 +122,7 @@ fn chevron(
             pill.center().y - galley.size().y / 2.0,
         ),
         galley,
-        DARK.focus,
+        palette.focus,
     );
     pill
 }
@@ -156,6 +158,7 @@ fn row_detail(row: &DomRow, frame: &DomFrame<'_>) -> RowDetail {
 }
 
 fn readout(painter: &egui::Painter, layout: &DomLayout, pointer: egui::Pos2, detail: &RowDetail) {
+    let palette = Palette::of(painter.ctx());
     let font = egui::FontId::monospace(METRICS.dom_tag_font + 2.0);
     let lines = [
         format!("px    {}", detail.price),
@@ -165,7 +168,7 @@ fn readout(painter: &egui::Painter, layout: &DomLayout, pointer: egui::Pos2, det
     ];
     let galleys: Vec<_> = lines
         .into_iter()
-        .map(|line| painter.layout_no_wrap(line, font.clone(), DARK.text_primary))
+        .map(|line| painter.layout_no_wrap(line, font.clone(), palette.text_primary))
         .collect();
 
     let pad = METRICS.dom_cell_pad;
@@ -178,7 +181,7 @@ fn readout(painter: &egui::Painter, layout: &DomLayout, pointer: egui::Pos2, det
         egui::Rect::from_min_size(anchor, egui::vec2(width, height)),
     );
 
-    theme::fill_pill(painter, clamped, DARK.border);
+    theme::fill_pill(painter, clamped, palette.border);
     for (index, galley) in galleys.into_iter().enumerate() {
         painter.galley(
             egui::pos2(
@@ -186,7 +189,7 @@ fn readout(painter: &egui::Painter, layout: &DomLayout, pointer: egui::Pos2, det
                 clamped.top() + pad + index as f32 * line_h,
             ),
             galley,
-            DARK.text_primary,
+            palette.text_primary,
         );
     }
 }

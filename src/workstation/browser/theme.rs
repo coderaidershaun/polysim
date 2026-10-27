@@ -8,8 +8,8 @@ use crate::workstation::text::Tone;
 
 /// Colours named by role, not hue, so a painter asks for what a thing is and the palette decides
 /// how it looks. Values are gamma-space sRGBA.
-#[derive(Clone, Copy)]
-pub(crate) struct Palette {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Palette {
     pub canvas: egui::Color32,
     pub panel: egui::Color32,
     pub panel_raised: egui::Color32,
@@ -33,7 +33,7 @@ pub(crate) struct Palette {
     pub focus: egui::Color32,
 }
 
-pub(crate) const DARK: Palette = Palette {
+const DARK: Palette = Palette {
     canvas: egui::Color32::from_rgb(10, 13, 18),
     panel: egui::Color32::from_rgb(15, 19, 26),
     panel_raised: egui::Color32::from_rgb(21, 27, 36),
@@ -54,7 +54,41 @@ pub(crate) const DARK: Palette = Palette {
     focus: egui::Color32::from_rgb(126, 178, 255),
 };
 
+const LIGHT: Palette = Palette {
+    canvas: egui::Color32::from_rgb(243, 245, 248),
+    panel: egui::Color32::from_rgb(255, 255, 255),
+    panel_raised: egui::Color32::from_rgb(236, 240, 244),
+    border: egui::Color32::from_rgb(206, 213, 222),
+    grid: egui::Color32::from_rgb(226, 231, 237),
+    text_primary: egui::Color32::from_rgb(24, 29, 37),
+    text_secondary: egui::Color32::from_rgb(87, 97, 112),
+    bid: egui::Color32::from_rgb(14, 128, 84),
+    ask: egui::Color32::from_rgb(204, 38, 62),
+    halt_fill: egui::Color32::from_rgba_unmultiplied_const(204, 38, 62, 36),
+    sell_fill: egui::Color32::from_rgb(196, 92, 0),
+    positive: egui::Color32::from_rgb(16, 132, 82),
+    negative: egui::Color32::from_rgb(209, 36, 52),
+    warning: egui::Color32::from_rgb(163, 107, 0),
+    invalid: egui::Color32::from_rgb(214, 32, 32),
+    stale: egui::Color32::from_rgb(150, 98, 10),
+    selected: egui::Color32::from_rgb(37, 99, 235),
+    focus: egui::Color32::from_rgb(30, 64, 175),
+};
+
 impl Palette {
+    fn of_theme(theme: egui::Theme) -> &'static Self {
+        match theme {
+            egui::Theme::Dark => &DARK,
+            egui::Theme::Light => &LIGHT,
+        }
+    }
+
+    /// The palette of the context's current theme. The operator can switch the theme at any time,
+    /// so read it again on each frame rather than keeping it.
+    pub fn of(ctx: &egui::Context) -> &'static Self {
+        Self::of_theme(ctx.theme())
+    }
+
     pub(crate) fn tone(&self, tone: Tone) -> egui::Color32 {
         match tone {
             Tone::Text => self.text_primary,
@@ -243,7 +277,7 @@ pub(crate) fn rules_v(
     xs: impl IntoIterator<Item = f32>,
     y_range: egui::Rangef,
 ) {
-    let stroke = hairline(painter, DARK.border);
+    let stroke = hairline(painter, Palette::of(painter.ctx()).border);
     for x in xs {
         painter.vline(crisp(painter, x), y_range, stroke);
     }
@@ -255,7 +289,7 @@ pub(crate) fn rules_h(
     ys: impl IntoIterator<Item = f32>,
     x_range: egui::Rangef,
 ) {
-    let stroke = hairline(painter, DARK.border);
+    let stroke = hairline(painter, Palette::of(painter.ctx()).border);
     for y in ys {
         painter.hline(x_range, crisp(painter, y), stroke);
     }
@@ -292,7 +326,11 @@ pub(crate) fn triangle(
 }
 
 pub(crate) fn fill_pill(painter: &egui::Painter, rect: egui::Rect, border: egui::Color32) {
-    painter.rect_filled(rect, METRICS.corner_radius, DARK.panel_raised);
+    painter.rect_filled(
+        rect,
+        METRICS.corner_radius,
+        Palette::of(painter.ctx()).panel_raised,
+    );
     painter.rect_stroke(
         rect,
         METRICS.corner_radius,
@@ -341,17 +379,25 @@ pub(crate) fn paint_ellipsized(
 }
 
 /// The colour behind the first frame, so the page never flashes grey while it starts.
-pub(crate) fn clear_color() -> [f32; 4] {
-    DARK.canvas.to_normalized_gamma_f32()
+pub(crate) fn clear_color(visuals: &egui::Visuals) -> [f32; 4] {
+    Palette::of_theme(egui::Theme::from_dark_mode(visuals.dark_mode))
+        .canvas
+        .to_normalized_gamma_f32()
 }
 
-pub(crate) fn install_style(ctx: &egui::Context) {
-    ctx.all_styles_mut(|style| {
-        style.visuals.override_text_color = Some(DARK.text_primary);
-        style.visuals.panel_fill = DARK.panel;
-        style.visuals.window_fill = DARK.panel_raised;
-        style.visuals.extreme_bg_color = DARK.canvas;
-        style.spacing.item_spacing = egui::vec2(METRICS.space_2, METRICS.space_1);
-        style.animation_time = 0.10;
-    });
+/// Styles both themes from their palettes and starts in `theme`. Setting the theme explicitly stops
+/// egui from following the operating system's light or dark setting.
+pub(crate) fn install(ctx: &egui::Context, theme: egui::Theme) {
+    for each in [egui::Theme::Dark, egui::Theme::Light] {
+        let palette = Palette::of_theme(each);
+        ctx.style_mut_of(each, |style| {
+            style.visuals.override_text_color = Some(palette.text_primary);
+            style.visuals.panel_fill = palette.panel;
+            style.visuals.window_fill = palette.panel_raised;
+            style.visuals.extreme_bg_color = palette.canvas;
+            style.spacing.item_spacing = egui::vec2(METRICS.space_2, METRICS.space_1);
+            style.animation_time = 0.10;
+        });
+    }
+    ctx.set_theme(theme);
 }

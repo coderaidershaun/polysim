@@ -8,7 +8,7 @@ use eframe::egui;
 use crate::ids::InstrumentId;
 
 use super::mid::{self, ChartPaint, Plot, paint_note};
-use crate::workstation::browser::theme::{self, DARK, METRICS};
+use crate::workstation::browser::theme::{self, METRICS, Palette};
 use crate::workstation::chart::position_model::PositionModel;
 use crate::workstation::chart::position_view::{self, QuoteBounds, RiskSeries};
 use crate::workstation::chart::view::ChartDomain;
@@ -66,15 +66,17 @@ fn paint_plot(
 
 /// Drawn under the series. The bounds always include zero, so this line is always in view.
 fn paint_zero_line(painter: &egui::Painter, plot: &PositionPlot) {
+    let palette = Palette::of(painter.ctx());
     painter.hline(
         plot.rect.x_range(),
         theme::crisp(painter, plot.y(0)),
-        theme::hairline(painter, DARK.grid),
+        theme::hairline(painter, palette.grid),
     );
 }
 
 fn paint_line(painter: &egui::Painter, plot: &PositionPlot, frame: &PositionFrame<'_>) {
-    let stroke = egui::Stroke::new(METRICS.chart_line_width, DARK.selected);
+    let palette = Palette::of(painter.ctx());
+    let stroke = egui::Stroke::new(METRICS.chart_line_width, palette.selected);
     let mut run: Vec<egui::Pos2> = Vec::new();
     let mut previous: Option<u64> = None;
     for bucket in position_view::visible_buckets(frame.positions, frame.instrument, plot.domain) {

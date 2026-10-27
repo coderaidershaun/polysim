@@ -5,7 +5,7 @@ use eframe::egui;
 
 use crate::msg::ui::UiLatencySummary;
 
-use super::theme::{self, DARK, METRICS};
+use super::theme::{self, METRICS, Palette};
 use crate::workstation::chart::pane::{LATENCY_HEADER_HEIGHT, LATENCY_ROW_HEIGHT, LatencyBand};
 use crate::workstation::text::{
     Column, Flow, LATENCY_ROWS, LATENCY_SHORT_TITLE, LATENCY_TITLE, summary_cells,
@@ -35,8 +35,9 @@ pub fn split(body: egui::Rect) -> (egui::Rect, egui::Rect) {
 }
 
 pub fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &LatencyFrame) {
+    let palette = Palette::of(ui.ctx());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, DARK.panel);
+    painter.rect_filled(rect, 0.0, palette.panel);
 
     let summary = frame.summary.as_ref();
     match LatencyBand::fitting(rect.height()) {
@@ -47,7 +48,7 @@ pub fn paint(ui: &mut egui::Ui, rect: egui::Rect, frame: &LatencyFrame) {
     painter.hline(
         rect.x_range(),
         theme::crisp_bottom_edge(&painter, rect.bottom()),
-        theme::hairline(&painter, DARK.border),
+        theme::hairline(&painter, palette.border),
     );
 }
 
@@ -110,7 +111,8 @@ fn paint_grid(painter: &egui::Painter, rect: egui::Rect, summary: Option<&UiLate
 }
 
 fn paint_header(painter: &egui::Painter, band: egui::Rect, fit: &Fit) {
-    painter.rect_filled(band, 0.0, DARK.panel_raised);
+    let palette = Palette::of(painter.ctx());
+    painter.rect_filled(band, 0.0, palette.panel_raised);
     let column = fit.column(band);
     let font = egui::FontId::proportional(METRICS.latency_header_font);
     let title = if fit.has_short_labels { LATENCY_SHORT_TITLE } else { LATENCY_TITLE };
@@ -122,7 +124,7 @@ fn paint_header(painter: &egui::Painter, band: egui::Rect, fit: &Fit) {
             cell,
             shown.header(),
             font.clone(),
-            DARK.text_secondary,
+            palette.text_secondary,
         );
     }
     theme::rules_h(painter, [band.bottom()], band.x_range());
@@ -134,7 +136,8 @@ fn paint_rows(
     fit: &Fit,
     summary: Option<&UiLatencySummary>,
 ) {
-    let separator = theme::hairline(painter, DARK.grid);
+    let palette = Palette::of(painter.ctx());
+    let separator = theme::hairline(painter, palette.grid);
     let label_font = egui::FontId::proportional(METRICS.latency_row_font);
     for (index, line) in LATENCY_ROWS.iter().enumerate() {
         let top = band.top() + index as f32 * LATENCY_ROW_HEIGHT;
@@ -160,11 +163,12 @@ fn paint_values(
     flow: Flow,
     summary: Option<&UiLatencySummary>,
 ) {
+    let palette = Palette::of(painter.ctx());
     let font = egui::FontId::monospace(METRICS.latency_value_font);
     for (position, column) in Column::shown(fit.count).enumerate() {
         let (text, tone) = column.cell(flow, summary);
         let cell = fit.cell(row, position);
-        paint_value(painter, cell, &text, font.clone(), DARK.tone(tone));
+        paint_value(painter, cell, &text, font.clone(), palette.tone(tone));
     }
 }
 
@@ -172,8 +176,9 @@ fn paint_values(
 /// painting past the right edge. It stays left-aligned instead of centred: it is one line of words
 /// that starts with its title, like the strip readout and the link bar.
 fn paint_summary(painter: &egui::Painter, rect: egui::Rect, summary: Option<&UiLatencySummary>) {
+    let palette = Palette::of(painter.ctx());
     let band = rect.with_max_y((rect.top() + LatencyBand::Summary.height()).min(rect.bottom()));
-    painter.rect_filled(band, 0.0, DARK.panel_raised);
+    painter.rect_filled(band, 0.0, palette.panel_raised);
     theme::rules_h(painter, [band.bottom()], band.x_range());
 
     let label_font = egui::FontId::proportional(METRICS.latency_header_font);
@@ -181,7 +186,7 @@ fn paint_summary(painter: &egui::Painter, rect: egui::Rect, summary: Option<&UiL
     let title = painter.layout_no_wrap(
         LATENCY_TITLE.to_owned(),
         label_font.clone(),
-        DARK.text_secondary,
+        palette.text_secondary,
     );
     let mut left = band.left() + METRICS.space_2;
     let title_width = title.size().x;
@@ -190,8 +195,8 @@ fn paint_summary(painter: &egui::Painter, rect: egui::Rect, summary: Option<&UiL
 
     for (label, text, tone) in summary_cells(summary) {
         let label =
-            painter.layout_no_wrap(label.to_owned(), label_font.clone(), DARK.text_secondary);
-        let value = painter.layout_no_wrap(text, value_font.clone(), DARK.tone(tone));
+            painter.layout_no_wrap(label.to_owned(), label_font.clone(), palette.text_secondary);
+        let value = painter.layout_no_wrap(text, value_font.clone(), palette.tone(tone));
         let value_left = left + label.size().x + METRICS.space_1;
         let right = value_left + value.size().x;
         if right + METRICS.space_2 > band.right() {
@@ -209,14 +214,16 @@ fn paint_galley(
     left: f32,
     galley: std::sync::Arc<egui::Galley>,
 ) {
+    let palette = Palette::of(painter.ctx());
     let top = theme::crisp(painter, band.center().y - galley.size().y / 2.0);
-    painter.galley(egui::pos2(left, top), galley, DARK.text_secondary);
+    painter.galley(egui::pos2(left, top), galley, palette.text_secondary);
 }
 
 fn paint_label(painter: &egui::Painter, cell: egui::Rect, text: &str, font: egui::FontId) {
+    let palette = Palette::of(painter.ctx());
     let anchor = egui::pos2(cell.left() + METRICS.space_2, cell.center().y);
     let align = egui::Align2::LEFT_CENTER;
-    theme::text_at(painter, anchor, align, text, font, DARK.text_secondary);
+    theme::text_at(painter, anchor, align, text, font, palette.text_secondary);
 }
 
 fn paint_value(

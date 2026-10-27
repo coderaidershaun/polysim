@@ -9,7 +9,7 @@ use eframe::egui;
 
 use crate::ids::{InstrumentId, Price, Side};
 
-use crate::workstation::browser::theme::{self, DARK, METRICS};
+use crate::workstation::browser::theme::{self, METRICS, Palette};
 use crate::workstation::chart::model::ChartModel;
 use crate::workstation::chart::view::{
     self, Candle, CandleGrouping, ChartBounds, ChartDomain, ChartMode,
@@ -84,10 +84,11 @@ pub(super) fn paint_frame<B>(
     id: &str,
     paint_plot: impl FnOnce(&egui::Painter, egui::Rect) -> Option<Plot<B>>,
 ) -> ChartPaint<B> {
+    let palette = Palette::of(ui.ctx());
     let response = ui.interact(rect, egui::Id::new(id), egui::Sense::hover());
     let painter = ui.painter().with_clip_rect(rect);
 
-    painter.rect_filled(rect, 0.0, DARK.panel);
+    painter.rect_filled(rect, 0.0, palette.panel);
     let geometry = plot_rect(rect).and_then(|plot_rect| paint_plot(&painter, plot_rect));
     ChartPaint { response, geometry }
 }
@@ -144,9 +145,10 @@ pub(crate) fn paint_axis_labels(
     bounds: ChartBounds,
     labels: AxisLabels,
 ) {
+    let palette = Palette::of(painter.ctx());
     let ticks = view::value_ticks(bounds, rect.height(), AXIS_FONT);
     let font = egui::FontId::monospace(AXIS_FONT);
-    let stroke = theme::hairline(painter, DARK.grid);
+    let stroke = theme::hairline(painter, palette.grid);
     let left = rect.right() + METRICS.chart_pad;
     for (value, label) in text::axis_labels(ticks, labels) {
         let y = egui::lerp(rect.bottom()..=rect.top(), view::y_fraction(value, bounds));
@@ -156,13 +158,14 @@ pub(crate) fn paint_axis_labels(
             egui::Align2::LEFT_CENTER,
             &label,
             font.clone(),
-            DARK.text_secondary,
+            palette.text_secondary,
         );
     }
 }
 
 fn paint_line(painter: &egui::Painter, plot: &PlotGeometry, frame: &ChartFrame<'_>) {
-    let stroke = egui::Stroke::new(METRICS.chart_line_width, DARK.selected);
+    let palette = Palette::of(painter.ctx());
+    let stroke = egui::Stroke::new(METRICS.chart_line_width, palette.selected);
     let mut run: Vec<egui::Pos2> = Vec::new();
     for point in view::segment_points(frame.chart, frame.instrument, plot.domain) {
         if point.is_run_start {
@@ -187,6 +190,7 @@ pub(crate) fn flush_run(painter: &egui::Painter, run: &mut Vec<egui::Pos2>, stro
 }
 
 fn paint_candles(painter: &egui::Painter, plot: &PlotGeometry, frame: &ChartFrame<'_>) {
+    let palette = Palette::of(painter.ctx());
     let grouping = CandleGrouping::for_plot(plot.domain, plot.rect.width());
     let candles = grouping.candles(frame.chart, frame.instrument);
     let mut bodies = egui::Mesh::default();
@@ -197,14 +201,14 @@ fn paint_candles(painter: &egui::Painter, plot: &PlotGeometry, frame: &ChartFram
     let thinnest = theme::one_physical_pixel(painter);
 
     for candle in &candles {
-        let color = body_color(candle);
+        let color = body_color(candle, palette);
         let center_x = (plot.x(candle.first) + plot.x(candle.last)) / 2.0;
         let span = (candle.last - candle.first + 1) as f32 * plot.slot_width();
         if candle.has_break_before {
             breaks.push(egui::Shape::vline(
                 theme::crisp(painter, center_x - span / 2.0),
                 plot.rect.y_range(),
-                theme::hairline(painter, DARK.border),
+                theme::hairline(painter, palette.border),
             ));
         }
         let half_body = (span - METRICS.chart_body_gap)
@@ -238,11 +242,11 @@ fn body_y_range(plot: &PlotGeometry, candle: &Candle, thinnest: f32) -> egui::Ra
     egui::Rangef::new(top, bottom)
 }
 
-fn body_color(candle: &Candle) -> egui::Color32 {
+fn body_color(candle: &Candle, palette: &Palette) -> egui::Color32 {
     match candle.close_half_ticks.cmp(&candle.open_half_ticks) {
-        Ordering::Greater => DARK.bid,
-        Ordering::Less => DARK.ask,
-        Ordering::Equal => DARK.text_secondary,
+        Ordering::Greater => palette.bid,
+        Ordering::Less => palette.ask,
+        Ordering::Equal => palette.text_secondary,
     }
 }
 
@@ -254,11 +258,12 @@ fn paint_fills(painter: &egui::Painter, plot: &PlotGeometry, frame: &ChartFrame<
     if fills.peek().is_none() {
         return;
     }
-    let outline = egui::Stroke::new(METRICS.chart_marker_outline, DARK.canvas);
+    let palette = Palette::of(painter.ctx());
+    let outline = egui::Stroke::new(METRICS.chart_marker_outline, palette.canvas);
     for fill in fills {
         let color = match fill.side {
-            Side::Buy => DARK.bid,
-            Side::Sell => DARK.sell_fill,
+            Side::Buy => palette.bid,
+            Side::Sell => palette.sell_fill,
         };
         painter.circle(
             plot.point(fill.index, fill.half_ticks),
@@ -271,21 +276,23 @@ fn paint_fills(painter: &egui::Painter, plot: &PlotGeometry, frame: &ChartFrame<
 }
 
 fn paint_fill_caption(painter: &egui::Painter, rect: egui::Rect) {
+    let palette = Palette::of(painter.ctx());
     painter.text(
         rect.left_bottom(),
         egui::Align2::LEFT_BOTTOM,
         "fills",
         egui::FontId::proportional(METRICS.chart_caption_font),
-        DARK.text_secondary,
+        palette.text_secondary,
     );
 }
 
 pub(crate) fn paint_note(painter: &egui::Painter, rect: egui::Rect, note: &str) {
+    let palette = Palette::of(painter.ctx());
     painter.text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         note,
         egui::FontId::proportional(METRICS.chart_note_font),
-        DARK.text_secondary,
+        palette.text_secondary,
     );
 }

@@ -5,7 +5,8 @@
 use eframe::egui;
 
 use super::controls::{self, DropdownSpec};
-use super::theme::{self, DARK, METRICS};
+use super::scheme;
+use super::theme::{self, METRICS, Palette};
 use crate::ids::InstrumentId;
 use crate::msg::ui::UiCatalog;
 use crate::workstation::format;
@@ -55,7 +56,8 @@ pub fn paint_top_bar(
     let bar = arrangement.top_bar;
     let area = egui::Rect::from(bar.area);
     let painter = ui.painter_at(area);
-    painter.rect_filled(area, 0.0, DARK.panel_raised);
+    let palette = Palette::of(ui.ctx());
+    painter.rect_filled(area, 0.0, palette.panel_raised);
 
     let mut action = ChromeAction::None;
     let picker = egui::Rect::from(bar.picker);
@@ -77,18 +79,21 @@ pub fn paint_top_bar(
     if let (Some(slot), Some(catalog)) = (bar.strategy, frame.catalog) {
         paint_strategy_id(&painter, slot.into(), &catalog.strategy_id);
     }
+    let scheme_slot = egui::Rect::from(bar.scheme);
+    scheme::paint_switch(ui, scheme_slot);
+    theme::rules_v(&painter, [scheme_slot.left()], area.y_range());
     if let Some(slot) = bar.halt {
         let slot = egui::Rect::from(slot);
-        Badge::of(HALT_BADGE).paint(&painter, slot);
+        Badge::of(HALT_BADGE, palette).paint(&painter, slot);
         theme::rules_v(&painter, [slot.left()], area.y_range());
     }
     let mode = frame.catalog.and_then(|catalog| catalog.execution_mode);
-    Badge::of(text::execution_badge(mode)).paint(&painter, bar.mode.into());
+    Badge::of(text::execution_badge(mode), palette).paint(&painter, bar.mode.into());
 
     painter.hline(
         area.x_range(),
         theme::crisp_bottom_edge(&painter, area.bottom()),
-        theme::hairline(&painter, DARK.border),
+        theme::hairline(&painter, palette.border),
     );
     action
 }
@@ -125,18 +130,20 @@ pub fn paint_panes(
 
 /// Paints the panes' backgrounds and their empty header strips.
 fn paint_pane_frames(ui: &egui::Ui, arrangement: &Arrangement) {
+    let palette = Palette::of(ui.ctx());
     for (_, pane) in panes(arrangement) {
-        ui.painter().rect_filled(pane_rect(pane), 0.0, DARK.panel);
+        ui.painter()
+            .rect_filled(pane_rect(pane), 0.0, palette.panel);
         let Some(header) = pane.header else {
             continue;
         };
         let header = egui::Rect::from(header);
         let painter = ui.painter_at(header);
-        painter.rect_filled(header, 0.0, DARK.panel_raised);
+        painter.rect_filled(header, 0.0, palette.panel_raised);
         painter.hline(
             header.x_range(),
             theme::crisp_bottom_edge(&painter, header.bottom()),
-            theme::hairline(&painter, DARK.border),
+            theme::hairline(&painter, palette.border),
         );
     }
 }
@@ -152,7 +159,7 @@ fn paint_pane_rules(ui: &egui::Ui, arrangement: &Arrangement) {
     for rect in rects.filter(|rect| rect.left() > outline.left()) {
         theme::rules_v(painter, [rect.left()], rect.y_range());
     }
-    let stroke = theme::hairline(painter, DARK.border);
+    let stroke = theme::hairline(painter, Palette::of(painter.ctx()).border);
     let half = stroke.width / 2.0;
     for x in [outline.left() + half, outline.right() - half] {
         painter.vline(x, outline.y_range(), stroke);
@@ -215,7 +222,7 @@ fn paint_strategy_id(painter: &egui::Painter, slot: egui::Rect, strategy_id: &st
         room,
         strategy_id,
         egui::FontId::proportional(STRATEGY_FONT),
-        DARK.text_secondary,
+        Palette::of(painter.ctx()).text_secondary,
     );
 }
 
@@ -228,10 +235,10 @@ struct Badge {
 impl Badge {
     /// A solid cell in the role's colour, so a safety state reads at a glance. Only the neutral
     /// role stays grey.
-    fn of((word, tone): (&'static str, Tone)) -> Self {
+    fn of((word, tone): (&'static str, Tone), palette: &Palette) -> Self {
         let (fill, text) = match tone {
-            Tone::Text => (DARK.border, DARK.text_primary),
-            other => (DARK.tone(other), DARK.canvas),
+            Tone::Text => (palette.border, palette.text_primary),
+            other => (palette.tone(other), palette.canvas),
         };
         Self { word, fill, text }
     }

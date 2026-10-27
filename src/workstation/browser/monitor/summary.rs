@@ -7,7 +7,7 @@ use crate::ids::Side;
 
 use super::pin::Pins;
 use super::sizes::content_column;
-use crate::workstation::browser::theme::{self, DARK, METRICS};
+use crate::workstation::browser::theme::{self, METRICS, Palette};
 use crate::workstation::format;
 use crate::workstation::monitor::view::{MonitorDetail, MonitorFrame, quote_summary};
 use crate::workstation::text::{Lane, Tone, cell_tone, delta_hover, summary_caption, write_delta};
@@ -22,6 +22,7 @@ pub(super) fn paint(
     frame: &MonitorFrame<'_>,
     pins: &mut Pins,
 ) {
+    let palette = Palette::of(ui.ctx());
     let summary = quote_summary(frame.model, frame.instrument, frame.tick);
     let rect = content_column(band);
     let painter = ui.painter_at(rect);
@@ -69,7 +70,7 @@ pub(super) fn paint(
             egui::Align2::CENTER_CENTER,
             summary_caption(lane, frame.dom_unit),
             egui::FontId::proportional(METRICS.monitor_micro_font),
-            DARK.text_secondary,
+            palette.text_secondary,
         );
 
         let font = match lane {
@@ -87,7 +88,7 @@ pub(super) fn paint(
             egui::Align2::CENTER_CENTER,
             scratch.as_str(),
             egui::FontId::monospace(font),
-            DARK.tone(cell_tone(wrote, tone)),
+            palette.tone(cell_tone(wrote, tone)),
         );
     }
 }

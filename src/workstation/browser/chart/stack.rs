@@ -10,7 +10,7 @@ use super::crosshair::{self, CrosshairFrame};
 use super::mid::{self, ChartFrame};
 use super::risk::{self, PositionFrame};
 use crate::workstation::browser::controls;
-use crate::workstation::browser::theme::{self, DARK, METRICS};
+use crate::workstation::browser::theme::{self, METRICS, Palette};
 use crate::workstation::chart::model::ChartModel;
 use crate::workstation::chart::pane::StackBands;
 use crate::workstation::chart::position_model::PositionModel;
@@ -109,8 +109,9 @@ fn paint_strip(
     rect: egui::Rect,
     frame: &ChartStackFrame<'_>,
 ) -> Option<RiskSeries> {
+    let palette = Palette::of(ui.ctx());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, DARK.panel);
+    painter.rect_filled(rect, 0.0, palette.panel);
 
     let selector = egui::Rect::from_min_size(
         egui::pos2(rect.left() + METRICS.space_2, rect.top()),
@@ -132,6 +133,6 @@ fn paint_latest_value(painter: &egui::Painter, rect: egui::Rect, frame: &ChartSt
         egui::Align2::RIGHT_CENTER,
         &readout,
         egui::FontId::monospace(METRICS.chart_axis_font),
-        DARK.tone(text::sign_tone(value)),
+        Palette::of(painter.ctx()).tone(text::sign_tone(value)),
     );
 }

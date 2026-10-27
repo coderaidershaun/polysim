@@ -4,7 +4,7 @@
 
 use eframe::egui;
 
-use crate::workstation::browser::theme::{DARK, METRICS};
+use crate::workstation::browser::theme::{METRICS, Palette};
 use crate::workstation::browser::touch::{self, PaneClick};
 use crate::workstation::monitor::view::{MonitorDetail, MonitorUiState};
 
@@ -56,8 +56,8 @@ impl Pins {
         if !ui.is_rect_visible(rect) {
             return;
         }
-        ui.painter()
-            .rect_filled(rect, 0.0, DARK.selected.gamma_multiply(0.18));
+        let tint = Palette::of(ui.ctx()).selected.gamma_multiply(0.18);
+        ui.painter().rect_filled(rect, 0.0, tint);
         self.popup = self.show_record(ui, &response, &record());
     }
 

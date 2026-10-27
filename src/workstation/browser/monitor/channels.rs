@@ -8,7 +8,7 @@ use super::pin::Pins;
 use super::row_list::{RowList, paint_row_list};
 use super::sizes::{column_widths, content_column};
 use crate::workstation::browser::controls;
-use crate::workstation::browser::theme::{self, DARK, Direction, METRICS};
+use crate::workstation::browser::theme::{self, Direction, METRICS, Palette};
 use crate::workstation::monitor::fit::{ColumnPlan, ColumnWidths, TimeColumn, fit_columns};
 use crate::workstation::monitor::model::{FillRow, OrderRow, SystemRow, TradeRow};
 use crate::workstation::monitor::view::{Channel, MonitorDetail, MonitorFrame, MonitorUiState};
@@ -28,6 +28,7 @@ const SHORT_TIME_LEN: usize = "HH:MM:SS".len();
 /// One equal cell per channel, drawn in the centred column of `band`, so the strip never wraps or
 /// overflows. The caller fills the band.
 pub(super) fn paint_tabs(ui: &mut egui::Ui, band: egui::Rect, state: &mut MonitorUiState) {
+    let palette = Palette::of(ui.ctx());
     let rect = content_column(band);
     let painter = ui.painter_at(rect);
     let cell_w = rect.width() / Channel::ALL.len() as f32;
@@ -47,14 +48,14 @@ pub(super) fn paint_tabs(ui: &mut egui::Ui, band: egui::Rect, state: &mut Monito
         if active {
             controls::fill_selected(&painter, cell);
         } else if response.hovered() {
-            painter.rect_filled(cell, 0.0, DARK.panel);
+            painter.rect_filled(cell, 0.0, palette.panel);
         }
         painter.text(
             cell.center(),
             egui::Align2::CENTER_CENTER,
             channel.label(),
             egui::FontId::proportional(METRICS.monitor_tab_font),
-            if active { DARK.text_primary } else { DARK.text_secondary },
+            if active { palette.text_primary } else { palette.text_secondary },
         );
 
         if response.clicked() {
@@ -145,9 +146,11 @@ fn paint_unseen_badge(
     count: u64,
     state: &mut MonitorUiState,
 ) {
+    let palette = Palette::of(ui.ctx());
+    let text_color = palette.text_primary;
     let text = format!("{count} new");
     let font = egui::FontId::proportional(METRICS.monitor_badge_font);
-    let galley = ui.painter().layout_no_wrap(text, font, DARK.text_primary);
+    let galley = ui.painter().layout_no_wrap(text, font, text_color);
     let galley_size = galley.size();
     let marker_size = METRICS.monitor_badge_font;
     let content = egui::vec2(marker_size + METRICS.space_1 + galley_size.x, galley_size.y);
@@ -163,14 +166,15 @@ fn paint_unseen_badge(
         egui::Sense::click(),
     );
     let painter = ui.painter_at(badge);
-    let fill = if response.hovered() { DARK.selected } else { DARK.selected.gamma_multiply(0.85) };
+    let fill =
+        if response.hovered() { palette.selected } else { palette.selected.gamma_multiply(0.85) };
     painter.rect_filled(badge, METRICS.corner_radius, fill);
 
     let marker_center = egui::pos2(
         badge.left() + METRICS.space_2 + marker_size / 2.0,
         badge.center().y,
     );
-    let marker = theme::triangle(marker_center, marker_size, Direction::Up, DARK.text_primary);
+    let marker = theme::triangle(marker_center, marker_size, Direction::Up, text_color);
     painter.add(marker);
     painter.galley(
         egui::pos2(
@@ -178,7 +182,7 @@ fn paint_unseen_badge(
             badge.center().y - galley_size.y / 2.0,
         ),
         galley,
-        DARK.text_primary,
+        text_color,
     );
 
     if response.on_hover_text("jump to newest").clicked() {
@@ -246,6 +250,7 @@ impl RowColumns {
     }
 
     fn paint_cells(&self, painter: &egui::Painter, rect: egui::Rect, cells: &[Cell]) {
+        let palette = Palette::of(painter.ctx());
         let mut description_offset = 0.0;
         for cell in cells {
             match cell {
@@ -258,7 +263,7 @@ impl RowColumns {
                     let room = rect
                         .with_min_x(self.tag_x + description_offset)
                         .with_max_x(self.qty_x);
-                    theme::paint_ellipsized(painter, room, text, text_font(), DARK.tone(*tone));
+                    theme::paint_ellipsized(painter, room, text, text_font(), palette.tone(*tone));
                 }
                 Cell::Price(text) => self.paint_number(painter, self.price_x, text),
                 Cell::Qty(text) => self.paint_number(painter, self.qty_x, text),
@@ -269,6 +274,7 @@ impl RowColumns {
 
     /// Liquidity note first when the plan keeps it, and the side word one tag width right of it.
     fn paint_tag(&self, painter: &egui::Painter, tag: &TagColumn) {
+        let palette = Palette::of(painter.ctx());
         let mut x = self.tag_x;
         if let Some(liquidity) = tag.liquidity.filter(|_| self.plan.has_liquidity) {
             painter.text(
@@ -276,7 +282,7 @@ impl RowColumns {
                 egui::Align2::LEFT_CENTER,
                 liquidity,
                 text_font(),
-                DARK.text_secondary,
+                palette.text_secondary,
             );
             x += self.widths.liquidity;
         }
@@ -285,7 +291,7 @@ impl RowColumns {
             egui::Align2::LEFT_CENTER,
             tag.side,
             mono_font(),
-            DARK.tone(tag.tone),
+            palette.tone(tag.tone),
         );
     }
 
@@ -300,17 +306,18 @@ impl RowColumns {
             egui::Align2::LEFT_CENTER,
             shown,
             mono_font(),
-            DARK.text_secondary,
+            Palette::of(painter.ctx()).text_secondary,
         );
     }
 
     fn paint_number(&self, painter: &egui::Painter, x: f32, text: &str) {
+        let palette = Palette::of(painter.ctx());
         painter.text(
             egui::pos2(x, self.y),
             egui::Align2::RIGHT_CENTER,
             text,
             mono_font(),
-            DARK.text_primary,
+            palette.text_primary,
         );
     }
 
@@ -318,12 +325,13 @@ impl RowColumns {
         if !self.plan.has_fee {
             return;
         }
+        let palette = Palette::of(painter.ctx());
         painter.text(
             egui::pos2(self.fee_x, self.y),
             egui::Align2::RIGHT_CENTER,
             text,
             mono_font(),
-            DARK.text_secondary,
+            palette.text_secondary,
         );
     }
 }

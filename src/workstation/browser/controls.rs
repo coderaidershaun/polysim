@@ -4,7 +4,7 @@
 
 use eframe::egui;
 
-use super::theme::{self, DARK, METRICS};
+use super::theme::{self, METRICS, Palette};
 
 /// A dropdown that fills `rect`. The popup's rows are as tall as the cell, so a cell sized as a
 /// touch target gets touch-sized rows too, and the popup is tall enough to show all `row_count`
@@ -40,7 +40,8 @@ pub(crate) fn paint_dropdown(
         .max_rect(rect)
         .layout(egui::Layout::left_to_right(egui::Align::Center));
     ui.scope_builder(builder, |ui| {
-        style_combo(ui.style_mut(), height);
+        let palette = Palette::of(ui.ctx());
+        style_combo(ui.style_mut(), height, palette);
         egui::ComboBox::from_id_salt(id_salt)
             .width(rect.width())
             .height(rows_height)
@@ -51,7 +52,7 @@ pub(crate) fn paint_dropdown(
     });
 }
 
-fn style_combo(style: &mut egui::Style, height: f32) {
+fn style_combo(style: &mut egui::Style, height: f32, palette: &Palette) {
     style.spacing.interact_size.y = height;
     let widgets = &mut style.visuals.widgets;
     for state in [
@@ -63,10 +64,10 @@ fn style_combo(style: &mut egui::Style, height: f32) {
         state.bg_stroke = egui::Stroke::NONE;
         state.corner_radius = egui::CornerRadius::ZERO;
     }
-    widgets.inactive.weak_bg_fill = DARK.panel_raised;
-    widgets.hovered.weak_bg_fill = DARK.panel;
-    widgets.active.weak_bg_fill = DARK.panel;
-    widgets.open.weak_bg_fill = DARK.panel;
+    widgets.inactive.weak_bg_fill = palette.panel_raised;
+    widgets.hovered.weak_bg_fill = palette.panel;
+    widgets.active.weak_bg_fill = palette.panel;
+    widgets.open.weak_bg_fill = palette.panel;
 }
 
 pub(crate) fn paint_segmented_toggle<T: Copy + PartialEq>(
@@ -76,8 +77,9 @@ pub(crate) fn paint_segmented_toggle<T: Copy + PartialEq>(
     segments: &[(T, &str)],
     current: T,
 ) -> Option<T> {
+    let palette = Palette::of(ui.ctx());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, DARK.panel);
+    painter.rect_filled(rect, 0.0, palette.panel);
 
     let mut clicked = None;
     let cell_width = rect.width() / segments.len() as f32;
@@ -92,14 +94,14 @@ pub(crate) fn paint_segmented_toggle<T: Copy + PartialEq>(
         if active {
             fill_selected(&painter, cell);
         } else if response.hovered() {
-            painter.rect_filled(cell, 0.0, DARK.panel_raised);
+            painter.rect_filled(cell, 0.0, palette.panel_raised);
         }
         painter.text(
             cell.center(),
             egui::Align2::CENTER_CENTER,
             *label,
             egui::FontId::proportional(METRICS.segment_font),
-            if active { DARK.text_primary } else { DARK.text_secondary },
+            if active { palette.text_primary } else { palette.text_secondary },
         );
         if index > 0 {
             theme::rules_v(&painter, [cell.left()], rect.y_range());
@@ -131,8 +133,9 @@ pub(crate) fn paint_stepper(
     id_salt: &str,
     spec: StepperSpec<'_>,
 ) -> Option<usize> {
+    let palette = Palette::of(ui.ctx());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, DARK.panel);
+    painter.rect_filled(rect, 0.0, palette.panel);
 
     let step_width = rect.height();
     let track = rect
@@ -168,13 +171,14 @@ fn paint_track(
     id_salt: &str,
     spec: &StepperSpec<'_>,
 ) -> Option<usize> {
+    let palette = Palette::of(ui.ctx());
     let response = ui.interact(
         track,
         egui::Id::new((id_salt, "track")),
         egui::Sense::click_and_drag(),
     );
     if response.hovered() {
-        painter.rect_filled(track, 0.0, DARK.panel_raised);
+        painter.rect_filled(track, 0.0, palette.panel_raised);
     }
 
     let span = spec.max.saturating_sub(spec.min).max(1) as f32;
@@ -193,9 +197,10 @@ fn paint_track(
 /// asked for, then what the consumer can actually give. The value is the load-bearing half, so a track too narrow for both drops the
 /// label rather than painting them through each other.
 fn paint_readout(painter: &egui::Painter, track: egui::Rect, spec: &StepperSpec<'_>) {
+    let palette = Palette::of(painter.ctx());
     let font = egui::FontId::proportional(METRICS.segment_font);
-    let value = painter.layout_no_wrap(spec.value.to_string(), font.clone(), DARK.text_primary);
-    let label = painter.layout_no_wrap(spec.label.to_owned(), font, DARK.text_secondary);
+    let value = painter.layout_no_wrap(spec.value.to_string(), font.clone(), palette.text_primary);
+    let label = painter.layout_no_wrap(spec.label.to_owned(), font, palette.text_secondary);
 
     let pad = METRICS.space_1;
     let mut left = track.right() - pad - value.size().x;
@@ -203,14 +208,14 @@ fn paint_readout(painter: &egui::Painter, track: egui::Rect, spec: &StepperSpec<
         let capped = painter.layout_no_wrap(
             format!("({})", spec.capped_to),
             egui::FontId::proportional(METRICS.segment_font - 2.0),
-            DARK.warning,
+            palette.warning,
         );
         left -= capped.size().x + pad;
         let top = track.center().y - capped.size().y / 2.0;
         painter.galley(
             egui::pos2(track.right() - pad - capped.size().x, top),
             capped,
-            DARK.warning,
+            palette.warning,
         );
     }
 
@@ -219,11 +224,11 @@ fn paint_readout(painter: &egui::Painter, track: egui::Rect, spec: &StepperSpec<
         painter.galley(
             egui::pos2(track.left() + pad, top),
             label,
-            DARK.text_secondary,
+            palette.text_secondary,
         );
     }
     let top = track.center().y - value.size().y / 2.0;
-    painter.galley(egui::pos2(left, top), value, DARK.text_primary);
+    painter.galley(egui::pos2(left, top), value, palette.text_primary);
 }
 
 fn paint_step(
@@ -233,16 +238,17 @@ fn paint_step(
     id_salt: (&str, &str),
     glyph: &str,
 ) -> bool {
+    let palette = Palette::of(ui.ctx());
     let response = ui.interact(cell, egui::Id::new(id_salt), egui::Sense::click());
     if response.hovered() {
-        painter.rect_filled(cell, 0.0, DARK.panel_raised);
+        painter.rect_filled(cell, 0.0, palette.panel_raised);
     }
     painter.text(
         cell.center(),
         egui::Align2::CENTER_CENTER,
         glyph,
         egui::FontId::proportional(METRICS.segment_font),
-        DARK.text_primary,
+        palette.text_primary,
     );
     response.clicked()
 }
@@ -250,16 +256,18 @@ fn paint_step(
 /// A fill plus a bar along the cell's bottom edge. It is the only way the page marks a selected
 /// cell.
 pub(crate) fn fill_selected(painter: &egui::Painter, cell: egui::Rect) {
-    painter.rect_filled(cell, 0.0, DARK.selected.gamma_multiply(0.28));
+    let palette = Palette::of(painter.ctx());
+    painter.rect_filled(cell, 0.0, palette.selected.gamma_multiply(0.28));
     let accent = cell.with_min_y(cell.bottom() - METRICS.accent_thickness);
-    painter.rect_filled(accent, 0.0, DARK.selected);
+    painter.rect_filled(accent, 0.0, palette.selected);
 }
 
 fn enclose(painter: &egui::Painter, rect: egui::Rect) {
+    let palette = Palette::of(painter.ctx());
     painter.rect_stroke(
         rect,
         0.0,
-        theme::hairline(painter, DARK.border),
+        theme::hairline(painter, palette.border),
         egui::StrokeKind::Inside,
     );
 }

@@ -14,6 +14,7 @@ const PANE_HEADER_HEIGHT: f32 = 30.0;
 
 const MODE_WIDTH: f32 = 60.0;
 const HALT_WIDTH: f32 = 72.0;
+const SCHEME_WIDTH: f32 = 40.0;
 const PICKER_WIDTH: f32 = 220.0;
 const SWITCHER_WIDTH: f32 = 256.0;
 const STRATEGY_MIN_WIDTH: f32 = 64.0;
@@ -89,10 +90,11 @@ pub struct Pane {
     pub body: Area,
 }
 
-/// The slots run left to right: picker, switcher, strategy id, then the badges. On a short bar the
-/// strategy id gives way first and its room goes to the picker, then the picker shrinks, and the
-/// badges never give way. Below 320 points the badges keep their width first and the picker gets
-/// what is left, so no slot overlaps another or turns negative.
+/// The slots run left to right: picker, switcher, strategy id, scheme switch, then the badges. On a
+/// short bar the strategy id gives way first and its room goes to the picker, then the picker
+/// shrinks. The badges never give way, and the scheme switch gives way only to them. Below 320
+/// points the badges keep their width first, then the scheme switch, and the picker gets what is
+/// left, so no slot overlaps another or turns negative.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TopBar {
     pub area: Area,
@@ -102,6 +104,7 @@ pub struct TopBar {
     pub switcher: Option<Area>,
     /// Absent when less than a readable slice is left for it.
     pub strategy: Option<Area>,
+    pub scheme: Area,
     /// Present exactly while the halt latch is set.
     pub halt: Option<Area>,
     pub mode: Area,
@@ -114,6 +117,7 @@ impl TopBar {
         let halt = halt
             .is_some_and(ExecHalt::is_halted)
             .then(|| room.cut_right(HALT_WIDTH));
+        let scheme = room.cut_right(SCHEME_WIDTH);
         let switcher_width = (class == SizeClass::Medium).then(|| SWITCHER_WIDTH.min(room.width));
         let reserved = switcher_width.unwrap_or(0.0);
         let has_strategy = room.width - PICKER_WIDTH - reserved >= STRATEGY_MIN_WIDTH;
@@ -128,6 +132,7 @@ impl TopBar {
             picker,
             switcher,
             strategy,
+            scheme,
             halt,
             mode,
         }

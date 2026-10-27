@@ -9,7 +9,7 @@ use eframe::egui::{self, emath::GuiRounding};
 use crate::link::RunState;
 use crate::time::DurationUs;
 
-use super::theme::{self, DARK};
+use super::theme::{self, Palette};
 use crate::workstation::link_model::LinkStatus;
 use crate::workstation::link_view::{ChipKind, LEFT_PAD, LinkBarLayout, RunConfirm};
 use crate::workstation::text::{self, Tone};
@@ -59,8 +59,9 @@ pub fn paint_with_confirm(
     frame: &LinkBarFrame,
     confirm: &mut RunConfirm,
 ) -> LinkAction {
+    let palette = Palette::of(ui.ctx());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, DARK.panel_raised);
+    painter.rect_filled(rect, 0.0, palette.panel_raised);
     let action = match frame.status {
         Some(status) => Strip::measure(ui, rect, status).paint(ui, frame.ui_time, confirm),
         None => {
@@ -91,6 +92,7 @@ fn column_advance(ui: &egui::Ui) -> f32 {
 }
 
 fn paint_no_engine(ui: &egui::Ui, painter: &egui::Painter, rect: egui::Rect) {
+    let palette = Palette::of(ui.ctx());
     let left = rect.left() + LEFT_PAD as f32 * column_advance(ui);
     theme::text_at(
         painter,
@@ -98,7 +100,7 @@ fn paint_no_engine(ui: &egui::Ui, painter: &egui::Painter, rect: egui::Rect) {
         egui::Align2::LEFT_CENTER,
         text::NO_ENGINE,
         font(),
-        DARK.text_secondary,
+        palette.text_secondary,
     );
 }
 
@@ -145,6 +147,7 @@ impl<'a> Strip<'a> {
     }
 
     fn paint_chips(&self, ui: &egui::Ui) {
+        let palette = Palette::of(ui.ctx());
         let painter = ui.painter_at(self.rect.with_max_x(self.button().left()));
         for chip in &self.layout.chips {
             theme::text_at(
@@ -153,7 +156,7 @@ impl<'a> Strip<'a> {
                 egui::Align2::LEFT_CENTER,
                 &chip.text,
                 font(),
-                DARK.tone(chip.tone),
+                palette.tone(chip.tone),
             );
         }
     }
@@ -164,20 +167,21 @@ impl<'a> Strip<'a> {
         ui_time: DurationUs,
         confirm: &mut RunConfirm,
     ) -> LinkAction {
+        let palette = Palette::of(ui.ctx());
         let button = self.button();
         let response = ui.interact(button, ui.id().with(RUN_BUTTON_KEY), egui::Sense::click());
         let sent = if response.clicked() { confirm.press(self.status, ui_time) } else { None };
         let target = self.status.next_assertion();
         let time_left = confirm.refresh(self.status, ui_time);
         let (label, color) = match time_left {
-            Some(_) => (text::confirm_label(target), DARK.tone(Tone::Warning)),
-            None => (text::button_label(target), DARK.text_primary),
+            Some(_) => (text::confirm_label(target), palette.tone(Tone::Warning)),
+            None => (text::button_label(target), palette.text_primary),
         };
         let painter = ui.painter_at(button);
         painter.rect_filled(
             button,
             0.0,
-            if response.hovered() { DARK.panel } else { DARK.panel_raised },
+            if response.hovered() { palette.panel } else { palette.panel_raised },
         );
         // Half a physical pixel inside the edge, so the rule lands on the button's first column of
         // pixels and is never clipped away.
@@ -222,17 +226,18 @@ impl<'a> Strip<'a> {
             .interact(hit, ui.id().with(PEER_CHIP_KEY), egui::Sense::click())
             .on_hover_text(text::PEER_HOVER);
         if response.hovered() {
+            let palette = Palette::of(ui.ctx());
             // The chips were painted before this fill, so paint the label again on top of it. No
             // accent bar: that bar means selected, and this chip can only be hovered.
             let painter = ui.painter_at(hit);
-            painter.rect_filled(hit, 0.0, DARK.panel);
+            painter.rect_filled(hit, 0.0, palette.panel);
             theme::text_at(
                 &painter,
                 egui::pos2(self.x_at(peer.column), hit.center().y),
                 egui::Align2::LEFT_CENTER,
                 &peer.text,
                 font(),
-                DARK.text_primary,
+                palette.text_primary,
             );
         }
         if response.clicked() { LinkAction::NextPeer } else { LinkAction::None }

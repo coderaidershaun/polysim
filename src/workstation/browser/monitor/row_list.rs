@@ -4,7 +4,7 @@
 use eframe::egui;
 
 use super::pin::Pins;
-use crate::workstation::browser::theme::{DARK, METRICS};
+use crate::workstation::browser::theme::{METRICS, Palette};
 use crate::workstation::monitor::view::MonitorDetail;
 
 /// One scrolling band of rows, each with a record that shows on hover and pins on a tap, and a note
@@ -73,11 +73,12 @@ pub(super) fn paint_row_list<S: egui::AsIdSalt>(
 
 /// An empty band says so in a muted note, rather than showing a made-up row.
 fn paint_empty_note(painter: &egui::Painter, rect: egui::Rect, note: &str) {
+    let palette = Palette::of(painter.ctx());
     painter.text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         note,
         egui::FontId::proportional(METRICS.monitor_channel_font),
-        DARK.text_secondary,
+        palette.text_secondary,
     );
 }

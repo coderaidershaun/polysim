@@ -15,7 +15,7 @@ use web_sys::wasm_bindgen::closure::Closure;
 use super::layout;
 use super::link_bar::{self, LinkAction};
 use super::socket::{Frame, LinkSocket};
-use super::theme::{DARK, METRICS, clear_color};
+use super::theme::{METRICS, Palette, clear_color};
 use super::touch;
 use crate::config::{ConfigError, StrategyId};
 use crate::hot::exec::ExecHalt;
@@ -254,7 +254,7 @@ impl Station {
     fn paint(&mut self, ui: &mut egui::Ui) -> LinkAction {
         let mut link_action = LinkAction::None;
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(DARK.canvas))
+            .frame(egui::Frame::new().fill(Palette::of(ui.ctx()).canvas))
             .show(ui, |ui| {
                 let canvas = ui.available_rect_before_wrap();
                 let arrangement = Arrangement::new(canvas.into(), &self.navigation, self.halt());
@@ -414,8 +414,8 @@ impl eframe::App for WorkstationApp {
         touch::announce_touch_screen(ctx, raw_input);
     }
 
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        clear_color()
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        clear_color(visuals)
     }
 }
 
@@ -431,7 +431,8 @@ fn fit_zoom(ctx: &egui::Context) {
 /// Fills its area while no workstation is live. It shows words only, never made-up numbers.
 fn paint_screen(ui: &mut egui::Ui, screen_text: &ScreenText) {
     let full = ui.available_rect_before_wrap();
-    ui.painter().rect_filled(full, 0.0, DARK.canvas);
+    let palette = Palette::of(ui.ctx());
+    ui.painter().rect_filled(full, 0.0, palette.canvas);
     ui.scope_builder(
         egui::UiBuilder::new()
             .max_rect(full)
@@ -440,14 +441,14 @@ fn paint_screen(ui: &mut egui::Ui, screen_text: &ScreenText) {
             ui.add_space(full.height() * 0.40);
             ui.label(
                 egui::RichText::new(screen_text.title)
-                    .color(DARK.tone(screen_text.title_tone))
+                    .color(palette.tone(screen_text.title_tone))
                     .monospace()
                     .size(22.0),
             );
             ui.add_space(METRICS.space_2);
             ui.label(
                 egui::RichText::new(screen_text.detail)
-                    .color(DARK.tone(screen_text.detail_tone))
+                    .color(palette.tone(screen_text.detail_tone))
                     .monospace(),
             );
         },

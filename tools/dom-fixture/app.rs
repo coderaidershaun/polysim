@@ -8,7 +8,7 @@ use polysim::workstation::browser::chart::stack::{self, ChartStackFrame};
 use polysim::workstation::browser::dom::{DomFrame, ladder};
 use polysim::workstation::browser::latency::{self, LatencyFrame};
 use polysim::workstation::browser::monitor::bands;
-use polysim::workstation::browser::{announce_touch_screen, chrome};
+use polysim::workstation::browser::{Palette, announce_touch_screen, chrome};
 use polysim::workstation::chart::position_view::RiskSeries;
 use polysim::workstation::chart::view::ChartMode;
 use polysim::workstation::dom_view::{DEFAULT_ROWS_PER_SIDE, DomOverlay};
@@ -25,11 +25,6 @@ use crate::position_scenes::{PositionScene, position_scenes};
 use crate::scenes::{Scene, scenes};
 use crate::shell_scene::{self, ShellScene};
 use crate::{LeftPanel, query};
-
-// SMELL: this colour, like the HUD's text colour, repeats one from the workstation's palette, which
-// the library keeps private, so a palette change leaves the fixture's background and the HUD's text
-// behind.
-const CANVAS: egui::Color32 = egui::Color32::from_rgb(10, 13, 18);
 
 /// The panes that report a fit readout. The ladder has none.
 const READOUT_VIEWS: [View; 2] = [View::Chart, View::Monitor];
@@ -226,7 +221,8 @@ impl DomFixture {
     /// band. The band keeps a row for each pane that reports a fit, and fills them last.
     fn paint_page(&mut self, ui: &mut egui::Ui) {
         let full = ui.available_rect_before_wrap();
-        ui.painter_at(full).rect_filled(full, 0.0, CANVAS);
+        ui.painter_at(full)
+            .rect_filled(full, 0.0, Palette::of(ui.ctx()).canvas);
 
         // The size class and the shown view depend on the width and the selection alone, so an
         // arrangement of the whole canvas can name them before the band's height is known. A key

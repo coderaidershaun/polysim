@@ -12,7 +12,7 @@ use crate::ids::{InstrumentId, Price};
 use super::mid::PlotGeometry;
 use super::pin::{CrosshairPin, Touch};
 use super::risk::PositionPlot;
-use crate::workstation::browser::theme::{self, DARK, METRICS};
+use crate::workstation::browser::theme::{self, METRICS, Palette};
 use crate::workstation::browser::touch::PaneClick;
 use crate::workstation::chart::model::{ChartModel, bucket_open_ts};
 use crate::workstation::chart::position_model::PositionModel;
@@ -183,7 +183,8 @@ fn is_on_plot(frame: &CrosshairFrame<'_>, pos: egui::Pos2) -> bool {
 }
 
 fn paint_hairline(painter: &egui::Painter, frame: &CrosshairFrame<'_>, bucket: u64) {
-    let stroke = theme::hairline(painter, DARK.grid);
+    let palette = Palette::of(painter.ctx());
+    let stroke = theme::hairline(painter, palette.grid);
     let mid = frame.mid.map(|mid| (mid.x(bucket), mid.rect.y_range()));
     let lower = frame
         .lower
@@ -196,6 +197,7 @@ fn paint_hairline(painter: &egui::Painter, frame: &CrosshairFrame<'_>, bucket: u
 /// One pill per plot. The bucket's time goes in the mid chart's pill, or in the risk chart's when
 /// there is no mid chart.
 fn paint_pills(painter: &egui::Painter, frame: &CrosshairFrame<'_>, bucket: u64) {
+    let palette = Palette::of(painter.ctx());
     let time = bucket_open_ts(bucket, frame.chart.spin_interval())
         .map(|at| format::render(|out| format::write_time_of_day(out, at)));
 
@@ -204,10 +206,10 @@ fn paint_pills(painter: &egui::Painter, frame: &CrosshairFrame<'_>, bucket: u64)
         let mut anchor = egui::pos2(mid.x(bucket), mid.rect.top());
         if let Some(close) = mid_close(frame, bucket) {
             let price = format::render(|out| format::write_venue_mid(out, close, frame.tick));
-            lines.push((price, DARK.text_primary));
+            lines.push((price, palette.text_primary));
             anchor = mid.point(bucket, close);
         }
-        lines.extend(time.clone().map(|time| (time, DARK.text_secondary)));
+        lines.extend(time.clone().map(|time| (time, palette.text_secondary)));
         paint_pill(painter, mid.rect, anchor, lines);
     }
     if let Some(lower) = frame.lower
@@ -216,9 +218,9 @@ fn paint_pills(painter: &egui::Painter, frame: &CrosshairFrame<'_>, bucket: u64)
         let readout = format::render(|out| {
             format::write_quote_amount(out, value, RiskSeries::READOUT_DECIMALS);
         });
-        let mut lines = vec![(readout, DARK.text_primary)];
+        let mut lines = vec![(readout, palette.text_primary)];
         if frame.mid.is_none() {
-            lines.extend(time.map(|time| (time, DARK.text_secondary)));
+            lines.extend(time.map(|time| (time, palette.text_secondary)));
         }
         paint_pill(painter, lower.rect, lower.point(bucket, value), lines);
     }
@@ -233,6 +235,7 @@ fn paint_pill(
     anchor: egui::Pos2,
     lines: Vec<(String, egui::Color32)>,
 ) {
+    let palette = Palette::of(painter.ctx());
     let font = egui::FontId::monospace(METRICS.chart_axis_font);
     let mut galleys: Vec<Arc<egui::Galley>> = lines
         .into_iter()
@@ -257,14 +260,14 @@ fn paint_pill(
     let top_left = egui::pos2(left, anchor.y - PILL_PAD.y - first.size().y / 2.0);
     let pill = theme::clamp_rect(plot, egui::Rect::from_min_size(top_left, size));
 
-    theme::fill_pill(painter, pill, DARK.border);
+    theme::fill_pill(painter, pill, palette.border);
     let mut y = pill.top() + PILL_PAD.y;
     for galley in galleys {
         let line_height = galley.size().y;
         painter.galley(
             egui::pos2(pill.left() + PILL_PAD.x, y),
             galley,
-            DARK.text_primary,
+            palette.text_primary,
         );
         y += line_height;
     }

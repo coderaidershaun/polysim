@@ -9,7 +9,7 @@ use super::row_list::{RowList, paint_row_list};
 use super::sizes::{self, FEATURE_ROW_SPACING};
 use super::{account, channels, summary};
 use crate::msg::persist::FeatureId;
-use crate::workstation::browser::theme::{self, DARK, METRICS};
+use crate::workstation::browser::theme::{self, METRICS, Palette};
 use crate::workstation::monitor::fit::{BandHeights, fit_bands};
 use crate::workstation::monitor::view::{
     FeatureRowView, MonitorDetail, MonitorFrame, MonitorUiState, feature_rows,
@@ -23,11 +23,12 @@ pub fn paint(
     frame: &MonitorFrame<'_>,
     state: &mut MonitorUiState,
 ) {
+    let palette = Palette::of(ui.ctx());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, DARK.panel);
+    painter.rect_filled(rect, 0.0, palette.panel);
 
     let (strip, viewport) = sizes::split_status(rect);
-    painter.rect_filled(strip, 0.0, DARK.panel_raised);
+    painter.rect_filled(strip, 0.0, palette.panel_raised);
     account::paint_status(ui, strip, frame);
 
     let heights = fit_bands(
@@ -104,9 +105,10 @@ impl Bands {
         state: &mut MonitorUiState,
         pins: &mut Pins,
     ) {
+        let palette = Palette::of(ui.ctx());
         let painter = ui.painter().clone();
         for raised in [self.account, self.summary, self.tabs] {
-            painter.rect_filled(raised, 0.0, DARK.panel_raised);
+            painter.rect_filled(raised, 0.0, palette.panel_raised);
         }
 
         account::paint(ui, self.account, frame);
@@ -164,6 +166,7 @@ fn paint_feature_row(
     names: &[Box<str>],
     scratch: &mut String,
 ) {
+    let palette = Palette::of(painter.ctx());
     if row.changed {
         // A thin bar on the left marks a change without flashing the whole row.
         let width = METRICS.accent_thickness;
@@ -171,16 +174,16 @@ fn paint_feature_row(
             egui::pos2(rect.left(), rect.top() + width),
             egui::pos2(rect.left() + width, rect.bottom() - width),
         );
-        painter.rect_filled(bar, 0.0, DARK.selected);
+        painter.rect_filled(bar, 0.0, palette.selected);
     }
 
     let (name_color, value_color) = if row.stale {
         (
-            DARK.text_secondary.gamma_multiply(0.65),
-            DARK.text_secondary,
+            palette.text_secondary.gamma_multiply(0.65),
+            palette.text_secondary,
         )
     } else {
-        (DARK.text_secondary, DARK.text_primary)
+        (palette.text_secondary, palette.text_primary)
     };
 
     // Room for the widest value, a long negative with four decimals, so a name never runs into it.
@@ -203,6 +206,6 @@ fn paint_feature_row(
         egui::Align2::RIGHT_CENTER,
         scratch.as_str(),
         egui::FontId::monospace(METRICS.monitor_feature_font),
-        if row.value.is_some() { value_color } else { DARK.text_secondary },
+        if row.value.is_some() { value_color } else { palette.text_secondary },
     );
 }

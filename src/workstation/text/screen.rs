@@ -1,5 +1,6 @@
-//! The words on the starting screen and in the top bar: the view names and the two safety badges.
-//! The starting screen shows no numbers, because there are none yet.
+//! The words on the starting screen and in the top bar: the view names, the two safety badges and
+//! the scheme switch's hover words. The starting screen shows no numbers, because there are none
+//! yet.
 
 use crate::config::ExecutionMode;
 use crate::workstation::shell::{Selection, View};
@@ -32,6 +33,10 @@ pub(crate) fn execution_badge(mode: Option<ExecutionMode>) -> (&'static str, Ton
     };
     (ExecutionMode::badge(mode), tone)
 }
+
+pub(crate) const TO_LIGHT_HOVER: &str = "Switch to light mode";
+
+pub(crate) const TO_DARK_HOVER: &str = "Switch to dark mode";
 
 pub(crate) const HALT_WORD: &str = "HALTED";
 

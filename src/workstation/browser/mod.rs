@@ -1,6 +1,8 @@
 //! The workstation in the browser: egui painters over the toolkit-free workstation, and the socket
 //! that feeds them. Trunk builds the page and `polysim-web` serves it.
 
+// SMELL: thirteen modules sit flat here, too many to scan at a glance. Group the ones that only one
+// module uses, such as the socket and the layout, under a subfolder.
 mod app;
 pub mod chart;
 pub mod chrome;
@@ -10,6 +12,7 @@ pub mod latency;
 mod layout;
 pub mod link_bar;
 pub mod monitor;
+mod scheme;
 mod socket;
 mod theme;
 mod touch;
@@ -21,21 +24,20 @@ use web_sys::{AddEventListenerOptions, Document, HtmlCanvasElement};
 
 use crate::error;
 use app::WorkstationApp;
+pub use theme::Palette;
 pub use touch::announce_touch_screen;
 
 /// The page must hold a canvas with id `workstation`.
 pub fn start() {
     start_in_canvas(
         "workstation",
-        Box::new(|creation| {
-            theme::install_style(&creation.egui_ctx);
-            Ok(Box::new(WorkstationApp::start(creation.egui_ctx.clone())?))
-        }),
+        Box::new(|creation| Ok(Box::new(WorkstationApp::start(creation.egui_ctx.clone())?))),
     );
 }
 
 /// Runs the app `creator` builds on the canvas with id `canvas_id`. Nothing waits on the result,
-/// so a failure goes to the console.
+/// so a failure goes to the console. Before `creator` runs, it installs the workstation's style in
+/// the dark or light scheme that the browser kept.
 pub fn start_in_canvas(canvas_id: &str, creator: AppCreator<'static>) {
     let Some(document) = web_sys::window().and_then(|window| window.document()) else {
         error!("this page has no document");
@@ -46,6 +48,10 @@ pub fn start_in_canvas(canvas_id: &str, creator: AppCreator<'static>) {
         return;
     };
     let canvas_id = canvas_id.to_owned();
+    let creator: AppCreator<'static> = Box::new(move |creation| {
+        theme::install(&creation.egui_ctx, scheme::stored());
+        creator(creation)
+    });
     run_when_visible(&document, move || {
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(error) = WebRunner::new()
