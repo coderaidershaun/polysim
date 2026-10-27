@@ -33,6 +33,9 @@ strategy:
     quote_stop_lead_ms: 3500
 persistence:
   dir: ./data
+  # Parquet files older than this many hours are deleted while the engine runs.
+  # That includes files left by earlier runs.
+  retention_hours: 6
 execution:
   # Ships disarmed. Polymarket has no simulator — off or live, nothing between.
   mode: off # live, off

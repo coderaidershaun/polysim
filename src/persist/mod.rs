@@ -2,10 +2,12 @@
 //! for shutdown, and a truncated file is an error rather than a silently short table.
 
 mod drain;
+mod retention;
 mod schema;
 mod table;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::config::{ExecutionMode, RecordedTables, StrategyId, TradingEngineId};
 
@@ -15,6 +17,9 @@ pub use drain::{PersistHandle, PersistWriter};
 pub struct PersistConfig {
     pub dir: PathBuf,
     pub tables: RecordedTables,
+    /// A file is deleted once it is older than this. Its age comes from its modified time on the
+    /// wall clock, not from the event times inside it.
+    pub retention: Duration,
 }
 
 #[derive(Debug, Clone)]

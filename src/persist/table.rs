@@ -23,6 +23,9 @@ const ROWS_PER_SEAL: u64 = 10_000;
 const ZSTD_LEVEL: i32 = 3;
 const US_PER_HOUR: i64 = 3_600_000_000;
 
+pub(super) const DATE_FOLDER_PREFIX: &str = "date=";
+pub(super) const FILE_EXTENSION: &str = "parquet";
+
 struct OpenFile {
     writer: ArrowWriter<File>,
     hour_bucket: i64,
@@ -178,9 +181,12 @@ impl<R: TableRow> TableWriter<R> {
         let at = TsUs::from_micros(hour_bucket * US_PER_HOUR).civil();
         let mut path = self.run_dir.clone();
         path.push(R::NAME);
-        path.push(format!("date={:04}-{:02}-{:02}", at.year, at.month, at.day));
         path.push(format!(
-            "{:02}-{}-{sequence:06}.parquet",
+            "{DATE_FOLDER_PREFIX}{:04}-{:02}-{:02}",
+            at.year, at.month, at.day
+        ));
+        path.push(format!(
+            "{:02}-{}-{sequence:06}.{FILE_EXTENSION}",
             at.hour, self.boot_ts_us
         ));
         path

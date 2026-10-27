@@ -223,13 +223,14 @@ fn persistence_is_optional_and_naming_tables_without_it_is_rejected() {
     let with_block: polysim::config::Config =
         polysim::config::Config::from_yaml(&config_with_source(BINANCE_PERP_SOURCE))
             .expect("a persistence block still parses");
+    let persistence = with_block
+        .persistence
+        .as_ref()
+        .expect("the block is present");
+    assert_eq!(persistence.dir, Path::new("./data"));
     assert_eq!(
-        with_block
-            .persistence
-            .as_ref()
-            .expect("the block is present")
-            .dir,
-        Path::new("./data")
+        persistence.retention_hours, 6,
+        "an omitted retention_hours keeps six hours of research data"
     );
 }
 
@@ -254,7 +255,7 @@ source:
         + "strategy:\n  instruments: all\npersistence:\n  dir: ./data\nlogging:\n  dir: ./logs\n";
 
     type RejectionCase = (&'static str, String, fn(&ConfigError) -> bool);
-    let cases: [RejectionCase; 7] = [
+    let cases: [RejectionCase; 9] = [
         (
             "omitted spin_interval_us",
             missing_spin,
@@ -342,6 +343,26 @@ source:
                 matches!(error, ConfigError::Invalid { field, value, .. }
                     if *field == "source.tracker.volume_bars.threshold"
                         && value.as_ref() == "klines")
+            },
+        ),
+        (
+            "retention_hours of zero",
+            config_with_source(BINANCE_PERP_SOURCE)
+                .replace("  dir: ./data\n", "  dir: ./data\n  retention_hours: 0\n"),
+            |error: &ConfigError| {
+                matches!(error, ConfigError::Invalid { field, value, .. }
+                    if *field == "persistence.retention_hours" && value.as_ref() == "0")
+            },
+        ),
+        (
+            "retention_hours past ten years",
+            config_with_source(BINANCE_PERP_SOURCE).replace(
+                "  dir: ./data\n",
+                "  dir: ./data\n  retention_hours: 87601\n",
+            ),
+            |error: &ConfigError| {
+                matches!(error, ConfigError::Invalid { field, value, .. }
+                    if *field == "persistence.retention_hours" && value.as_ref() == "87601")
             },
         ),
     ];

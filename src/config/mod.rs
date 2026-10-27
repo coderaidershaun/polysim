@@ -132,6 +132,14 @@ impl<P: serde::de::DeserializeOwned + Default> Config<P> {
             1..=u64::MAX,
             "greater than 0",
         )?;
+        if let Some(persistence) = &self.persistence {
+            check_range(
+                "persistence.retention_hours",
+                persistence.retention_hours,
+                1..=87_600,
+                "1..=87600 (1 hour to 10 years)",
+            )?;
+        }
         self.source.validate()?;
         if let Some(link) = &self.link {
             link.validate()?;
@@ -241,6 +249,8 @@ pub struct NoParams {}
 pub struct PersistenceConfig {
     #[serde(default = "default_data_dir")]
     pub dir: PathBuf,
+    #[serde(default = "default_retention_hours")]
+    pub retention_hours: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -348,6 +358,10 @@ fn default_persistence_capacity() -> usize {
 
 fn default_data_dir() -> PathBuf {
     PathBuf::from("./data")
+}
+
+fn default_retention_hours() -> u64 {
+    6
 }
 
 fn default_logs_dir() -> PathBuf {

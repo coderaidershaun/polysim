@@ -80,6 +80,7 @@ mod monitor_projection;
 mod parquet_readback;
 mod persist_drain;
 mod persist_exec;
+mod persist_retention;
 mod persist_tables;
 mod poly_discovery;
 mod poly_driver;

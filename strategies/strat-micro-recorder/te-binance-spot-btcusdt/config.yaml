@@ -36,6 +36,9 @@ strategy:
     order_notional: 10
 persistence:
   dir: ./data
+  # Parquet files older than this many hours are deleted while the engine runs.
+  # That includes files left by earlier runs.
+  retention_hours: 6
 execution:
   # Ships disarmed.
   mode: sim # live, sim, off

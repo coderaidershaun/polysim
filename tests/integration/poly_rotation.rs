@@ -121,6 +121,7 @@ async fn poly_rotation_capture_spans_two_rotations_with_zero_gap_handover() {
         PersistConfig {
             dir: output_dir.path().to_path_buf(),
             tables: RecordedTables::new(&[]),
+            retention: Duration::from_hours(6),
         },
         run_meta(&registry),
         persist_consumer,

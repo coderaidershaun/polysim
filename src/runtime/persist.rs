@@ -1,6 +1,8 @@
 //! Persistence setup: the Parquet output ring, the footer metadata that decodes its dense
 //! indices, and the writer thread that drains it.
 
+use std::time::Duration;
+
 use rtrb::RingBuffer;
 use tokio::sync::mpsc;
 
@@ -45,6 +47,7 @@ pub(super) fn persist_bring_up<P>(setup: PersistBringUpSetup<'_, P>) -> PersistB
         PersistConfig {
             dir: persist_config.dir.clone(),
             tables,
+            retention: Duration::from_hours(persist_config.retention_hours),
         },
         run_meta(&setup),
         consumer,

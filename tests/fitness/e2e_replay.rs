@@ -4,6 +4,7 @@
 //! drain-flush completeness, and cross-run determinism.
 
 use std::path::Path;
+use std::time::Duration;
 
 use rtrb::RingBuffer;
 use tokio::sync::mpsc;
@@ -298,6 +299,7 @@ fn run_e2e(dir_root: &Path) -> RunOutcome {
         PersistConfig {
             dir: dir_root.to_path_buf(),
             tables: RecordedTables::new(&ALL_TABLES),
+            retention: Duration::from_hours(6),
         },
         meta,
         persist_consumer,

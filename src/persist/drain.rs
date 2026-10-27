@@ -16,6 +16,7 @@ use crate::msg::persist::{
 use crate::shutdown::WriterThread;
 use crate::time::boot_stamp_us;
 
+use super::retention::Retention;
 use super::schema::{self, TableRow};
 use super::table::TableWriter;
 use super::{PersistConfig, PersistError, RunMeta};
@@ -36,6 +37,7 @@ impl PersistWriter {
         let boot_ts_us = boot_stamp_us().micros();
         let footer = schema::footer_metadata(&meta);
         let run_dir = run_directory(&cfg.dir, &meta);
+        let retention = Retention::new(run_dir.clone(), cfg.retention);
         let writers = TableWriterBuilder {
             tables: cfg.tables,
             run_dir,
@@ -54,6 +56,7 @@ impl PersistWriter {
             rotations: writers.always_written(),
             rotations_rx: rotations,
             unnamed_table_rows: 0,
+            retention,
         };
         let writer = WriterThread::spawn("persist", move |drain| state.run(&drain));
         PersistHandle(writer)
@@ -126,11 +129,13 @@ struct WriterState {
     rotations_rx: mpsc::Receiver<RotationRow>,
     /// Rows for unnamed tables (hot path gates, so counts direct calls only; loud not fatal).
     unnamed_table_rows: u64,
+    retention: Retention,
 }
 
 impl WriterState {
     fn run(mut self, drain: &AtomicBool) -> Result<(), PersistError> {
         crate::log::register_thread("persist");
+        self.retention.announce();
         let pump_result = self.pump(drain);
         // Seal on the failure path too: a stopped pump still owes its healthy tables a footer.
         let seal_result = self.seal_all();
@@ -142,11 +147,13 @@ impl WriterState {
     }
 
     fn pump(&mut self, drain: &AtomicBool) -> Result<(), PersistError> {
+        self.retention.prune();
         let mut last_seal = Instant::now();
         loop {
             let drained_any = self.consume_batch()?;
             if last_seal.elapsed() >= SEAL_INTERVAL {
                 self.seal_all()?;
+                self.retention.prune();
                 last_seal = Instant::now();
             }
             if drain.load(Ordering::Acquire) {
